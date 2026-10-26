@@ -1,0 +1,10 @@
+docs
+*.ehpk
+.env
+.git
+node_modules
+**/__pycache__
+server/.venv
+tests
+web/dist
+web/node_modules

@@ -1,0 +1,29 @@
+services:
+  teleglance:
+    build: .
+    image: teleglance-backend:local
+    container_name: teleglance
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HF_HOME: /models
+    ports:
+      # Bind only to the Tailscale address so the backend is never exposed on the LAN
+      # or internet. Set TAILSCALE_IP in .env (output of `tailscale ip -4`).
+      - "${TAILSCALE_IP:?set TAILSCALE_IP in .env}:8787:8787"
+    volumes:
+      - whisper-models:/models
+
+  # Static frontend, used for Even Hub dev-server sideloading (`evenhub qr`).
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    image: teleglance-web:local
+    container_name: teleglance-web
+    restart: unless-stopped
+    ports:
+      - "${TAILSCALE_IP:?set TAILSCALE_IP in .env}:5173:80"
+
+volumes:
+  whisper-models:
