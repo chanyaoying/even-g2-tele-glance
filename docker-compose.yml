@@ -10,7 +10,7 @@ services:
     ports:
       # Bind only to the Tailscale address so the backend is never exposed on the LAN
       # or internet. Set TAILSCALE_IP in .env (output of `tailscale ip -4`).
-      - "${TAILSCALE_IP:?set TAILSCALE_IP in .env}:8787:8787"
+      - "${TAILSCALE_IP:?set TAILSCALE_IP in .env}:${BACKEND_PORT:-8788}:8787"
     volumes:
       - whisper-models:/models
 
