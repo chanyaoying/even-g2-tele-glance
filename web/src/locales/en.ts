@@ -63,6 +63,7 @@ const en = {
   phoneNewTelegramHeading: 'New Telegram',
   phoneErrorHeading: 'Error',
   phoneVerificationCode: 'Verification code',
+  phoneTwoStepPassword: 'Two-step verification password',
   phoneMobileNumber: 'Mobile number with country code',
   phoneVerifying: 'Verifying...',
   phoneSend: 'Send',

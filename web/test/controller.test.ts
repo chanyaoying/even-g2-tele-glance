@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { TelegramAppController, type GlassesBridge } from '../src/controller/appController'
 import type { TelegramApi } from '../src/api'
+import { MAX_RECORDING_BYTES } from '../src/audio/wav'
 import type { Chat, Message, Topic, TranscriptionResult } from '../src/types'
 import { screenModel } from '../src/controller/model'
 import type { AppState, ScreenModel } from '../src/controller/model'
@@ -1245,6 +1246,40 @@ describe('TelegramAppController', () => {
     expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'messages' })
   })
 
+  it('keeps the forum topic when a recording yields an empty transcript', async () => {
+    const api = fakeApi({ authorized: true, transcription: { text: '' } })
+    const controller = new TelegramAppController(api, fakeBridge(), 0)
+
+    await controller.init()
+    await controller.dispatch({ type: 'swipeDown' })
+    await controller.dispatch({ type: 'press' })
+    await controller.dispatch({ type: 'press' })
+    await flushAsync()
+    expect(controller.snapshot).toMatchObject({ screen: 'sidebar', topic: topics[0] })
+
+    await controller.dispatch({ type: 'press' })
+    await controller.dispatch({ type: 'audioChunk', pcm: speechLikePcm() })
+    await controller.dispatch({ type: 'press' })
+
+    expect(api.transcribe).toHaveBeenCalledOnce()
+    expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'messages', topic: topics[0] })
+  })
+
+  it('stops collecting audio after the maximum recording length', async () => {
+    const api = fakeApi({ authorized: true })
+    const controller = new TelegramAppController(api, fakeBridge(), 0)
+
+    await controller.init()
+    await controller.dispatch({ type: 'press' })
+    await controller.dispatch({ type: 'press' })
+    const chunk = new Uint8Array(MAX_RECORDING_BYTES / 2)
+    await controller.dispatch({ type: 'audioChunk', pcm: chunk })
+    await controller.dispatch({ type: 'audioChunk', pcm: chunk })
+    await controller.dispatch({ type: 'audioChunk', pcm: chunk }) // would exceed the cap: dropped
+    const state = controller.snapshot as { chunks: Uint8Array[] }
+    expect(state.chunks.reduce((sum, c) => sum + c.byteLength, 0)).toBe(MAX_RECORDING_BYTES)
+  })
+
   it('returns to messages without transcribing when audio is too short', async () => {
     // Zero-length audio chunks — the controller skips transcribe and returns
     // directly to the message thread.
@@ -1406,7 +1441,7 @@ describe('TelegramAppController', () => {
     } as AppState
 
     await controller.verifyPhoneLogin('+1234567890', '12345')
-    expect(api.verifyPhoneAuth).toHaveBeenCalledWith('+1234567890', '12345', undefined)
+    expect(api.verifyPhoneAuth).toHaveBeenCalledWith('+1234567890', '12345', undefined, undefined)
   })
 
   it('passes the Telegram phone code hash from start to verify', async () => {
@@ -1421,7 +1456,23 @@ describe('TelegramAppController', () => {
     await controller.startPhoneLogin('+1234567890')
     await controller.verifyPhoneLogin('+1234567890', '12345')
 
-    expect(api.verifyPhoneAuth).toHaveBeenCalledWith('+1234567890', '12345', 'telegram-hash')
+    expect(api.verifyPhoneAuth).toHaveBeenCalledWith('+1234567890', '12345', 'telegram-hash', undefined)
+  })
+
+  it('asks for the two-step password when Telegram requires it', async () => {
+    const api = fakeApi({ authorized: false })
+    vi.mocked(api.verifyPhoneAuth)
+      .mockResolvedValueOnce({ authorized: false, passwordRequired: true, message: 'Two-step verification is enabled.' })
+      .mockResolvedValueOnce({ authorized: true, sessionString: 'sess' })
+    vi.mocked(api.startPhoneAuth).mockResolvedValueOnce({ phone: '+1234567890', sent: true, phoneCodeHash: 'h' })
+    const controller = new TelegramAppController(api, fakeBridge(), {})
+
+    await controller.startPhoneLogin('+1234567890')
+    await controller.verifyPhoneLogin('+1234567890', '12345')
+    expect((controller as unknown as { state: AppState }).state).toMatchObject({ screen: 'auth', mode: 'phonePending', passwordRequired: true })
+
+    await controller.verifyPhoneLogin('+1234567890', '12345', 'hunter2')
+    expect(api.verifyPhoneAuth).toHaveBeenLastCalledWith('+1234567890', '12345', 'h', 'hunter2')
   })
 
   it('shows error when listChats fails during init', async () => {

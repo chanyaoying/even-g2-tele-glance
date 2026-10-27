@@ -63,7 +63,8 @@ textarea {
 
 .app-shell {
   width: min(760px, 100vw);
-  min-height: 100dvh;
+  height: 100dvh;
+  min-height: 0;
   margin: 0 auto;
   display: flex;
   flex-direction: column;
@@ -355,6 +356,9 @@ textarea {
 
 .settings-screen {
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  padding-bottom: calc(24px + env(safe-area-inset-bottom));
 }
 
 .settings-group {
@@ -401,6 +405,11 @@ textarea {
 
 .settings-actions {
   grid-template-columns: 1fr auto;
+  position: sticky;
+  bottom: 0;
+  padding: 10px 0;
+  background: #0a100d;
+  z-index: 1;
 }
 
 .testing-banner {

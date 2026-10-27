@@ -18,7 +18,7 @@ import { decryptJsonPayload, encryptedTelegramAuthHeader, encryptJsonPayload } f
 export interface TelegramApi {
   authStatus(): Promise<AuthStatus>
   startPhoneAuth(phone: string): Promise<PhoneAuthStart>
-  verifyPhoneAuth(phone: string, code: string, phoneCodeHash?: string | null): Promise<PhoneAuthStatus>
+  verifyPhoneAuth(phone: string, code: string, phoneCodeHash?: string | null, password?: string): Promise<PhoneAuthStatus>
   logout(): Promise<void>
   listChats(limit?: number): Promise<Chat[]>
   listTopics(chatId: Id): Promise<Topic[]>
@@ -46,7 +46,13 @@ export function defaultApiBaseUrl() {
 }
 
 export function isSharedBackendUrl(baseUrl: string | undefined) {
-  return Boolean(baseUrl?.trim().startsWith(SHARED_BACKEND_URL))
+  // Compare parsed origins: a prefix match would also accept look-alikes such as
+  // https://teleglance.akira-os.net.evil.example or https://teleglance.akira-os.net@evil.example.
+  try {
+    return new URL((baseUrl ?? '').trim()).origin === SHARED_BACKEND_URL
+  } catch {
+    return false
+  }
 }
 
 export function effectiveBackendSharedSecret(config: TelegramAuthConfig, baseUrl: string | undefined) {
@@ -100,8 +106,8 @@ export class HttpTelegramApi implements TelegramApi {
     return this.post('/api/session/phone/start', { phone })
   }
 
-  async verifyPhoneAuth(phone: string, code: string, phoneCodeHash?: string | null): Promise<PhoneAuthStatus> {
-    return this.post('/api/session/phone/verify', { phone, code, phoneCodeHash })
+  async verifyPhoneAuth(phone: string, code: string, phoneCodeHash?: string | null, password?: string): Promise<PhoneAuthStatus> {
+    return this.post('/api/session/phone/verify', { phone, code, phoneCodeHash, password })
   }
 
   async logout(): Promise<void> {

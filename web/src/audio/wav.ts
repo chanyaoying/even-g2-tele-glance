@@ -1,4 +1,6 @@
 const SAMPLE_RATE = 16000
+// 60 s of 16 kHz 16-bit mono stays under the backend's 2 MB upload cap.
+export const MAX_RECORDING_BYTES = 60 * SAMPLE_RATE * 2
 const CHANNELS = 1
 const BITS_PER_SAMPLE = 16
 

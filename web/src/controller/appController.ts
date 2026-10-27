@@ -1,4 +1,4 @@
-import { pcmChunksToWav } from '../audio/wav'
+import { MAX_RECORDING_BYTES, pcmChunksToWav } from '../audio/wav'
 import type { TelegramApi } from '../api'
 import type { Chat, Id, Message, TelegramUpdate, TelegramTypingUpdate, Topic } from '../types'
 import type { AppInput, AppState, RecoverableState, ScreenModel } from './model'
@@ -348,6 +348,8 @@ export class TelegramAppController {
 
     if (input.type === 'audioChunk') {
       if (this.state.screen === 'sidebarRecording') {
+        const recordedBytes = this.state.chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0)
+        if (recordedBytes + input.pcm.byteLength > MAX_RECORDING_BYTES) return // keep the upload under the server cap
         this.state = { ...this.state, chunks: [...this.state.chunks, input.pcm] }
         if (isTeleGlanceFixtureMode()) {
           const total = this.state.chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0)
@@ -484,15 +486,15 @@ export class TelegramAppController {
     }, this.state.screen === 'auth' ? this.state : undefined)
   }
 
-  async verifyPhoneLogin(phone: string, code: string) {
+  async verifyPhoneLogin(phone: string, code: string, password?: string) {
     const trimmedPhone = phone.trim()
     const trimmedCode = code.trim()
-    if (!trimmedPhone || !trimmedCode) return
+    if (!trimmedPhone || (!trimmedCode && !password)) return
     const phoneCodeHash = this.state.screen === 'auth' && this.state.mode === 'phonePending' && this.state.phone === trimmedPhone
       ? this.state.phoneCodeHash
       : undefined
     try {
-      const status = await this.api.verifyPhoneAuth(trimmedPhone, trimmedCode, phoneCodeHash)
+      const status = await this.api.verifyPhoneAuth(trimmedPhone, trimmedCode, phoneCodeHash, password)
       if (status.authorized) {
         if (status.sessionString) this.onTelegramSession?.(status.sessionString)
         await this.loadChats()
@@ -503,6 +505,7 @@ export class TelegramAppController {
         mode: 'phonePending',
         phone: trimmedPhone,
         phoneCodeHash,
+        passwordRequired: status.passwordRequired || undefined,
         message: status.message ?? 'Code was not accepted. Check the Telegram code and try again.',
       })
     } catch (error) {
@@ -1050,6 +1053,7 @@ export class TelegramAppController {
           screen: 'sidebar', focus: 'messages',
           chats: state.chats, selectedChatIndex: state.selectedChatIndex,
           chat: state.chat,
+          topic: state.topic,
           messages: state.messages,
           back: state.back,
           status: state.status,

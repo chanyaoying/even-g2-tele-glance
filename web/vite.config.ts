@@ -2,6 +2,7 @@ import { readFileSync } from 'fs'
 import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import legacy from '@vitejs/plugin-legacy'
+import { isLoopbackRequest } from './testBridgeGuard'
 
 const appJson = JSON.parse(readFileSync(new URL('../app.json', import.meta.url), 'utf-8')) as { version: string }
 
@@ -24,6 +25,15 @@ function teleGlanceFixtureBridge(): Plugin {
     name: 'teleGlance-fixture-bridge',
     apply: 'serve',
     configureServer(server) {
+      server.middlewares.use('/api/test', (req, res, next) => {
+        if (isLoopbackRequest(req.socket.remoteAddress, req.headers.host)) {
+          next()
+          return
+        }
+        res.statusCode = 403
+        res.setHeader('Content-Type', 'text/plain')
+        res.end('Forbidden: test bridge is loopback-only')
+      })
       // GET /api/test/fixture-commands — the in-page poller
       // fetches this every 100ms. The response carries any
       // pending commands (queued via POST /api/test/fixture)

@@ -16,6 +16,7 @@ export type PhoneAuthStatus = {
   authorized: boolean
   message?: string | null
   sessionString?: string | null
+  passwordRequired?: boolean
 }
 
 export type Chat = {

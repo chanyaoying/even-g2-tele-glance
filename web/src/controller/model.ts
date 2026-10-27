@@ -49,7 +49,7 @@ export type BoxedText = {
 
 export type AppState =
   | { screen: 'loading'; message: string }
-  | { screen: 'auth'; mode: 'needsSetup' | 'signedOut' | 'phonePending'; message: string; phone?: string; phoneCodeHash?: string | null }
+  | { screen: 'auth'; mode: 'needsSetup' | 'signedOut' | 'phonePending'; message: string; phone?: string; phoneCodeHash?: string | null; passwordRequired?: boolean }
   | { screen: 'sidebar'; focus: 'chats'; chats: Chat[]; selectedChatIndex: number; status?: string; previewMessages?: Message[]; previewCursor?: Id; previewScrollOffset?: number; previewNewerPages?: Message[][]; previewIsNewestPage?: boolean }
   | { screen: 'asleep'; chats: Chat[]; selectedChatIndex: number }
   | { screen: 'newMessage'; chat: Chat; topic?: Topic; message: string; chats: Chat[]; selectedChatIndex: number }

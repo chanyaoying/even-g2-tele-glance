@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { HttpTelegramApi, SHARED_BACKEND_TEST_SECRET, SHARED_BACKEND_URL, defaultApiBaseUrl } from '../src/api'
+import { HttpTelegramApi, SHARED_BACKEND_TEST_SECRET, SHARED_BACKEND_URL, defaultApiBaseUrl, isSharedBackendUrl } from '../src/api'
 import { InstrumentedTelegramApi } from '../src/instrumentedApi'
 import { decryptJsonPayload } from '../src/secureAuth'
 import type { TelegramApi } from '../src/api'
@@ -165,5 +165,21 @@ describe('HttpTelegramApi secret selection', () => {
 
     expect(seenLanguage).toBe('es')
     expect(result.language).toBe('es')
+  })
+})
+
+describe('isSharedBackendUrl', () => {
+  it('matches only the exact shared backend origin', () => {
+    expect(isSharedBackendUrl(SHARED_BACKEND_URL)).toBe(true)
+    expect(isSharedBackendUrl(`${SHARED_BACKEND_URL}/`)).toBe(true)
+    expect(isSharedBackendUrl(`  ${SHARED_BACKEND_URL}/api  `)).toBe(true)
+  })
+
+  it('rejects look-alike hosts and non-https schemes', () => {
+    expect(isSharedBackendUrl(`${SHARED_BACKEND_URL}.evil.example`)).toBe(false)
+    expect(isSharedBackendUrl('https://teleglance.akira-os.net@evil.example')).toBe(false)
+    expect(isSharedBackendUrl('http://teleglance.akira-os.net')).toBe(false)
+    expect(isSharedBackendUrl('not a url')).toBe(false)
+    expect(isSharedBackendUrl(undefined)).toBe(false)
   })
 })

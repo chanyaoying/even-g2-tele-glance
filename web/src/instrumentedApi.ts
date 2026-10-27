@@ -26,8 +26,8 @@ export class InstrumentedTelegramApi implements TelegramApi {
     return this.wrap('startPhoneAuth', { phone }, () => this.inner.startPhoneAuth(phone))
   }
 
-  async verifyPhoneAuth(phone: string, code: string, phoneCodeHash?: string | null): Promise<PhoneAuthStatus> {
-    return this.wrap('verifyPhoneAuth', { phone, code, hasPhoneCodeHash: Boolean(phoneCodeHash) }, () => this.inner.verifyPhoneAuth(phone, code, phoneCodeHash))
+  async verifyPhoneAuth(phone: string, code: string, phoneCodeHash?: string | null, password?: string): Promise<PhoneAuthStatus> {
+    return this.wrap('verifyPhoneAuth', { phone, code, hasPhoneCodeHash: Boolean(phoneCodeHash), hasPassword: Boolean(password) }, () => this.inner.verifyPhoneAuth(phone, code, phoneCodeHash, password))
   }
 
   async logout(): Promise<void> {

@@ -82,6 +82,7 @@ function PhoneStateView() {
   void localeVersion
   const [phone, setPhone] = useState('')
   const [code, setCode] = useState('')
+  const [password, setPassword] = useState('')
   const [phoneError, setPhoneError] = useState<string | null>(null)
   const [isPhoneAuthBusy, setIsPhoneAuthBusy] = useState(false)
 
@@ -104,7 +105,7 @@ function PhoneStateView() {
     setIsPhoneAuthBusy(true)
     setPhoneError(null)
     try {
-      await verifyPhoneLogin(targetPhone, code)
+      await verifyPhoneLogin(targetPhone, code, state.screen === 'auth' && state.passwordRequired ? password : undefined)
     } catch (error) {
       setPhoneError(error instanceof Error ? error.message : l.phoneCodeVerifyFailed)
     } finally {
@@ -126,7 +127,13 @@ function PhoneStateView() {
                 <span>{l.phoneVerificationCode}</span>
                 <input value={code} onChange={(event) => setCode(event.target.value)} inputMode="numeric" autoComplete="one-time-code" placeholder="12345" />
               </label>
-              <button type="submit" disabled={isPhoneAuthBusy || !code.trim()}>
+              {state.passwordRequired && (
+                <label>
+                  <span>{l.phoneTwoStepPassword}</span>
+                  <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" />
+                </label>
+              )}
+              <button type="submit" disabled={isPhoneAuthBusy || (state.passwordRequired ? !password : !code.trim())}>
                 {isPhoneAuthBusy ? l.phoneVerifying : l.phoneVerifyCode}
               </button>
             </>

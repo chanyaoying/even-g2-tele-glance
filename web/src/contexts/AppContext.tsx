@@ -26,7 +26,7 @@ type AppContextValue = {
   dispatch: (input: AppInput) => Promise<void>
   sendText: (text: string) => Promise<void>
   startPhoneLogin: (phone: string) => Promise<void>
-  verifyPhoneLogin: (phone: string, code: string) => Promise<void>
+  verifyPhoneLogin: (phone: string, code: string, password?: string) => Promise<void>
   saveSettings: (settings: FrontendConfig) => Promise<void>
   resetSettings: () => Promise<void>
   logoutTelegram: () => Promise<void>
@@ -173,8 +173,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     await controllerRef.current?.startPhoneLogin(phone)
   }, [])
 
-  const verifyPhoneLogin = useCallback(async (phone: string, code: string) => {
-    await controllerRef.current?.verifyPhoneLogin(phone, code)
+  const verifyPhoneLogin = useCallback(async (phone: string, code: string, password?: string) => {
+    await controllerRef.current?.verifyPhoneLogin(phone, code, password)
   }, [])
 
   const handleSaveSettings = useCallback(async (next: FrontendConfig) => {
