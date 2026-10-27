@@ -33,7 +33,7 @@ class FakeTelegramService:
     async def start_phone_login(self, phone):
         return PhoneLoginStart(phone=phone, sent=True, message="Verification code sent.")
 
-    async def complete_phone_login(self, phone, code, phone_code_hash=None):
+    async def complete_phone_login(self, phone, code, phone_code_hash=None, password=None):
         return {"authorized": False, "message": None, "sessionString": None}
 
     async def logout(self):

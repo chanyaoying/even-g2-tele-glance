@@ -50,6 +50,19 @@ def get_pending_telegram_service(settings, credentials: TelegramClientCredential
     return service
 
 
+def discard_pending_telegram_service(service: TelegramService) -> Optional[TelegramService]:
+    """Drop a pending phone-login service from the shared cache once its login is finished.
+
+    The pending cache is keyed by api_id/api_hash only, so a service that has signed in must not stay
+    reachable to the next caller using the same credentials.
+    """
+    for key, (_created_at, cached) in list(_pending_telegram_services.items()):
+        if cached is service:
+            _pending_telegram_services.pop(key, None)
+            return cached
+    return None
+
+
 def telegram_credentials_from_encrypted_header(
     encrypted_auth: Optional[str],
     shared_secret: Optional[str],

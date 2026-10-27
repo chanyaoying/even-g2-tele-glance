@@ -1,3 +1,4 @@
+import asyncio
 import os
 import struct
 import tempfile
@@ -18,6 +19,7 @@ class WhisperTranscriptionService:
 
     def __post_init__(self) -> None:
         self._model = None
+        self._lock: Optional[asyncio.Lock] = None
 
     def _load_model(self):
         if self._model is None:
@@ -32,18 +34,27 @@ class WhisperTranscriptionService:
                 self.settings.whisper_model,
                 device=self.settings.whisper_device,
                 compute_type=self.settings.whisper_compute_type,
+                **({"revision": self.settings.whisper_model_revision} if self.settings.whisper_model_revision else {}),
             )
         return self._model
 
     async def transcribe_wav(self, wav_bytes: bytes, language: Optional[str] = None) -> TranscriptionResponse:
         if not wav_bytes:
             raise TranscriptionServiceError("audio payload is empty")
+        if not _looks_like_wav(wav_bytes):
+            # Never hand arbitrary bytes to the FFmpeg-backed decoder, which probes formats by content.
+            raise TranscriptionServiceError("audio must be a RIFF/WAVE file")
+        # One transcription at a time, off the event loop so other requests stay responsive.
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        async with self._lock:
+            return await asyncio.to_thread(self._transcribe_blocking, wav_bytes, language)
 
+    def _transcribe_blocking(self, wav_bytes: bytes, language: Optional[str]) -> TranscriptionResponse:
         # Validate audio is not silent before invoking Whisper.
         # Glasses can produce near-silent recordings; feeding silence to
         # faster-whisper produces NaN in the mel spectrogram.
-        silent = _is_effectively_silent(wav_bytes)
-        if silent:
+        if _is_effectively_silent(wav_bytes):
             raise TranscriptionServiceError(
                 "recording is silent — try speaking closer to the glasses microphone"
             )
@@ -74,6 +85,10 @@ class WhisperTranscriptionService:
         finally:
             if temp_path:
                 os.unlink(temp_path)
+
+
+def _looks_like_wav(data: bytes) -> bool:
+    return len(data) >= 44 and data[0:4] == b"RIFF" and data[8:12] == b"WAVE"
 
 
 def _is_effectively_silent(wav_bytes: bytes) -> bool:

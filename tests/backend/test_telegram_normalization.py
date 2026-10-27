@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from app.config import Settings
-from app.services.telegram import TelethonTelegramService, normalize_chat_action, normalize_dialog, normalize_message, normalize_topic
+from app.services.telegram import TelegramClientCredentials, TelethonTelegramService, normalize_chat_action, normalize_dialog, normalize_message, normalize_topic
 
 
 @dataclass
@@ -296,3 +296,41 @@ def test_normalize_typing_cancel_from_user_update_event():
     assert update is not None
     assert update.user_name == "ada"
     assert update.action == "cancel"
+
+
+def test_phone_login_requests_then_uses_two_step_password():
+    class SessionPasswordNeededError(Exception):
+        pass
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+
+        async def is_user_authorized(self):
+            return bool(self.calls and "password" in self.calls[-1])
+
+        async def sign_in(self, **kwargs):
+            self.calls.append(kwargs)
+            if "password" not in kwargs:
+                raise SessionPasswordNeededError()
+
+    service = TelethonTelegramService(
+        settings=Settings(),
+        credentials=TelegramClientCredentials(api_id=1, api_hash="hash"),
+    )
+    client = FakeClient()
+
+    async def fake_get_client():
+        return client
+
+    service._get_client = fake_get_client  # type: ignore[method-assign]
+
+    async def scenario():
+        first = await service.complete_phone_login("+15555550100", "12345", "h")
+        assert first.authorized is False and first.password_required is True
+
+        second = await service.complete_phone_login("+15555550100", "", None, "secret")
+        assert client.calls[-1] == {"password": "secret"}
+        assert second.password_required is False
+
+    asyncio.run(scenario())

@@ -167,7 +167,7 @@ async def test_encrypted_phone_verify_passes_phone_code_hash_to_service():
     seen = {}
 
     class PhoneLoginService:
-        async def complete_phone_login(self, phone, code, phone_code_hash=None):
+        async def complete_phone_login(self, phone, code, phone_code_hash=None, password=None):
             seen.update({
                 "phone": phone,
                 "code": code,

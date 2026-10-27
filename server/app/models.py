@@ -31,14 +31,16 @@ class PhoneLoginStart(ApiModel):
 
 class PhoneLoginVerifyRequest(ApiModel):
     phone: str = Field(min_length=5)
-    code: str = Field(min_length=2)
+    code: Optional[str] = None
     phone_code_hash: Optional[str] = None
+    password: Optional[str] = None
 
 
 class PhoneLoginStatus(ApiModel):
     authorized: bool
     message: Optional[str] = None
     session_string: Optional[str] = None
+    password_required: bool = False
 
 
 class ChatSummary(ApiModel):

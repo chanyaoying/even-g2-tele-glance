@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from app.config import Settings, get_settings
-from app.dependencies import get_telegram_service, get_transcription_service, validate_backend_auth
+from app.dependencies import discard_pending_telegram_service, get_telegram_service, get_transcription_service, validate_backend_auth
 from app.models import (
     AuthStatus,
     ChatSummary,
@@ -64,7 +64,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         encrypted_auth = request.headers.get("X-TeleGlance-Auth")
         should_encrypt = bool(shared_secret and encrypted_auth and request.url.path.startswith("/api/"))
 
-        if should_encrypt and _is_json_request(request):
+        if should_encrypt and _requires_encrypted_body(request):
             try:
                 raw_body = await request.body()
                 if raw_body:
@@ -142,7 +142,15 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         telegram: TelegramService = Depends(get_telegram_service),
     ) -> PhoneLoginStatus:
         try:
-            return await telegram.complete_phone_login(payload.phone, payload.code, payload.phone_code_hash)
+            status = await telegram.complete_phone_login(payload.phone, payload.code or "", payload.phone_code_hash, payload.password)
+            if _login_finished(status):
+                # The session now belongs to this caller; do not leave the signed-in client in the
+                # pending cache where another caller with the same api_id/api_hash could reuse it.
+                discarded = discard_pending_telegram_service(telegram)
+                close = getattr(discarded, "close", None)
+                if close is not None:
+                    await close()
+            return status
         except (TelegramServiceError, TimeoutError) as exc:
             raise_telegram_http_error(exc)
 
@@ -257,8 +265,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         language: str = Form(""),
         transcription: WhisperTranscriptionService = Depends(get_transcription_service),
     ) -> TranscriptionResponse:
-        raw = await audio.read()
-        if len(raw) > settings.transcribe_max_upload_bytes:
+        max_bytes = app_settings.transcribe_max_upload_bytes
+        raw = await audio.read(max_bytes + 1)
+        if len(raw) > max_bytes:
             raise HTTPException(status_code=413, detail="audio upload is too large")
         try:
             if audio.content_type in {"audio/pcm", "application/octet-stream"}:
@@ -275,9 +284,22 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 app = create_app()
 
 
-def _is_json_request(request: Request) -> bool:
-    content_type = request.headers.get("content-type", "")
-    return request.method in {"POST", "PUT", "PATCH"} and content_type.startswith("application/json")
+def _login_finished(status: object) -> bool:
+    if isinstance(status, dict):
+        return bool(status.get("authorized") and (status.get("session_string") or status.get("sessionString")))
+    return bool(getattr(status, "authorized", False) and getattr(status, "session_string", None))
+
+
+ENCRYPTED_BODY_EXEMPT_PATHS = {"/api/transcribe"}  # multipart audio upload; authenticated by header only
+
+
+def _requires_encrypted_body(request: Request) -> bool:
+    """Every mutating /api request that carries an auth header must send an encrypted JSON envelope.
+
+    This deliberately does not look at Content-Type: FastAPI parses application/json and
+    application/*+json case-insensitively, so a Content-Type-based gate can be bypassed.
+    """
+    return request.method in {"POST", "PUT", "PATCH"} and request.url.path not in ENCRYPTED_BODY_EXEMPT_PATHS
 
 
 def _is_json_response(response: Response) -> bool:

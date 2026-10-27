@@ -1,4 +1,5 @@
 import base64
+from functools import lru_cache
 import json
 import os
 import time
@@ -35,7 +36,7 @@ def decrypt_auth_header(header_value: str, shared_secret: str) -> dict[str, Any]
     if len(nonce) != 12:
         raise SecureAuthError("Malformed encrypted auth nonce")
 
-    _reject_replay(encoded_nonce)
+    _check_replay(encoded_nonce)
 
     try:
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -47,6 +48,7 @@ def decrypt_auth_header(header_value: str, shared_secret: str) -> dict[str, Any]
         raise SecureAuthError("Encrypted auth could not be decrypted") from exc
 
     _validate_payload(payload)
+    _record_nonce(encoded_nonce)
     return payload
 
 
@@ -93,11 +95,22 @@ def _validate_payload(payload: object) -> None:
         raise SecureAuthError("Encrypted auth timestamp expired")
 
 
-def _reject_replay(encoded_nonce: str) -> None:
-    now = time.monotonic()
+def _prune_nonces(now: float) -> None:
     expired = [nonce for nonce, expires_at in _seen_nonces.items() if expires_at <= now]
     for nonce in expired:
         _seen_nonces.pop(nonce, None)
+
+
+def _check_replay(encoded_nonce: str) -> None:
+    _prune_nonces(time.monotonic())
+    if encoded_nonce in _seen_nonces:
+        raise SecureAuthError("Encrypted auth nonce was already used")
+
+
+def _record_nonce(encoded_nonce: str) -> None:
+    # Only nonces from headers that decrypted and validated are remembered, so unauthenticated
+    # callers cannot grow this map.
+    now = time.monotonic()
     if encoded_nonce in _seen_nonces:
         raise SecureAuthError("Encrypted auth nonce was already used")
     _seen_nonces[encoded_nonce] = now + AUTH_REPLAY_TTL_SECONDS
@@ -112,7 +125,9 @@ def _base64url_encode(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
 
 
+@lru_cache(maxsize=4)
 def _derive_key(shared_secret: str) -> bytes:
+    # Cached per secret: the 200k-iteration PBKDF2 must not run per request (it blocks the event loop).
     try:
         from cryptography.hazmat.primitives import hashes
         from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC

@@ -61,8 +61,13 @@ class TelegramService(Protocol):
         phone: str,
         code: str,
         phone_code_hash: Optional[str] = None,
+        password: Optional[str] = None,
     ) -> PhoneLoginStatus:
         ...
+
+    async def close(self) -> None:
+        """Disconnect without logging out (the session string was handed to the owner)."""
+        await self._discard_client()
 
     async def logout(self) -> None:
         ...
@@ -496,6 +501,7 @@ class TelethonTelegramService:
         phone: str,
         code: str,
         phone_code_hash: Optional[str] = None,
+        password: Optional[str] = None,
     ) -> PhoneLoginStatus:
         if not self.configured:
             raise TelegramServiceError("Telegram API credentials are not configured")
@@ -503,19 +509,37 @@ class TelethonTelegramService:
         client = await self._get_client()
         if await client.is_user_authorized():
             return PhoneLoginStatus(authorized=True, session_string=self.current_session_string())
-        kwargs: dict[str, Any] = {
-            "phone": normalized_phone,
-            "code": code.strip(),
-        }
-        resolved_phone_code_hash = (phone_code_hash or "").strip() or self._phone_code_hashes.get(normalized_phone)
-        if resolved_phone_code_hash:
-            kwargs["phone_code_hash"] = resolved_phone_code_hash
         try:
-            await client.sign_in(**kwargs)
+            if password:
+                # The pending client already accepted the code; Telegram now wants the 2FA password.
+                await client.sign_in(password=password)
+            else:
+                if not code.strip():
+                    raise TelegramServiceError("Verification code is required")
+                kwargs: dict[str, Any] = {
+                    "phone": normalized_phone,
+                    "code": code.strip(),
+                }
+                resolved_phone_code_hash = (phone_code_hash or "").strip() or self._phone_code_hashes.get(normalized_phone)
+                if resolved_phone_code_hash:
+                    kwargs["phone_code_hash"] = resolved_phone_code_hash
+                await client.sign_in(**kwargs)
+        except TelegramServiceError:
+            raise
         except Exception as exc:
             error_name = exc.__class__.__name__
             if error_name == "SessionPasswordNeededError":
-                raise TelegramServiceError("Telegram account has two-step verification enabled; password login is not implemented yet.") from exc
+                return PhoneLoginStatus(
+                    authorized=False,
+                    password_required=True,
+                    message="Two-step verification is enabled. Enter your Telegram cloud password.",
+                )
+            if error_name == "PasswordHashInvalidError":
+                return PhoneLoginStatus(
+                    authorized=False,
+                    password_required=True,
+                    message="Incorrect Telegram password. Try again.",
+                )
             raise wrap_telegram_error(exc) from exc
         self._phone_code_hashes.pop(normalized_phone, None)
         return PhoneLoginStatus(

@@ -1,4 +1,5 @@
 from functools import lru_cache
+import logging
 from pathlib import Path
 from typing import Optional
 
@@ -7,6 +8,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+logger = logging.getLogger(__name__)
+PLACEHOLDER_SHARED_SECRETS = {"<enter-secret-token>", "my-secret-token", "changeme", "change-me", "secret"}
+MIN_RECOMMENDED_SECRET_LENGTH = 16
 
 
 class Settings(BaseSettings):
@@ -26,10 +30,28 @@ class Settings(BaseSettings):
         default=False,
         validation_alias="WHISPER_CONDITION_ON_PREVIOUS_TEXT",
     )
+    whisper_model_revision: Optional[str] = Field(default=None, validation_alias="WHISPER_MODEL_REVISION")
     transcribe_max_upload_bytes: int = Field(default=2_000_000, validation_alias="TRANSCRIBE_MAX_UPLOAD_BYTES")
     teleglance_shared_secret: Optional[str] = Field(default=None, validation_alias="TELEGLANCE_SHARED_SECRET")
 
     model_config = SettingsConfigDict(env_file=REPO_ROOT / ".env", extra="ignore")
+
+    @field_validator("teleglance_shared_secret")
+    @classmethod
+    def check_shared_secret(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        stripped = value.strip()
+        if stripped.lower() in PLACEHOLDER_SHARED_SECRETS or (stripped.startswith("<") and stripped.endswith(">")):
+            raise ValueError(
+                "TELEGLANCE_SHARED_SECRET is still a placeholder. Generate a real one with: openssl rand -base64 32"
+            )
+        if 0 < len(stripped) < MIN_RECOMMENDED_SECRET_LENGTH:
+            logger.warning(
+                "TELEGLANCE_SHARED_SECRET is shorter than %d characters; use `openssl rand -base64 32`.",
+                MIN_RECOMMENDED_SECRET_LENGTH,
+            )
+        return value
 
     @field_validator("backend_cors_origins", mode="before")
     @classmethod
