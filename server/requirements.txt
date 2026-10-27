@@ -5,7 +5,5 @@ pydantic-settings>=2.3,<3
 telethon>=1.36,<2
 faster-whisper>=1.0,<2
 numpy>=1.26
-# PyAV 17+ dropped the metadata_errors kwarg that faster-whisper 1.x passes to av.open
-av>=11,<17
 python-multipart>=0.0.9,<1
 cryptography>=42,<45
