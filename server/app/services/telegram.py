@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import math
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Literal, Optional, Protocol, Union
@@ -7,6 +9,7 @@ from typing import Any, AsyncIterator, Literal, Optional, Protocol, Union
 from app.config import Settings
 from app.models import (
     ChatSummary,
+    FolderSummary,
     MessageSummary,
     PhoneLoginStart,
     PhoneLoginStatus,
@@ -72,7 +75,10 @@ class TelegramService(Protocol):
     async def logout(self) -> None:
         ...
 
-    async def list_chats(self, limit: int) -> list[ChatSummary]:
+    async def list_chats(self, limit: int, offset: int = 0, folder_id: Optional[int] = None) -> list[ChatSummary]:
+        ...
+
+    async def list_folders(self) -> list[FolderSummary]:
         ...
 
     async def list_topics(self, chat_id: int) -> list[TopicSummary]:
@@ -119,6 +125,80 @@ def _display_name(entity: Any) -> str:
     name = f"{first_name} {last_name}".strip()
     username = getattr(entity, "username", None)
     return name or (f"@{username}" if username else "Unknown")
+
+
+def _is_custom_folder(dialog_filter: Any) -> bool:
+    # DialogFilterDefault ("All chats") has no id/title; real folders do.
+    return getattr(dialog_filter, "id", None) is not None and getattr(dialog_filter, "title", None) is not None
+
+
+def _folder_title(dialog_filter: Any) -> str:
+    title = getattr(dialog_filter, "title", None)
+    return str(getattr(title, "text", title) or "Folder")
+
+
+def _input_peer_id(peer: Any) -> Optional[int]:
+    try:
+        from telethon import utils
+
+        return int(utils.get_peer_id(peer))
+    except Exception:
+        return None
+
+
+def dialog_matches_filter(dialog_filter: Any, dialog: Any) -> bool:
+    """Apply a Telegram chat folder (DialogFilter) to a Telethon Dialog."""
+    dialog_id = int(getattr(dialog, "id"))
+    entity = getattr(dialog, "entity", None)
+
+    def ids(attr: str) -> set[int]:
+        return {i for i in (_input_peer_id(p) for p in (getattr(dialog_filter, attr, None) or [])) if i is not None}
+
+    if dialog_id in ids("exclude_peers"):
+        return False
+    if dialog_id in ids("include_peers") or dialog_id in ids("pinned_peers"):
+        return True
+
+    is_user = bool(getattr(dialog, "is_user", False))
+    is_bot = bool(getattr(entity, "bot", False))
+    is_contact = bool(getattr(entity, "contact", False))
+    is_channel = bool(getattr(dialog, "is_channel", False))
+    is_group = bool(getattr(dialog, "is_group", False))
+    category = (
+        (getattr(dialog_filter, "contacts", False) and is_user and not is_bot and is_contact)
+        or (getattr(dialog_filter, "non_contacts", False) and is_user and not is_bot and not is_contact)
+        or (getattr(dialog_filter, "groups", False) and is_group)
+        or (getattr(dialog_filter, "broadcasts", False) and is_channel and not is_group)
+        or (getattr(dialog_filter, "bots", False) and is_bot)
+    )
+    if not category:
+        return False
+    if getattr(dialog_filter, "exclude_archived", False) and getattr(dialog, "archived", False):
+        return False
+    if getattr(dialog_filter, "exclude_read", False) and not getattr(dialog, "unread_count", 0):
+        return False
+    if getattr(dialog_filter, "exclude_muted", False):
+        notify = getattr(getattr(dialog, "dialog", None), "notify_settings", None)
+        if getattr(notify, "mute_until", None):
+            return False
+    return True
+
+
+# Telegram returns 100 dialogs per request, so fetching in blocks of 100 costs the same number of
+# requests as fetching exactly what one page needs while serving the following pages from memory.
+DIALOG_BLOCK = 100
+# A cached prefix older than this is discarded; the first page is always refetched regardless.
+DIALOG_CACHE_TTL_SECONDS = 45.0
+# Deep folder pages scan this many extra matching chats ahead so the next few pages are cache hits.
+FOLDER_LOOKAHEAD = 60
+
+
+@dataclass
+class _DialogSnapshot:
+    dialogs: list[Any]
+    exhausted: bool  # True when `dialogs` is the account's complete chat list
+    head_at: float
+    tail_at: float  # when the deepest part of `dialogs` was fetched; the TTL applies to this
 
 
 def normalize_dialog(dialog: Any) -> ChatSummary:
@@ -328,6 +408,7 @@ class TelethonTelegramService:
         self._entity_cache: dict[int, Any] = {}
         self._user_name_cache: dict[int, str] = {}
         self._phone_code_hashes: dict[str, str] = {}
+        self._dialog_snapshot: Optional[_DialogSnapshot] = None
 
     @property
     def configured(self) -> bool:
@@ -563,6 +644,7 @@ class TelethonTelegramService:
         self._updates_registered = False
         self._entity_cache.clear()
         self._phone_code_hashes.clear()
+        self._dialog_snapshot = None
         if client is None:
             return
         try:
@@ -579,15 +661,122 @@ class TelethonTelegramService:
         finally:
             await self._discard_client()
 
-    async def list_chats(self, limit: int) -> list[ChatSummary]:
+    async def list_chats(self, limit: int, offset: int = 0, folder_id: Optional[int] = None) -> list[ChatSummary]:
         client = await self._get_client()
         try:
-            dialogs = await asyncio.wait_for(client.get_dialogs(limit=limit), timeout=20)
+            dialog_filter = await self._get_folder_filter(client, folder_id) if folder_id else None
+            dialogs = await asyncio.wait_for(
+                self._page_dialogs(client, limit=limit, offset=offset, dialog_filter=dialog_filter),
+                timeout=30,
+            )
             for dialog in dialogs:
                 self._cache_user_name(getattr(dialog, "entity", None))
             return [normalize_dialog(dialog) for dialog in dialogs]
+        except TelegramServiceError:
+            raise
         except Exception as exc:
             raise wrap_telegram_error(exc) from exc
+
+    def _valid_snapshot(self) -> Optional[_DialogSnapshot]:
+        snapshot = self._dialog_snapshot
+        if snapshot is None:
+            return None
+        if time.monotonic() - snapshot.tail_at > DIALOG_CACHE_TTL_SECONDS:
+            self._dialog_snapshot = None
+            return None
+        return snapshot
+
+    def _store_head(self, fresh: list[Any], exhausted: bool) -> None:
+        """Replace the top of the cached chat list with freshly fetched dialogs.
+
+        Deeper, older entries are kept when the fresh block lines up with them (its last chat is found in
+        the old list), so the background refresh of page one does not throw away pages already scrolled in.
+        """
+        now = time.monotonic()
+        old = self._valid_snapshot()
+        dialogs, tail_at, snapshot_exhausted = fresh, now, exhausted
+        if old is not None and fresh and not exhausted:
+            fresh_ids = {dialog.id for dialog in fresh}
+            last_id = fresh[-1].id
+            position = next((i for i, dialog in enumerate(old.dialogs) if dialog.id == last_id), None)
+            if position is not None:
+                tail = [dialog for dialog in old.dialogs[position + 1:] if dialog.id not in fresh_ids]
+                if tail:
+                    dialogs, tail_at, snapshot_exhausted = fresh + tail, old.tail_at, old.exhausted
+        self._dialog_snapshot = _DialogSnapshot(dialogs=dialogs, exhausted=snapshot_exhausted, head_at=now, tail_at=tail_at)
+
+    async def _page_dialogs(self, client: Any, *, limit: int, offset: int, dialog_filter: Any) -> list[Any]:
+        if dialog_filter is None:
+            return await self._page_unfiltered(client, limit, offset)
+        return await self._page_folder(client, limit, offset, dialog_filter)
+
+    async def _page_unfiltered(self, client: Any, limit: int, offset: int) -> list[Any]:
+        need = offset + limit
+        snapshot = self._valid_snapshot()
+        if offset == 0 or snapshot is None or (len(snapshot.dialogs) < need and not snapshot.exhausted):
+            # Page one is always fresh. A deeper miss refetches down to the next block boundary.
+            target = max(DIALOG_BLOCK, math.ceil(need / DIALOG_BLOCK) * DIALOG_BLOCK)
+            fresh = list(await client.get_dialogs(limit=target))
+            self._store_head(fresh, exhausted=len(fresh) < target)
+            snapshot = self._dialog_snapshot
+        return list(snapshot.dialogs[offset:need])
+
+    async def _page_folder(self, client: Any, limit: int, offset: int, dialog_filter: Any) -> list[Any]:
+        need = offset + limit
+        snapshot = self._valid_snapshot()
+        if offset > 0 and snapshot is not None:
+            matches = [dialog for dialog in snapshot.dialogs if dialog_matches_filter(dialog_filter, dialog)]
+            if len(matches) >= need or snapshot.exhausted:
+                return matches[offset:need]
+        # Scan from the top (Telegram offers no "chats in this folder" call). Page one stops as soon as it
+        # has enough matches; deeper pages look ahead so the following pages come from the cache.
+        target = need if offset == 0 else need + FOLDER_LOOKAHEAD
+        scanned: list[Any] = []
+        found = 0
+        exhausted = True
+        async for dialog in client.iter_dialogs():
+            scanned.append(dialog)
+            if dialog_matches_filter(dialog_filter, dialog):
+                found += 1
+                if found >= target:
+                    exhausted = False
+                    break
+        self._store_head(scanned, exhausted)
+        snapshot = self._dialog_snapshot
+        matches = [dialog for dialog in snapshot.dialogs if dialog_matches_filter(dialog_filter, dialog)]
+        return matches[offset:need]
+
+    async def list_folders(self) -> list[FolderSummary]:
+        client = await self._get_client()
+        try:
+            filters = await self._fetch_dialog_filters(client)
+            return [
+                FolderSummary(id=int(f.id), title=_folder_title(f))
+                for f in filters
+                if _is_custom_folder(f)
+            ]
+        except TelegramServiceError:
+            raise
+        except Exception as exc:
+            raise wrap_telegram_error(exc) from exc
+
+    async def _fetch_dialog_filters(self, client: Any) -> list[Any]:
+        cached = getattr(self, "_folder_cache", None)
+        now = asyncio.get_running_loop().time()
+        if cached and now - cached[0] < 60:
+            return cached[1]
+        from telethon.tl.functions.messages import GetDialogFiltersRequest
+
+        result = await asyncio.wait_for(client(GetDialogFiltersRequest()), timeout=20)
+        filters = list(getattr(result, "filters", result) or [])
+        self._folder_cache = (now, filters)
+        return filters
+
+    async def _get_folder_filter(self, client: Any, folder_id: int) -> Any:
+        for dialog_filter in await self._fetch_dialog_filters(client):
+            if _is_custom_folder(dialog_filter) and int(dialog_filter.id) == int(folder_id):
+                return dialog_filter
+        raise TelegramServiceError("Telegram folder not found")
 
     async def list_topics(self, chat_id: int) -> list[TopicSummary]:
         client = await self._get_client()

@@ -12,6 +12,7 @@ from app.dependencies import discard_pending_telegram_service, get_telegram_serv
 from app.models import (
     AuthStatus,
     ChatSummary,
+    FolderSummary,
     DebugEvent,
     MessageSummary,
     MarkReadRequest,
@@ -167,10 +168,21 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     @api.get("/api/chats", response_model=list[ChatSummary])
     async def list_chats(
         limit: int = Query(default=5, ge=1, le=20),
+        offset: int = Query(default=0, ge=0, le=5000),
+        folder_id: Optional[int] = Query(default=None, ge=1),
         telegram: TelegramService = Depends(get_telegram_service),
     ) -> list[ChatSummary]:
         try:
-            return await telegram.list_chats(limit=limit)
+            return await telegram.list_chats(limit=limit, offset=offset, folder_id=folder_id)
+        except (TelegramServiceError, TimeoutError) as exc:
+            raise_telegram_http_error(exc)
+
+    @api.get("/api/folders", response_model=list[FolderSummary])
+    async def list_folders(
+        telegram: TelegramService = Depends(get_telegram_service),
+    ) -> list[FolderSummary]:
+        try:
+            return await telegram.list_folders()
         except (TelegramServiceError, TimeoutError) as exc:
             raise_telegram_http_error(exc)
 

@@ -52,6 +52,11 @@ class ChatSummary(ApiModel):
     last_message: Optional[str] = None
 
 
+class FolderSummary(ApiModel):
+    id: int
+    title: str
+
+
 class TopicSummary(ApiModel):
     id: int
     title: str

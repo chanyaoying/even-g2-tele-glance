@@ -10,6 +10,7 @@ from app.dependencies import get_telegram_service, get_transcription_service
 from app.main import create_app
 from app.models import (
     ChatSummary,
+    FolderSummary,
     MessageSummary,
     PhoneLoginStart,
     SendMessageResponse,
@@ -39,11 +40,16 @@ class FakeTelegramService:
     async def logout(self):
         return None
 
-    async def list_chats(self, limit):
+    async def list_chats(self, limit, offset=0, folder_id=None):
+        self.chat_calls = getattr(self, "chat_calls", [])
+        self.chat_calls.append({"limit": limit, "offset": offset, "folder_id": folder_id})
         return [
             ChatSummary(id=1, title="Ada", kind="user", last_message="hello"),
             ChatSummary(id=2, title="Project", kind="group", is_forum=True),
-        ][:limit]
+        ][offset:offset + limit]
+
+    async def list_folders(self):
+        return [FolderSummary(id=2, title="Work"), FolderSummary(id=3, title="Family")]
 
     async def list_topics(self, chat_id):
         assert chat_id == 2
@@ -96,7 +102,7 @@ class TimeoutTelegramService(FakeTelegramService):
     async def auth_status(self):
         raise TelegramServiceTimeoutError("Telegram request timed out. Please retry.")
 
-    async def list_chats(self, limit):
+    async def list_chats(self, limit, offset=0, folder_id=None):
         raise TelegramServiceTimeoutError("Telegram request timed out. Please retry.")
 
 
@@ -160,6 +166,23 @@ async def test_chat_topic_and_message_endpoints(app, fake_services):
     assert telegram.message_calls == [
         {"chat_id": 2, "topic_id": 101, "before_id": 99, "limit": 3}
     ]
+
+
+@pytest.mark.asyncio
+async def test_chats_support_offset_folder_and_folders_endpoint(app, fake_services):
+    telegram, _ = fake_services
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        second_page = await client.get("/api/chats?limit=1&offset=1&folder_id=3")
+        folders = await client.get("/api/folders")
+        bad_offset = await client.get("/api/chats?limit=5&offset=-1")
+        bad_folder = await client.get("/api/chats?limit=5&folder_id=0")
+
+    assert [chat["title"] for chat in second_page.json()] == ["Project"]
+    assert telegram.chat_calls[-1] == {"limit": 1, "offset": 1, "folder_id": 3}
+    assert folders.json() == [{"id": 2, "title": "Work"}, {"id": 3, "title": "Family"}]
+    assert bad_offset.status_code == 422
+    assert bad_folder.status_code == 422
 
 
 @pytest.mark.asyncio
