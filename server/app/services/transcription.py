@@ -1,7 +1,7 @@
 import asyncio
-import os
+import io
 import struct
-import tempfile
+import wave
 from dataclasses import dataclass
 from typing import Optional
 
@@ -59,32 +59,46 @@ class WhisperTranscriptionService:
                 "recording is silent — try speaking closer to the glasses microphone"
             )
 
+        audio = _decode_wav_pcm16(wav_bytes)
         model = self._load_model()
-        temp_path = None
-        try:
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
-                handle.write(wav_bytes)
-                temp_path = handle.name
+        # Pass decoded samples, not a file path: faster-whisper only calls PyAV (av.open) for paths,
+        # and recent PyAV releases break that call. This also keeps FFmpeg out of the request path.
+        segments, info = model.transcribe(
+            audio,
+            language=language,
+            beam_size=self.settings.whisper_beam_size,
+            best_of=self.settings.whisper_best_of,
+            temperature=self.settings.whisper_temperature,
+            condition_on_previous_text=self.settings.whisper_condition_on_previous_text,
+        )
+        text = " ".join(seg.text.strip() for seg in segments)
+        if not text:
+            raise TranscriptionServiceError("no speech detected in recording")
+        return TranscriptionResponse(
+            text=text,
+            language=getattr(info, "language", None),
+            duration_seconds=getattr(info, "duration", None),
+        )
 
-            segments, info = model.transcribe(
-                temp_path,
-                language=language,
-                beam_size=self.settings.whisper_beam_size,
-                best_of=self.settings.whisper_best_of,
-                temperature=self.settings.whisper_temperature,
-                condition_on_previous_text=self.settings.whisper_condition_on_previous_text,
-            )
-            text = " ".join(seg.text.strip() for seg in segments)
-            if not text:
-                raise TranscriptionServiceError("no speech detected in recording")
-            return TranscriptionResponse(
-                text=text,
-                language=getattr(info, "language", None),
-                duration_seconds=getattr(info, "duration", None),
-            )
-        finally:
-            if temp_path:
-                os.unlink(temp_path)
+
+EXPECTED_SAMPLE_RATE = 16000
+
+
+def _decode_wav_pcm16(wav_bytes: bytes):
+    """Decode a 16 kHz mono 16-bit PCM WAV into float32 samples in [-1, 1)."""
+    import numpy as np
+
+    try:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as reader:
+            channels, width, rate = reader.getnchannels(), reader.getsampwidth(), reader.getframerate()
+            frames = reader.readframes(reader.getnframes())
+    except (wave.Error, EOFError) as exc:
+        raise TranscriptionServiceError(f"audio is not a readable WAV file: {exc}") from exc
+    if channels != 1 or width != 2 or rate != EXPECTED_SAMPLE_RATE:
+        raise TranscriptionServiceError(
+            f"audio must be 16 kHz mono 16-bit PCM WAV (got {rate} Hz, {channels} channel(s), {width * 8}-bit)"
+        )
+    return np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
 
 
 def _looks_like_wav(data: bytes) -> bool:

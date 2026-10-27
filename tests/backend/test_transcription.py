@@ -150,9 +150,11 @@ async def test_transcribe_wav_passes_language_override():
 
 
 @pytest.mark.asyncio
-async def test_transcribe_wav_cleans_up_temp_file():
-    service = WhisperTranscriptionService(settings=Settings())
+async def test_transcribe_wav_passes_decoded_samples_not_a_path():
+    """A path would route through av.open, which breaks on current PyAV releases."""
+    import numpy as np
 
+    service = WhisperTranscriptionService(settings=Settings())
     seg = MagicMock()
     seg.text = "ok"
 
@@ -164,3 +166,25 @@ async def test_transcribe_wav_cleans_up_temp_file():
         result = await service.transcribe_wav(make_tiny_wav())
 
     assert result.text == "ok"
+    audio = fake_model.transcribe.call_args.args[0]
+    assert isinstance(audio, np.ndarray) and audio.dtype == np.float32
+    assert len(audio) == 8000
+    assert -1.0 <= float(audio.min()) and float(audio.max()) < 1.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rate", [8000, 44100])
+async def test_transcribe_wav_rejects_unexpected_sample_rate(rate):
+    service = WhisperTranscriptionService(settings=Settings())
+    with patch.object(service, "_load_model") as load_mock:
+        with pytest.raises(TranscriptionServiceError, match="16 kHz mono"):
+            await service.transcribe_wav(make_tiny_wav(sample_rate=rate))
+    load_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_transcribe_wav_rejects_truncated_wav_header():
+    service = WhisperTranscriptionService(settings=Settings())
+    bogus = b"RIFF" + b"\x00" * 4 + b"WAVE" + b"\x00" * 60
+    with pytest.raises(TranscriptionServiceError):
+        await service.transcribe_wav(bogus)
