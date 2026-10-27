@@ -136,27 +136,40 @@ Per-step latencies are split into `stateMs` (input -> matching state event), `ap
 - **budget**: 500 ms
 - **apiCalls**: `startPhoneAuth` then `verifyPhoneAuth`
 
-### 4.5 `sidebar.chats` (root chat list, focus on left list)
+### 4.5 `sidebar.chats` (root chat list, full width, no preview)
 - **state**: `{ screen: 'sidebar', focus: 'chats', chats: [...5 chats...], selectedChatIndex: 0..4 }`
-- **render**: `{ kind: 'sidebar', title: 'Telegram', focus: 'sidebar' }`
-- **left**:
-  - `sidebarTitle`: `'Chats'`
+- **render**: `{ kind: 'sidebar', title: 'Chats', focus: 'panel', fullWidth: true }`
+- **left**: none. The sidebar column is collapsed; `sidebarItems` still carries the labels and `sidebarSelected` the marker for tests.
   - `sidebarItems.exact`: `['Fixture Alpha', 'Fixture Forum (3)', 'Fixture Ops', 'Fixture Research', 'Fixture Archive']`
-  - `sidebarItems.markerAt`: equals `state.selectedChatIndex`
   - The hidden list must have `isEventCapture: 0`; the text overlay is the only active listener
-  - `panelTitle`: `state.chats[selectedChatIndex].title` truncated to 20 chars
-  - `panelBody.contains`: `state.chats[selectedChatIndex].lastMessage` (fallback) OR cached messages for the selected chat. The selected chat preview loads on demand; startup does not block on warming every visible chat.
-  - `panelBody.notContains`: stale messages from any non-selected chat, AND the `lastMessage` of any other chat while the selected chat has cached messages. This is the regression that hid D2 — the right panel was stuck on the first chat's messages while the user scrolled.
+- **right** (the full-width panel body is the list itself, 7 rows max, windowed around the selection):
+  - `panelBody.contains`: `'> ' + selected chat label` (the marker row)
+  - `panelBody.notContains`: any message preview or `lastMessage` text. Chat previews no longer exist on this screen; they appear only on the topic screen.
   - `panelFooter`: `'Swipe chats | Press open'`
   - `panelBox`: `null`
 - **transitions**:
-  - `swipeUp` / `swipeDown` -> `state.selectedChatIndex` moves (clamped)
+  - `swipeUp` / `swipeDown` -> `state.selectedChatIndex` moves (clamped); no network calls
   - `press` on normal chat -> `sidebar.messages.normal`
   - `press` on forum chat -> `sidebar.topics.noPreview`
   - `selectIndex(n)` with `n === state.selectedChatIndex` after arming window -> `press`
-  - `doublePress` -> `asleep`; bridge must call `turnScreenOff` before state event
+  - `doublePress` -> `asleep` when the account has no Telegram folders; bridge must call `turnScreenOff` before state event
+  - `doublePress` -> `sidebar.folderPicker` when the account has folders
+- **paging**: 20 chats per page. When `selectedChatIndex >= chats.length - 3` and the last page was full, the next page is fetched (`offset` = loaded count), appended without duplicates, and the footer shows `Loading more chats...` meanwhile.
+- **backend cache**: the backend fetches chats from Telegram in blocks of 100 (one request each) and keeps them for 45 s, so consecutive pages cost no extra Telegram requests. Page one (`offset=0`) is always refetched and refreshes only the head of the cache, so background refreshes never discard pages already scrolled in. Folder pages scan from the top once and look ahead 60 matches on deeper pages.
+- **title**: `Chats`, or `<folder> <n>/<total>` (e.g. `Work 2/3`) when folders exist.
 - **budget**: 500 ms per swipe, 1000 ms after `init`
-- **apiCalls**: `listChats`
+- **apiCalls**: `listChats` (+ `listFolders` at startup, + paged `listChats` while scrolling). No `listMessages`/`listTopics` and no read acknowledgements while browsing the list; messages load when a chat is opened.
+
+### 4.5a `sidebar.folderPicker` (choose a Telegram folder or sleep)
+- **state**: `{ screen: 'folderPicker', chats, selectedChatIndex, options: ['All chats', ...folders, 'Sleep'], selectedIndex }`
+- **render**: `{ kind: 'sidebar', title: 'Folders', focus: 'panel', fullWidth: true }`; the body is the windowed option list with a `> ` marker on `selectedIndex`
+- **right**: `panelFooter`: `'Swipe choose | Press select | Double back'`; `panelBox`: `null`
+- **transitions**:
+  - `swipeUp` / `swipeDown` -> `selectedIndex` moves (clamped)
+  - `press` on a folder -> `sidebar.chats` for that folder (cached pages are restored; otherwise page 1 is fetched, falling back to the previous folder with an error status on failure)
+  - `press` on `Sleep` -> `asleep`
+  - `doublePress` -> `sidebar.chats` unchanged
+- **fixture note**: the fixture account has no folders, so the simulator harness never reaches this screen; it is covered by `web/test/controller.test.ts` (`folders`).
 
 ### 4.6 `sidebar.topics.noPreview` (forum topics, preview not yet loaded)
 - **state**: `{ screen: 'sidebar', focus: 'topics', chat, topics: [...4...], selectedTopicIndex: 0 }`
@@ -347,10 +360,10 @@ Per-step latencies are split into `stateMs` (input -> matching state event), `ap
 |#|Step name|Input|Expected target|Extra assertions|
 |---|---|---|---|---|
 |00|`00-startup-loading`|(boot)|`loading`|first render after `init`|
-|01|`01-chats-startup`|(after `init`)|`sidebar.chats`|`selectedChatIndex === 0`, panel shows `Fixture Alpha`|
-|02|`02-chats-swipe-down-1`|`swipeDown`|`sidebar.chats`|`selectedChatIndex === 1`, panel shows `Fixture Forum`|
-|03|`03-chats-swipe-down-2`|`swipeDown`|`sidebar.chats`|`selectedChatIndex === 2`, panel shows `Fixture Ops`|
-|04|`04-chats-swipe-down-3`|`swipeDown`|`sidebar.chats`|`selectedChatIndex === 3`, panel shows `Fixture Research`|
+|01|`01-chats-startup`|(after `init`)|`sidebar.chats`|`selectedChatIndex === 0`, list marker on `Fixture Alpha`|
+|02|`02-chats-swipe-down-1`|`swipeDown`|`sidebar.chats`|`selectedChatIndex === 1`, list marker on `Fixture Forum (3)`|
+|03|`03-chats-swipe-down-2`|`swipeDown`|`sidebar.chats`|`selectedChatIndex === 2`, list marker on `Fixture Ops`|
+|04|`04-chats-swipe-down-3`|`swipeDown`|`sidebar.chats`|`selectedChatIndex === 3`, list marker on `Fixture Research`|
 |05|`05-chats-swipe-up-1`|`swipeUp`|`sidebar.chats`|`selectedChatIndex === 2`|
 |06|`06-chats-swipe-up-2`|`swipeUp`|`sidebar.chats`|`selectedChatIndex === 1`|
 |07|`07-chats-swipe-up-3`|`swipeUp`|`sidebar.chats`|`selectedChatIndex === 0`|
