@@ -1,8 +1,8 @@
 {
-  "package_id": "com.jalatif.telegram",
+  "package_id": "com.chanyaoying.teleglance",
   "edition": "202601",
   "name": "TeleGlance",
-  "version": "1.0.45",
+  "version": "1.0.48",
   "min_app_version": "2.0.0",
   "min_sdk_version": "0.0.10",
   "entrypoint": "index.html",

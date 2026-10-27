@@ -34,6 +34,9 @@ pnpm-debug.log*
 # Builds and simulator output
 artifacts/
 *.ehpk
+# Per-developer packaging override (backend origin) and the manifest generated from it
+app.local.json
+.app-build/
 *.png
 # Old blank-glasses PNG goldens are not tracked (replaced by JSON goldens
 # in the same directory). New `.glasses.json` golden files are tracked

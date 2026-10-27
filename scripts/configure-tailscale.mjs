@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { normalizeBackendOrigin, updateAppJsonNetworkWhitelist } from './configure-tailscale-utils.mjs'
+import { LOCAL_OVERRIDE_FILE, buildEffectiveManifest, normalizeBackendOrigin } from './configure-tailscale-utils.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const backendPort = process.env.BACKEND_PORT ?? '8787'
@@ -12,12 +12,12 @@ const { backendOrigin, frontendOrigin } = resolveBackendAndFrontendOrigins()
 
 const appJsonPath = join(repoRoot, 'app.json')
 const appJson = JSON.parse(readFileSync(appJsonPath, 'utf8'))
-updateAppJsonNetworkWhitelist(appJson, backendOrigin)
-writeFileSync(appJsonPath, `${JSON.stringify(appJson, null, 2)}\n`)
+buildEffectiveManifest(appJson, { backendOrigin }) // validates that app.json still has its backend slot
+writeFileSync(join(repoRoot, LOCAL_OVERRIDE_FILE), `${JSON.stringify({ backendOrigin }, null, 2)}\n`)
 
 console.log(`Tailscale backend URL: ${backendOrigin}`)
 console.log(`Tailscale frontend URL: ${frontendOrigin}`)
-console.log('Updated app.json network whitelist.')
+console.log(`Saved ${LOCAL_OVERRIDE_FILE} (gitignored); app.json is unchanged. Packaging applies it automatically.`)
 console.log('Set this Backend URL in TeleGlance Settings if needed:')
 console.log(backendOrigin)
 

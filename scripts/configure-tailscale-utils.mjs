@@ -10,11 +10,16 @@ const FIXED_WHITELIST_ENTRIES = new Set([
 ])
 
 export function normalizeBackendOrigin(value) {
+  let url
   try {
-    return new URL(value).origin
+    url = new URL(value)
   } catch {
     throw new Error(`Invalid backend origin: ${value}`)
   }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`Backend origin must use http: or https:, got ${url.protocol} (${value})`)
+  }
+  return url.origin
 }
 
 export function updateAppJsonNetworkWhitelist(appJson, backendOrigin) {
@@ -48,4 +53,28 @@ function shouldReplaceWhitelistEntry(value, backendOrigin) {
 
 function unique(values) {
   return [...new Set(values)]
+}
+
+export const LOCAL_OVERRIDE_FILE = 'app.local.json'
+export const EFFECTIVE_MANIFEST_DIR = '.app-build'
+
+/** Validate the contents of app.local.json (a gitignored, per-developer override). */
+export function parseLocalOverride(raw) {
+  if (raw === null || raw === undefined) return {}
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error(`${LOCAL_OVERRIDE_FILE} must be a JSON object.`)
+  }
+  const override = {}
+  if (raw.backendOrigin !== undefined) {
+    if (typeof raw.backendOrigin !== 'string') throw new Error(`${LOCAL_OVERRIDE_FILE}: backendOrigin must be a string.`)
+    override.backendOrigin = normalizeBackendOrigin(raw.backendOrigin)
+  }
+  return override
+}
+
+/** app.json (tracked, with the placeholder) + optional local override -> the manifest that gets packaged. */
+export function buildEffectiveManifest(appJson, override = {}) {
+  const manifest = structuredClone(appJson)
+  if (override.backendOrigin) updateAppJsonNetworkWhitelist(manifest, override.backendOrigin)
+  return manifest
 }

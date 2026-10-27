@@ -176,7 +176,7 @@ npm run configure:tailscale
 npm run dev:tailscale
 ```
 
-`configure:tailscale` detects the machine's Tailscale IP and substitutes the runtime placeholder (`http://<BACKEND_URL>:8787`) in `app.json`'s `network.whitelist` for that origin before packaging. If you are not using Tailscale, set `BACKEND_ORIGIN` to the exact backend origin you plan to ship, rerun the configurator, and repack before sideloading.
+`configure:tailscale` detects the machine's Tailscale IP and saves it to `app.local.json` (gitignored). `app.json` is not modified and keeps the runtime placeholder (`http://<BACKEND_URL>:8787`); `scripts/effective-manifest.mjs` (run automatically by `scripts/upload.mjs`) substitutes your origin into a generated, gitignored `.app-build/app.json` that gets packaged. If you are not using Tailscale, set `BACKEND_ORIGIN` to the exact backend origin you plan to ship, rerun the configurator, and repack before sideloading.
 
 If backend requests fail with CORS errors while using a custom URL, prefer Tailscale first. If you must use another private network range, add a regex override in root `.env`, for example:
 
@@ -223,7 +223,8 @@ simulator investigation, implemented fixes, and remaining harness work.
 
 ```sh
 npm run build --prefix web
-npx --yes @evenrealities/evenhub-cli pack app.json web/dist -o tele-glance-<version>.ehpk
+node scripts/effective-manifest.mjs   # writes .app-build/app.json (app.json + app.local.json)
+npx --yes @evenrealities/evenhub-cli@0.2.0 pack .app-build/app.json web/dist -o tele-glance-<version>.ehpk
 ```
 
 The default `.ehpk` contains only the frontend and manifest and keeps the shared testing backend available for onboarding. For a custom self-hosted or Tailscale backend package, run `npm run configure:tailscale --prefix web` first, then rebuild and pack.

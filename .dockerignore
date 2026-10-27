@@ -8,3 +8,6 @@ server/.venv
 tests
 web/dist
 web/node_modules
+**/*.ehpk
+.env.*
+web/test/seed-credentials*.json

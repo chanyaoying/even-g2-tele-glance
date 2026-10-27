@@ -27,5 +27,9 @@ for arg in "$@"; do
   fi
 done
 
+if [[ "$HOST" == "0.0.0.0" ]]; then
+  echo "Warning: binding 0.0.0.0:8787 (all interfaces) over plain HTTP. Limit access with a firewall or Tailscale, or pass --local." >&2
+fi
+
 cd "$SERVER_DIR"
 exec "$PYTHON" -m uvicorn app.main:app --host "$HOST" --port 8787 "${ARGS[@]}"

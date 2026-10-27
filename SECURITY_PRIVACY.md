@@ -41,7 +41,7 @@ distribution with auto-generated sessions, anonymous public sign-up.
 | Real Telethon `telegram.session` file | `server/data/telegram.session` (gitignored) | SQLite | stays on the backend host only |
 | User phone number (entered at phone-code login) | frontend phone UI, transient | text | AES-GCM-encrypted in `start_phone_login` body |
 | Telegram login code (entered by user) | frontend phone UI, transient | text | AES-GCM-encrypted in `complete_phone_login` body |
-| Phone-code hash returned by Telethon | backend in-memory dict keyed by phone | text | stays in backend memory |
+| Phone-code hash returned by Telethon | backend in-memory dict keyed by phone, on a pending login client that is discarded once sign-in succeeds | text | stays in backend memory |
 | User `chatId` / `topicId` / message text | backend session state, in-flight JSON | text | AES-GCM-encrypted over the wire |
 
 ## 3. Git-tracked files: what is and is not checked in
@@ -89,7 +89,7 @@ Confirmed by `git check-ignore` on every sensitive path:
 - `ghost-bug-screenshot.png` (132 KB, June 2, untracked) — a debugging
   artifact for a chat-list rendering issue, already covered by
   `*.png` in `.gitignore`.
-- `tele-glance-1.0.26.ehpk` — current shipped package, gitignored.
+- Built `*.ehpk` packages are gitignored. `tele-glance-1.0.45.ehpk` was force-added in an earlier commit and old `even-telegram-*.ehpk` blobs remain in history; they were decoded in the audit and hold no credentials, but should be untracked.
 
 ## 4. `.ehpk` bundle audit
 
@@ -127,9 +127,20 @@ frontend no longer carries a public shared-backend default.
   - Same AES-GCM + PBKDF2 + AAD scheme.
   - Replay window: nonce seen within 300 s is rejected.
   - Auth timestamp must be within ±120 s of server time.
-  - The server does not cache the derived key (PBKDF2 200k iters on
-    server-class hardware is sub-50 ms, and the server holds the secret
-    in memory anyway).
+  - The server caches the derived key per secret (`functools.lru_cache`
+    on `_derive_key`) so the 200k-iteration PBKDF2 does not run per request
+    and cannot be used to stall the event loop. Replay nonces are recorded
+    only after a header decrypts and validates, so unauthenticated callers
+    cannot grow the nonce map.
+  - Every mutating `/api/` request that carries `X-TeleGlance-Auth` must send an
+    encrypted body envelope regardless of Content-Type spelling (only the
+    multipart `/api/transcribe` upload is exempt).
+  - Scope of the protection: the app-layer AES-GCM gives confidentiality
+    against passive observers. It is not a substitute for TLS: responses are
+    not authenticated (the client only decrypts when the plain
+    `X-TeleGlance-Encrypted` header is present), so an active attacker on a
+    plain-HTTP hop can tamper with or block traffic. Use Tailscale (WireGuard)
+    or HTTPS as the real transport boundary.
 - Encrypted JSON envelopes: every `/api/...` request and response body
   passes through `encrypt_payload`/`decrypt_payload` when the auth
   header is present and the secret is set. `Content-Type` must be JSON.

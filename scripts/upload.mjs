@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { createHash } from 'node:crypto'
+import { writeEffectiveManifest } from './effective-manifest.mjs'
 import { readFileSync, existsSync, statSync, writeFileSync } from 'node:fs'
 import { join, basename } from 'node:path'
 import { homedir } from 'node:os'
@@ -179,6 +181,7 @@ async function uploadPackage() {
   const fileSize = statSync(packagePath).size
   const pid = projectId()
   console.log(`📋 Package: ${fileName} (${(fileSize / 1024).toFixed(1)} KB)`)
+  console.log(`📋 SHA-256: ${createHash('sha256').update(fileBuffer).digest('hex')}`)
   console.log(`📋 Project: ${pid}`)
 
   if (hasFlag('dry-run')) {
@@ -300,9 +303,11 @@ function buildAndPack() {
 
   const version = readAppVersion()
   const output = `tele-glance-${version}.ehpk`
+  const manifest = writeEffectiveManifest(repoRoot)
+  console.log(manifest.backendOrigin ? `🔧 Local backend origin from app.local.json: ${manifest.backendOrigin}` : '🔧 No app.local.json: packaging app.json as is')
   console.log(`📦 Packing ${output}...`)
   execSync(
-    `npx --yes @evenrealities/evenhub-cli pack app.json web/dist -o ${output}`,
+    `npx --yes @evenrealities/evenhub-cli@0.2.0 pack ${manifest.relativePath} web/dist -o ${output}`,
     { cwd: repoRoot, stdio: 'inherit' }
   )
   return join(repoRoot, output)
