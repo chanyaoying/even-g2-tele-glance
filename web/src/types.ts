@@ -28,6 +28,11 @@ export type Chat = {
   lastMessage?: string | null
 }
 
+export type Folder = {
+  id: Id
+  title: string
+}
+
 export type Topic = {
   id: Id
   title: string

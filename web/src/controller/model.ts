@@ -50,7 +50,8 @@ export type BoxedText = {
 export type AppState =
   | { screen: 'loading'; message: string }
   | { screen: 'auth'; mode: 'needsSetup' | 'signedOut' | 'phonePending'; message: string; phone?: string; phoneCodeHash?: string | null; passwordRequired?: boolean }
-  | { screen: 'sidebar'; focus: 'chats'; chats: Chat[]; selectedChatIndex: number; status?: string; previewMessages?: Message[]; previewCursor?: Id; previewScrollOffset?: number; previewNewerPages?: Message[][]; previewIsNewestPage?: boolean }
+  | { screen: 'sidebar'; focus: 'chats'; chats: Chat[]; selectedChatIndex: number; status?: string; folderLabel?: string; loadingMore?: boolean; previewMessages?: Message[]; previewCursor?: Id; previewScrollOffset?: number; previewNewerPages?: Message[][]; previewIsNewestPage?: boolean }
+  | { screen: 'folderPicker'; chats: Chat[]; selectedChatIndex: number; folderLabel?: string; options: string[]; selectedIndex: number }
   | { screen: 'asleep'; chats: Chat[]; selectedChatIndex: number }
   | { screen: 'newMessage'; chat: Chat; topic?: Topic; message: string; chats: Chat[]; selectedChatIndex: number }
   | { screen: 'sidebar'; focus: 'topics';
@@ -118,39 +119,19 @@ export function screenModel(state: AppState): ScreenModel {
     case 'sidebar': {
       switch (state.focus) {
         case 'chats': {
-          const selected = state.chats[state.selectedChatIndex]
-          const previewMessages = state.previewMessages
-          const previewLoaded = previewMessages !== undefined
-          const scrollOffset = state.previewScrollOffset ?? 0
-          const msg = previewMessages ? formatMessages(previewMessages, scrollOffset) : undefined
+          // Full-width list with no message preview. Previews only appear on the topic screen.
+          // The list is drawn into the (stable-id) panel body so the app-owned marker stays in sync.
           return {
             kind: 'sidebar',
-            title: l.titleTelegram,
+            title: sanitizeGlassesText(state.folderLabel ?? l.titleChats),
             sidebarTitle: l.titleChats,
             sidebarItems: state.chats.map(chatLabel),
             sidebarSelected: state.selectedChatIndex,
-            panelTitle: selected ? sanitizeGlassesText(selected.title.slice(0, 20)) : '',
-            panelBody: msg?.box
-              ? ''
-              : (msg?.body
-                ?? state.status
-                ?? (selected?.lastMessage
-                ? trimUtf8Bytes(sanitizeGlassesText(selected.lastMessage.slice(0, 200)), TEXT_CONTAINER_BYTE_LIMIT)
-                  : ' ')),
-            panelBox: msg?.box,
-            // The footer tells the user what the gestures do, not
-            // what is on the right panel. "Swipe chats" makes it
-            // unambiguous that swipes change the left list; "Press
-            // open" tells the user the press opens the selected
-            // chat. The previous "Scroll msgs" wording was being
-            // misread as "the right side scrolls", which it does
-            // not — swipes on the chats list scroll the left list,
-            // and the right panel updates with the new chat's
-            // preview. See `docs/UI_INVARIANTS.md` sidebar.chats.
-            panelFooter: previewLoaded
-              ? l.footerSwipeChats
-              : (state.status ?? l.footerSwipeChats),
-            focus: 'sidebar',
+            panelTitle: '',
+            panelBody: formatFullWidthChatList(state.chats.map(chatLabel), state.selectedChatIndex),
+            panelFooter: state.loadingMore ? l.statusLoadingMoreChats : (state.status ?? l.footerSwipeChats),
+            fullWidth: true,
+            focus: 'panel',
           }
         }
         case 'topics': {
@@ -235,6 +216,19 @@ export function screenModel(state: AppState): ScreenModel {
         }
       }
     }
+    case 'folderPicker':
+      return {
+        kind: 'sidebar',
+        title: l.titleFolders,
+        sidebarTitle: l.titleFolders,
+        sidebarItems: state.options,
+        sidebarSelected: state.selectedIndex,
+        panelTitle: '',
+        panelBody: formatFullWidthChatList(state.options, state.selectedIndex),
+        panelFooter: l.footerFolderPicker,
+        fullWidth: true,
+        focus: 'panel',
+      }
     case 'asleep':
       return {
         kind: 'text',
@@ -311,6 +305,20 @@ export function screenModel(state: AppState): ScreenModel {
       }
   }
 }
+const CHAT_LIST_VISIBLE_ROWS = 7
+const CHAT_LIST_ROW_CHARS = 44
+
+function formatFullWidthChatList(labels: string[], selected: number): string {
+  if (labels.length === 0) return ' '
+  const clamped = Math.max(0, Math.min(selected, labels.length - 1))
+  const start = Math.max(0, Math.min(clamped - Math.floor(CHAT_LIST_VISIBLE_ROWS / 2), labels.length - CHAT_LIST_VISIBLE_ROWS))
+  const body = labels
+    .slice(start, start + CHAT_LIST_VISIBLE_ROWS)
+    .map((label, i) => `${start + i === clamped ? '> ' : '  '}${label.slice(0, CHAT_LIST_ROW_CHARS)}`)
+    .join('\n')
+  return trimUtf8Bytes(body, TEXT_CONTAINER_BYTE_LIMIT)
+}
+
 function chatLabel(chat: Chat) {
   const unread = chat.unreadCount ? ` (${chat.unreadCount})` : ''
   return sanitizeGlassesText(`${chat.title}${unread}`)

@@ -1,6 +1,7 @@
 import type {
   AuthStatus,
   Chat,
+  Folder,
   Id,
   MarkReadRequest,
   Message,
@@ -15,12 +16,15 @@ import type {
 } from './types'
 import { decryptJsonPayload, encryptedTelegramAuthHeader, encryptJsonPayload } from './secureAuth'
 
+export type ListChatsOptions = { offset?: number; folderId?: Id }
+
 export interface TelegramApi {
   authStatus(): Promise<AuthStatus>
   startPhoneAuth(phone: string): Promise<PhoneAuthStart>
   verifyPhoneAuth(phone: string, code: string, phoneCodeHash?: string | null, password?: string): Promise<PhoneAuthStatus>
   logout(): Promise<void>
-  listChats(limit?: number): Promise<Chat[]>
+  listChats(limit?: number, options?: ListChatsOptions): Promise<Chat[]>
+  listFolders(): Promise<Folder[]>
   listTopics(chatId: Id): Promise<Topic[]>
   listMessages(chatId: Id, options?: { topicId?: Id; beforeId?: Id; limit?: number }): Promise<Message[]>
   sendMessage(chatId: Id, request: SendMessageRequest): Promise<Message>
@@ -114,8 +118,15 @@ export class HttpTelegramApi implements TelegramApi {
     await this.post('/api/session/logout')
   }
 
-  async listChats(limit = 5): Promise<Chat[]> {
-    return this.get(`/api/chats?limit=${encodeURIComponent(String(limit))}`)
+  async listChats(limit = 5, options: ListChatsOptions = {}): Promise<Chat[]> {
+    const params = new URLSearchParams({ limit: String(limit) })
+    if (options.offset) params.set('offset', String(options.offset))
+    if (options.folderId !== undefined) params.set('folder_id', String(options.folderId))
+    return this.get(`/api/chats?${params.toString()}`)
+  }
+
+  async listFolders(): Promise<Folder[]> {
+    return this.get('/api/folders')
   }
 
   async listTopics(chatId: Id): Promise<Topic[]> {

@@ -1,5 +1,5 @@
-import type { TelegramApi } from './api'
-import type { Chat, Id, Message, TelegramTypingUpdate, TelegramUpdate, Topic, TranscriptionResult } from './types'
+import type { ListChatsOptions, TelegramApi } from './api'
+import type { Chat, Folder, Id, Message, TelegramTypingUpdate, TelegramUpdate, Topic, TranscriptionResult } from './types'
 import { getFixtureTestOverrides } from './testMode'
 
 const fixtureChats: Chat[] = [
@@ -233,10 +233,16 @@ export class FixtureTelegramApi implements TelegramApi {
   async logout() {
     return undefined
   }
-  async listChats(limit = 20) {
+  async listChats(limit = 20, options: ListChatsOptions = {}) {
     if (this.slowChatsMs > 0) await fixtureDelay(this.slowChatsMs)
     else await fixtureDelay(40)
-    return this.getChats().slice(0, limit).map((chat) => ({ ...chat, ...(this.chatOverrides.get(String(chat.id)) ?? {}) }))
+    // The fixture account has no Telegram folders, so folder filtering is never exercised here.
+    const offset = options.offset ?? 0
+    return this.getChats().slice(offset, offset + limit).map((chat) => ({ ...chat, ...(this.chatOverrides.get(String(chat.id)) ?? {}) }))
+  }
+
+  async listFolders(): Promise<Folder[]> {
+    return []
   }
 
   async listTopics(chatId: Id) {

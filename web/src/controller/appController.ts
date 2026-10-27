@@ -1,6 +1,7 @@
 import { MAX_RECORDING_BYTES, pcmChunksToWav } from '../audio/wav'
 import type { TelegramApi } from '../api'
-import type { Chat, Id, Message, TelegramUpdate, TelegramTypingUpdate, Topic } from '../types'
+import type { Chat, Folder, Id, Message, TelegramUpdate, TelegramTypingUpdate, Topic } from '../types'
+import { getLocale } from '../locales'
 import type { AppInput, AppState, RecoverableState, ScreenModel } from './model'
 import { messageScrollUnitCount, nextMessageScrollOffset, screenModel } from './model'
 import { isTeleGlanceFixtureMode, logLifecycleEvent, logRecordingEvent, logStateWork, nowMs } from '../testMode'
@@ -27,12 +28,13 @@ export interface GlassesBridge {
 const MESSAGE_PAGE_LIMIT = 8
 const OLDER_PREFETCH_LOW_WATER = 4
 const CHAT_LIST_LIMIT = 20
+// When the selection gets this close to the end of the loaded chats, fetch the next page.
+const CHAT_LOAD_MORE_THRESHOLD = 3
 const LOADING_OLDER_STATUS = 'Loading older messages...'
 const RENDER_DEFER_MS = 0
 const RENDER_COOLDOWN_MS = 60
 const INPUT_QUIET_MS = 900
 const TOPIC_PREVIEW_IDLE_MS = 200
-const CHAT_PREVIEW_IDLE_MS = 150
 // How long after a full `bridge.render()` we treat a list click as
 // post-firmware-reset. The G2 firmware (and the simulator) reset the
 // post-firmware-reset. The G2 firmware (and the simulator) reset the
@@ -81,6 +83,13 @@ export class TelegramAppController {
     }
     | undefined
   private rootRefreshInFlight = false
+  // Telegram chat folders. `activeFolderId === undefined` means "All chats".
+  private folders: Folder[] = []
+  private activeFolderId: Id | undefined
+  private chatsHasMore = false
+  private loadingMoreChats = false
+  private folderSwitchId = 0
+  private folderChatsCache = new Map<string, { chats: Chat[]; hasMore: boolean }>()
   private messageRefreshInFlight = false
   private topicPreviewDebounce: ReturnType<typeof setTimeout> | undefined
   private deferredRootRefreshTimer: ReturnType<typeof setTimeout> | undefined
@@ -92,7 +101,6 @@ export class TelegramAppController {
   // fall through to `messageCache` so the startup prefetch is reused for previews.
   private messageCache = new Map<string, { messages: Message[]; cursor?: Id }>()
   private topicPreviewCache = this.messageCache
-  private chatPreviewCache = this.messageCache
   private topicPreviewInFlight = new Set<string>()
   private chatPreviewDebounce: ReturnType<typeof setTimeout> | undefined
   private chatPreviewInFlight = new Set<string>()
@@ -406,6 +414,9 @@ export class TelegramAppController {
       case 'sidebar':
         await this.handleSidebar(state, input)
         return
+      case 'folderPicker':
+        await this.handleFolderPicker(state, input)
+        return
       case 'asleep':
         await this.handleAsleep(state, input)
         return
@@ -549,8 +560,13 @@ export class TelegramAppController {
       // cluster window). See `isIdleSystemDoublePress` and AGENTS.md
       // "Idle doublePress events on the G2 / simulator can mimic
       // user input."
-      this.rememberChats(state.chats)
       this.cancelChatDebounce()
+      if (this.folders.length > 0) {
+        // With folders, double-tap opens the folder picker (which also offers Sleep).
+        await this.openFolderPicker(state)
+        return
+      }
+      this.rememberChats(state.chats)
       await this.setState({ screen: 'asleep', chats: state.chats, selectedChatIndex: state.selectedChatIndex })
       await this.bridge.turnScreenOff?.()
       if (isTeleGlanceFixtureMode()) logLifecycleEvent('asleep', { input: input.type, selectedChatIndex: state.selectedChatIndex })
@@ -560,34 +576,27 @@ export class TelegramAppController {
       this.openRequestId += 1
       this.cancelChatDebounce()
       const newIndex = moveSelection(state.selectedChatIndex, state.chats.length, -1)
-      const nextChat = state.chats[newIndex]
-      const cached = nextChat ? this.getChatPreviewCached(nextChat) : undefined
+      // The chat list is full width with no preview, so moving the selection never fetches messages.
       await this.setStateForListScroll({
         ...state,
         selectedChatIndex: newIndex,
         status: undefined,
-        ...(cached
-          ? { previewMessages: cached.messages, previewCursor: cached.cursor, previewScrollOffset: 0, previewIsNewestPage: true }
-          : emptyChatPreview()),
+        ...emptyChatPreview(),
       })
-      if (nextChat && !cached) this.debounceChatPreviewFetch(state.chats, newIndex)
       return
     }
     if (input.type === 'swipeDown') {
       this.openRequestId += 1
       this.cancelChatDebounce()
       const newIndex = moveSelection(state.selectedChatIndex, state.chats.length, 1)
-      const nextChat = state.chats[newIndex]
-      const cached = nextChat ? this.getChatPreviewCached(nextChat) : undefined
+      // The chat list is full width with no preview, so moving the selection never fetches messages.
       await this.setStateForListScroll({
         ...state,
         selectedChatIndex: newIndex,
         status: undefined,
-        ...(cached
-          ? { previewMessages: cached.messages, previewCursor: cached.cursor, previewScrollOffset: 0, previewIsNewestPage: true }
-          : emptyChatPreview()),
+        ...emptyChatPreview(),
       })
-      if (nextChat && !cached) this.debounceChatPreviewFetch(state.chats, newIndex)
+      this.maybeLoadMoreChats(state, newIndex)
       return
     }
     if (input.type === 'selectIndex') {
@@ -596,17 +605,13 @@ export class TelegramAppController {
         this.openRequestId += 1
         this.cancelChatDebounce()
       }
-      const nextChat = state.chats[selectedChatIndex]
-      const cached = nextChat ? this.getChatPreviewCached(nextChat) : undefined
       await this.setStateForListScroll({
         ...state,
         selectedChatIndex,
         status: undefined,
-        ...(cached
-          ? { previewMessages: cached.messages, previewCursor: cached.cursor, previewScrollOffset: 0, previewIsNewestPage: true }
-          : emptyChatPreview()),
+        ...emptyChatPreview(),
       })
-      if (nextChat && !cached) this.debounceChatPreviewFetch(state.chats, selectedChatIndex)
+      this.maybeLoadMoreChats(state, selectedChatIndex)
       return
     }
     if (input.type !== 'press') return
@@ -632,7 +637,7 @@ export class TelegramAppController {
     // AGENTS.md "Idle doublePress events on the G2 / simulator can
     // mimic user input."
     if (isTeleGlanceFixtureMode()) logLifecycleEvent('wake', { selectedChatIndex: state.selectedChatIndex })
-    await this.setState({ screen: 'sidebar', focus: 'chats', chats: state.chats, selectedChatIndex: state.selectedChatIndex })
+    await this.setState(this.chatsState(state.chats, state.selectedChatIndex))
   }
 
   private async handleNewMessage(state: Extract<AppState, { screen: 'newMessage' }>, input: AppInput) {
@@ -645,11 +650,7 @@ export class TelegramAppController {
       return
     }
     if (input.type !== 'press') return
-    await this.openMessages(state.chat, state.topic, {
-      screen: 'sidebar', focus: 'chats',
-      chats: state.chats,
-      selectedChatIndex: state.selectedChatIndex,
-    })
+    await this.openMessages(state.chat, state.topic, this.chatsState(state.chats, state.selectedChatIndex))
   }
 
   private async handleSidebarTopics(
@@ -659,10 +660,7 @@ export class TelegramAppController {
       // The dispatch-level filter in `dispatch` has already dropped
       // any idle system `doublePress`. See `isIdleSystemDoublePress`.
       this.cancelTopicDebounce()
-      await this.setState({
-        screen: 'sidebar', focus: 'chats',
-        chats: state.chats, selectedChatIndex: state.selectedChatIndex,
-      })
+      await this.setState(this.chatsState(state.chats, state.selectedChatIndex))
       return
     }
     if (input.type === 'swipeUp' || input.type === 'swipeDown') {
@@ -832,22 +830,6 @@ export class TelegramAppController {
     }
   }
 
-  private debounceChatPreviewFetch(chats: Chat[], selectedChatIndex: number) {
-    const chat = chats[selectedChatIndex]
-    if (!chat) return
-    this.cancelChatDebounce()
-    this.chatPreviewDebounce = setTimeout(() => {
-      this.chatPreviewDebounce = undefined
-      if (this.isInputQuiet()) {
-        this.debounceChatPreviewFetch(chats, selectedChatIndex)
-        return
-      }
-      void this.fetchChatPreview(chat).catch(() => undefined)
-    }, this.chatPreviewDelayMs())
-    const maybeNodeTimeout = this.chatPreviewDebounce as unknown as { unref?: () => void }
-    maybeNodeTimeout.unref?.()
-  }
-
   private cancelChatDebounce() {
     if (!this.chatPreviewDebounce) return
     clearTimeout(this.chatPreviewDebounce)
@@ -855,67 +837,10 @@ export class TelegramAppController {
   }
 
   /**
-   * Synchronous cache lookup for the chat preview path. Prefers the legacy `chatPreviewCache`
-   * (which is now an alias of `messageCache`) and falls through to the same map with the
-   * `messageThreadKey` shape that `prefetchVisibleChats` populates on startup. This is the
-   * single source of truth that lets the right panel update from cache on every swipe.
-   */
-  private getChatPreviewCached(chat: Chat) {
-    return this.chatPreviewCache.get(String(chat.id))
-      ?? this.messageCache.get(messageThreadKey({ chat, topic: undefined }))
-  }
-
-  /**
    * Synchronous cache lookup for the topic preview path.
    */
   private getTopicPreviewCached(chat: Chat, topic: Topic) {
     return this.topicPreviewCache.get(messageThreadKey({ chat, topic }))
-  }
-
-  private async fetchChatPreview(chat: Chat) {
-    const cacheKey = String(chat.id)
-    const threadKey = messageThreadKey({ chat, topic: undefined })
-    const cached = this.chatPreviewCache.get(cacheKey) ?? this.messageCache.get(threadKey)
-    if (cached) {
-      const state = this.state
-      if (state.screen !== 'sidebar' || state.focus !== 'chats') return
-      if (!chatMatchesSelection(state, chat)) return
-      await this.setStateWithPartialRender({
-        ...state,
-        status: undefined,
-        previewMessages: cached.messages,
-        previewCursor: cached.cursor,
-        previewScrollOffset: 0,
-        previewIsNewestPage: true,
-      }, chat, undefined, cached.messages)
-      return
-    }
-
-    if (this.chatPreviewInFlight.has(cacheKey)) return
-    this.chatPreviewInFlight.add(cacheKey)
-    try {
-      const messages = await this.api.listMessages(chat.id, { limit: MESSAGE_PAGE_LIMIT })
-      const normalized = normalizeMessagePage(messages)
-      this.chatPreviewCache.set(cacheKey, { messages: normalized, cursor: oldestMessageId(normalized) })
-      this.messageCache.set(threadKey, { messages: normalized, cursor: oldestMessageId(normalized) })
-      const state = this.state
-      if (state.screen !== 'sidebar' || state.focus !== 'chats') return
-      if (!chatMatchesSelection(state, chat)) return
-      await this.setStateWithPartialRender({
-        ...state,
-        status: undefined,
-        previewMessages: normalized,
-        previewCursor: oldestMessageId(normalized),
-        previewScrollOffset: 0,
-        previewIsNewestPage: true,
-      }, chat, undefined, normalized)
-    } finally {
-      this.chatPreviewInFlight.delete(cacheKey)
-    }
-  }
-
-  private chatPreviewDelayMs() {
-    return Math.max(CHAT_PREVIEW_IDLE_MS, this.msUntilQuiet())
   }
 
   private async scheduleMessagePress(
@@ -1165,10 +1090,7 @@ export class TelegramAppController {
     if (input.type === 'doublePress') {
       // The dispatch-level filter in `dispatch` has already dropped
       // any idle system `doublePress`. See `isIdleSystemDoublePress`.
-      await this.setState({
-        screen: 'sidebar', focus: 'chats',
-        chats: state.chats, selectedChatIndex: state.selectedChatIndex,
-      })
+      await this.setState(this.chatsState(state.chats, state.selectedChatIndex))
       return
     }
     if (input.type === 'press') {
@@ -1199,17 +1121,182 @@ export class TelegramAppController {
 
   private async loadChats(previous?: RecoverableState) {
     await this.run(async () => {
-      const chats = await this.api.listChats(CHAT_LIST_LIMIT)
+      const [chats, folders] = await Promise.all([
+        this.api.listChats(CHAT_LIST_LIMIT),
+        // Folders are optional: a failure here must never block the chat list.
+        this.api.listFolders().catch(() => [] as Folder[]),
+      ])
+      this.folders = folders
+      this.activeFolderId = undefined
+      this.chatsHasMore = chats.length >= CHAT_LIST_LIMIT
+      this.loadingMoreChats = false
+      this.folderChatsCache.clear()
+      this.folderSwitchId += 1
       this.rememberChats(chats)
-      await this.setState({ screen: 'sidebar', focus: 'chats', chats, selectedChatIndex: 0 })
-      this.prefetchVisibleChats(chats)
-      // Kick off the first chat's preview fetch so the right panel shows the cached
-      // messages on the first paint once the prefetch completes. The first paint still
-      // uses the `lastMessage` fallback (no cache yet), but the debounced fetch closes
-      // the gap as soon as the prefetched page arrives — the partial-render path
-      // refreshes the right panel without snapping the list.
-      this.debounceChatPreviewFetch(chats, 0)
+      await this.setState(this.chatsState(chats, 0))
+      // The chat list has no preview panel, so nothing is fetched until a chat is opened.
     }, previous)
+  }
+
+  /** Chat-list state for the active folder; every rebuild goes through here so the title keeps its folder label. */
+  private chatsState(
+    chats: Chat[],
+    selectedChatIndex: number,
+    extra: { loadingMore?: boolean; status?: string } = {},
+  ): Extract<AppState, { screen: 'sidebar'; focus: 'chats' }> {
+    return { screen: 'sidebar', focus: 'chats', chats, selectedChatIndex, folderLabel: this.folderLabel(), ...extra }
+  }
+
+  private folderKey(folderId: Id | undefined) {
+    return folderId === undefined ? 'all' : String(folderId)
+  }
+
+  private folderPosition(): number {
+    if (this.activeFolderId === undefined) return 0
+    const index = this.folders.findIndex((folder) => String(folder.id) === String(this.activeFolderId))
+    return index >= 0 ? index + 1 : 0
+  }
+
+  private folderLabel(): string | undefined {
+    if (this.folders.length === 0) return undefined
+    const position = this.folderPosition()
+    const name = position === 0 ? getLocale().folderAllChats : this.folders[position - 1].title
+    return `${name} ${position + 1}/${this.folders.length + 1}`
+  }
+
+  private maybeLoadMoreChats(state: Extract<AppState, { screen: 'sidebar'; focus: 'chats' }>, selectedIndex: number) {
+    if (!this.chatsHasMore || this.loadingMoreChats) return
+    if (selectedIndex < state.chats.length - CHAT_LOAD_MORE_THRESHOLD) return
+    void this.loadMoreChats().catch(() => undefined)
+  }
+
+  private async loadMoreChats() {
+    const folderId = this.activeFolderId
+    const switchId = this.folderSwitchId
+    const start = this.state
+    if (start.screen !== 'sidebar' || start.focus !== 'chats') return
+    this.loadingMoreChats = true
+    this.setStateForListScroll({ ...start, loadingMore: true })
+    try {
+      const page = await this.api.listChats(CHAT_LIST_LIMIT, { offset: start.chats.length, folderId })
+      if (switchId !== this.folderSwitchId) return
+      this.chatsHasMore = page.length >= CHAT_LIST_LIMIT
+      const current = this.state
+      const base = current.screen === 'sidebar' && current.focus === 'chats' ? current.chats : start.chats
+      const known = new Set(base.map((chat) => String(chat.id)))
+      const chats = [...base, ...page.filter((chat) => !known.has(String(chat.id)))]
+      this.folderChatsCache.set(this.folderKey(folderId), { chats, hasMore: this.chatsHasMore })
+      if (current.screen === 'sidebar' && current.focus === 'chats') {
+        this.setStateForListScroll({ ...current, chats, loadingMore: false })
+      }
+    } catch {
+      // Leave the list as is; the next swipe near the end retries.
+    } finally {
+      this.loadingMoreChats = false
+      const current = this.state
+      if (switchId === this.folderSwitchId && current.screen === 'sidebar' && current.focus === 'chats' && current.loadingMore) {
+        this.setStateForListScroll({ ...current, loadingMore: false })
+      }
+    }
+  }
+
+  private async openFolderPicker(state: Extract<AppState, { screen: 'sidebar'; focus: 'chats' }>) {
+    const l = getLocale()
+    await this.setState({
+      screen: 'folderPicker',
+      chats: state.chats,
+      selectedChatIndex: state.selectedChatIndex,
+      folderLabel: state.folderLabel,
+      options: [l.folderAllChats, ...this.folders.map((folder) => folder.title), l.folderSleep],
+      selectedIndex: this.folderPosition(),
+    })
+  }
+
+  private async handleFolderPicker(state: Extract<AppState, { screen: 'folderPicker' }>, input: AppInput) {
+    if (input.type === 'doublePress') {
+      await this.setState(this.chatsState(state.chats, state.selectedChatIndex))
+      return
+    }
+    if (input.type === 'swipeUp' || input.type === 'swipeDown') {
+      const selectedIndex = moveSelection(state.selectedIndex, state.options.length, input.type === 'swipeUp' ? -1 : 1)
+      this.setStateForListScroll({ ...state, selectedIndex })
+      return
+    }
+    if (input.type === 'selectIndex') {
+      if (input.index !== undefined && input.index >= 0 && input.index < state.options.length && input.index !== state.selectedIndex) {
+        this.setStateForListScroll({ ...state, selectedIndex: input.index })
+      }
+      return
+    }
+    if (input.type !== 'press') return
+    const index = input.index !== undefined && input.index >= 0 && input.index < state.options.length
+      ? input.index
+      : state.selectedIndex
+    if (index === state.options.length - 1) {
+      this.rememberChats(state.chats)
+      await this.setState({ screen: 'asleep', chats: state.chats, selectedChatIndex: state.selectedChatIndex })
+      await this.bridge.turnScreenOff?.()
+      if (isTeleGlanceFixtureMode()) logLifecycleEvent('asleep', { input: input.type, selectedChatIndex: state.selectedChatIndex })
+      return
+    }
+    await this.switchFolder(state, index === 0 ? undefined : this.folders[index - 1]?.id)
+  }
+
+  private async switchFolder(state: Extract<AppState, { screen: 'folderPicker' }>, folderId: Id | undefined) {
+    if (this.folderKey(folderId) === this.folderKey(this.activeFolderId)) {
+      await this.setState(this.chatsState(state.chats, state.selectedChatIndex))
+      return
+    }
+    // Remember the loaded pages of the folder we are leaving so coming back is instant.
+    this.folderChatsCache.set(this.folderKey(this.activeFolderId), { chats: state.chats, hasMore: this.chatsHasMore })
+    const previousFolderId = this.activeFolderId
+    const switchId = ++this.folderSwitchId
+    this.activeFolderId = folderId
+    this.loadingMoreChats = false
+    const cached = this.folderChatsCache.get(this.folderKey(folderId))
+    if (cached) {
+      this.chatsHasMore = cached.hasMore
+      await this.setState(this.chatsState(cached.chats, 0))
+      void this.refreshFolderFirstPage(folderId, switchId).catch(() => undefined)
+      return
+    }
+    this.chatsHasMore = false
+    await this.setState(this.chatsState([], 0, { loadingMore: true }))
+    try {
+      const chats = await this.api.listChats(CHAT_LIST_LIMIT, { folderId })
+      if (switchId !== this.folderSwitchId) return
+      this.chatsHasMore = chats.length >= CHAT_LIST_LIMIT
+      this.folderChatsCache.set(this.folderKey(folderId), { chats, hasMore: this.chatsHasMore })
+      const current = this.state
+      if (current.screen === 'folderPicker' || current.screen === 'asleep') {
+        // The user moved on while this folder loaded: fill in the list behind their screen
+        // instead of pulling them out of it.
+        await this.setStateWithoutRender({ ...current, chats, selectedChatIndex: 0 })
+        return
+      }
+      if (current.screen !== 'sidebar' || current.focus !== 'chats') return
+      await this.setState(this.chatsState(chats, 0))
+    } catch (error) {
+      if (switchId !== this.folderSwitchId) return
+      // Fall back to the folder we were in.
+      this.activeFolderId = previousFolderId
+      const fallback = this.folderChatsCache.get(this.folderKey(previousFolderId))
+      this.chatsHasMore = fallback?.hasMore ?? false
+      this.folderSwitchId += 1
+      await this.setState(this.chatsState(fallback?.chats ?? state.chats, 0, {
+        status: error instanceof Error ? error.message : 'Could not open folder',
+      }))
+    }
+  }
+
+  private async refreshFolderFirstPage(folderId: Id | undefined, switchId: number) {
+    const fresh = await this.api.listChats(CHAT_LIST_LIMIT, { folderId })
+    if (switchId !== this.folderSwitchId) return
+    const current = this.state
+    if (current.screen !== 'sidebar' || current.focus !== 'chats') return
+    const chats = mergeChatPages(current.chats, fresh)
+    this.folderChatsCache.set(this.folderKey(folderId), { chats, hasMore: this.chatsHasMore })
+    await this.setStateWithoutRender({ ...current, chats })
   }
 
   private async openChat(chat: Chat, previous: RecoverableState) {
@@ -1429,31 +1516,6 @@ export class TelegramAppController {
     const remainingLoadedScroll = maxOffset - (state.scrollOffset ?? 0)
     if (remainingLoadedScroll > OLDER_PREFETCH_LOW_WATER) return
     void this.prefetchOlderMessages(state).catch(() => undefined)
-  }
-
-  private prefetchVisibleChats(chats: Chat[]) {
-    if (this.startupPrefetchTimer) clearTimeout(this.startupPrefetchTimer)
-    this.startupPrefetchTimer = setTimeout(() => {
-      this.startupPrefetchTimer = undefined
-      void this.prefetchVisibleChatsInBackground(chats.slice(1, 3)).catch(() => undefined)
-    }, 1200)
-    const maybeNodeTimeout = this.startupPrefetchTimer as unknown as { unref?: () => void }
-    maybeNodeTimeout.unref?.()
-  }
-
-  private async prefetchVisibleChatsInBackground(chats: Chat[]) {
-    for (const chat of chats) {
-      if (this.isInputQuiet()) await sleep(this.msUntilQuiet())
-      if (chat.isForum) {
-        const topics = await this.prefetchTopics(chat).catch(() => [])
-        for (const topic of topics.slice(0, 1)) {
-          await this.prefetchMessages(chat, topic).catch(() => [])
-        }
-      } else {
-        await this.prefetchMessages(chat, undefined).catch(() => [])
-      }
-      await sleep(100)
-    }
   }
 
   private async prefetchTopics(chat: Chat): Promise<Topic[]> {
@@ -1778,13 +1840,13 @@ export class TelegramAppController {
       const current = this.state
       if ((current.screen !== 'sidebar' || current.focus !== 'chats') && current.screen !== 'asleep' && current.screen !== 'newMessage') return
 
-      const selectedChatIndex = clamp(
-        current.screen === 'sidebar' ? current.selectedChatIndex : current.selectedChatIndex,
-        0, Math.max(0, chats.length - 1),
-      )
+      // `chats` is only the first page of "All chats". Keep the pages the user has already scrolled
+      // through; inside a folder the displayed list is left alone (only activity detection uses it).
+      const displayedChats = this.activeFolderId === undefined ? mergeChatPages(current.chats, chats) : current.chats
+      const selectedChatIndex = clamp(current.selectedChatIndex, 0, Math.max(0, displayedChats.length - 1))
       if (!activity) {
         if (current.screen === 'sidebar' && current.focus === 'chats') {
-          await this.setStateWithoutRender({ ...current, chats, selectedChatIndex })
+          await this.setStateWithoutRender({ ...current, chats: displayedChats, selectedChatIndex })
         }
         return
       }
@@ -1795,7 +1857,7 @@ export class TelegramAppController {
         chat: activity.chat,
         topic,
         message: activity.chat.lastMessage ?? '',
-        chats,
+        chats: displayedChats,
         selectedChatIndex,
       })
     } finally {
@@ -1945,7 +2007,7 @@ export class TelegramAppController {
     // Capture the incoming `panelBox` visibility BEFORE applyState mutates `this.state`.
     // The partial-render path only updates `panelBox` content, not its
     // position/size/border, so a visibility flip must trigger a full rebuild.
-    const sidebarModel = state.screen === 'sidebar'
+    const sidebarModel = state.screen === 'sidebar' || state.screen === 'folderPicker'
       ? screenModel(state) as Extract<ScreenModel, { kind: 'sidebar' }>
       : undefined
     const nextHasPanelBox = sidebarModel
@@ -2131,6 +2193,12 @@ export class TelegramAppController {
     if (typeof input.index === 'number') return byIndex
     return selectedNamedIndex(input.itemName, currentIndex, topics, topicSelectionLabel)
   }
+}
+
+/** Put freshly fetched first-page chats ahead of the already-loaded list without dropping deeper pages. */
+function mergeChatPages(existing: Chat[], fresh: Chat[]): Chat[] {
+  const freshIds = new Set(fresh.map((chat) => String(chat.id)))
+  return [...fresh, ...existing.filter((chat) => !freshIds.has(String(chat.id)))]
 }
 
 function moveSelection(index: number, count: number, delta: number) {
@@ -2324,10 +2392,6 @@ function emptyChatPreview() {
     previewNewerPages: undefined,
     previewIsNewestPage: undefined,
   }
-}
-
-function chatMatchesSelection(state: Extract<AppState, { screen: 'sidebar'; focus: 'chats' }>, chat: Chat) {
-  return String(state.chats[state.selectedChatIndex]?.id ?? '') === String(chat.id)
 }
 
 function clearUnreadForThread(state: AppState, chat: Chat, topic: Topic | undefined): AppState {

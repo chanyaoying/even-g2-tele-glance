@@ -203,6 +203,20 @@ function PhoneStateView() {
       </div>
     )
   }
+  if (state.screen === 'folderPicker') {
+    return (
+      <div className="stack">
+        <h2>{l.titleFolders}</h2>
+        <div className="select-list">
+          {state.options.map((option, index) => (
+            <button key={`${index}-${option}`} type="button" className={index === state.selectedIndex ? 'selected' : ''} onClick={() => void dispatch({ type: 'press', index })}>
+              <span>{option}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+    )
+  }
   if (state.screen === 'asleep') return <p className="empty-text">{l.phoneScreenOff}</p>
   if (state.screen === 'loading') return <p className="empty-text">{state.message}</p>
   if (state.screen === 'sidebarRecording') return <p className="empty-text">{l.phoneRecording}</p>
@@ -225,10 +239,10 @@ function PhoneActions() {
   void localeVersion
   return (
     <nav className="phone-actions" aria-label={l.phoneActionsAria}>
-      <button type="button" onClick={() => void dispatch({ type: 'swipeUp' })} disabled={!((state.screen === 'sidebar' && (state.focus === 'messages' || state.focus === 'chats' || state.focus === 'topics')))}>
+      <button type="button" onClick={() => void dispatch({ type: 'swipeUp' })} disabled={!((state.screen === 'sidebar' && (state.focus === 'messages' || state.focus === 'chats' || state.focus === 'topics')) || state.screen === 'folderPicker')}>
         {l.phoneOlderUp}
       </button>
-      <button type="button" onClick={() => void dispatch({ type: 'swipeDown' })} disabled={!((state.screen === 'sidebar' && (state.focus === 'messages' || state.focus === 'chats' || state.focus === 'topics')))}>
+      <button type="button" onClick={() => void dispatch({ type: 'swipeDown' })} disabled={!((state.screen === 'sidebar' && (state.focus === 'messages' || state.focus === 'chats' || state.focus === 'topics')) || state.screen === 'folderPicker')}>
         {l.phoneNewerDown}
       </button>
       <button type="button" onClick={() => void dispatch({ type: 'doublePress' })}>

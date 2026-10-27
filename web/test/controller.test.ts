@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { TelegramAppController, type GlassesBridge } from '../src/controller/appController'
 import type { TelegramApi } from '../src/api'
 import { MAX_RECORDING_BYTES } from '../src/audio/wav'
-import type { Chat, Message, Topic, TranscriptionResult } from '../src/types'
+import type { Chat, Folder, Message, Topic, TranscriptionResult } from '../src/types'
 import { screenModel } from '../src/controller/model'
 import type { AppState, ScreenModel } from '../src/controller/model'
 
@@ -359,6 +359,273 @@ describe('TelegramAppController', () => {
     expect(controller.snapshot).toMatchObject({ screen: 'asleep' })
   })
 
+  describe('endless chat list', () => {
+    const manyChats = (from: number, count: number): Chat[] =>
+      Array.from({ length: count }, (_, i) => ({ id: String(from + i), title: `Chat ${from + i}`, kind: 'user' as const }))
+
+    it('loads the next page of chats when the selection nears the end and stops when exhausted', async () => {
+      const api = fakeApi({
+        authorized: true,
+        listChatsImpl: (_limit, options) => (options?.offset ? manyChats(20, 5) : manyChats(0, 20)),
+      })
+      const controller = new TelegramAppController(api, fakeBridge())
+      await controller.init()
+
+      // Index 16 is still more than 3 rows from the end: nothing is fetched yet.
+      for (let i = 0; i < 16; i++) await controller.dispatch({ type: 'swipeDown' })
+      expect(api.listChats).toHaveBeenCalledTimes(1)
+
+      await controller.dispatch({ type: 'swipeDown' })
+      await vi.waitFor(() => expect((controller.snapshot as { chats: Chat[] }).chats).toHaveLength(25))
+      expect(api.listChats).toHaveBeenLastCalledWith(20, { offset: 20, folderId: undefined })
+      expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'chats', selectedChatIndex: 17 })
+
+      // The last page had fewer than 20 chats, so reaching the end must not fetch again.
+      for (let i = 0; i < 12; i++) await controller.dispatch({ type: 'swipeDown' })
+      expect(api.listChats).toHaveBeenCalledTimes(2)
+      expect(controller.snapshot).toMatchObject({ selectedChatIndex: 24 })
+    })
+
+    it('keeps responding to swipes while the next page is still loading (400 ms network)', async () => {
+      const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+      const api = fakeApi({
+        authorized: true,
+        listChatsImpl: async (_limit, options) => {
+          if (options?.offset) {
+            await delay(400)
+            return manyChats(20, 20)
+          }
+          return manyChats(0, 20)
+        },
+      })
+      const controller = new TelegramAppController(api, fakeBridge())
+      await controller.init()
+      for (let i = 0; i < 16; i++) await controller.dispatch({ type: 'swipeDown' })
+
+      const timings: number[] = []
+      for (let i = 0; i < 3; i++) {
+        const started = performance.now()
+        await controller.dispatch({ type: 'swipeDown' })
+        timings.push(performance.now() - started)
+      }
+
+      // The fetch is in flight (footer says so) but every swipe returned immediately and moved the marker.
+      expect(Math.max(...timings)).toBeLessThan(50)
+      expect(controller.snapshot).toMatchObject({ selectedChatIndex: 19, loadingMore: true })
+      await vi.waitFor(() => expect((controller.snapshot as { chats: Chat[] }).chats).toHaveLength(40))
+      expect(controller.snapshot).toMatchObject({ selectedChatIndex: 19, loadingMore: false })
+    })
+
+    it('never asks for more chats when the first page is not full', async () => {
+      const api = fakeApi({ authorized: true })
+      const controller = new TelegramAppController(api, fakeBridge())
+      await controller.init()
+      await controller.dispatch({ type: 'swipeDown' })
+      await controller.dispatch({ type: 'swipeDown' })
+
+      expect(api.listChats).toHaveBeenCalledTimes(1)
+    })
+
+    it('does not duplicate chats that appear on two pages', async () => {
+      const api = fakeApi({
+        authorized: true,
+        listChatsImpl: (_limit, options) => (options?.offset ? manyChats(18, 4) : manyChats(0, 20)),
+      })
+      const controller = new TelegramAppController(api, fakeBridge())
+      await controller.init()
+      for (let i = 0; i < 17; i++) await controller.dispatch({ type: 'swipeDown' })
+
+      await vi.waitFor(() => expect((controller.snapshot as { chats: Chat[] }).chats).toHaveLength(22))
+      const ids = (controller.snapshot as { chats: Chat[] }).chats.map((chat) => chat.id)
+      expect(new Set(ids).size).toBe(ids.length)
+    })
+  })
+
+  describe('folders', () => {
+    const folders: Folder[] = [{ id: '2', title: 'Work' }, { id: '3', title: 'Family' }]
+    const folderChats: Record<string, Chat[]> = {
+      '2': [{ id: '50', title: 'Boss', kind: 'user' }],
+      '3': [{ id: '60', title: 'Mum', kind: 'user' }, { id: '61', title: 'Dad', kind: 'user' }],
+    }
+    const make = () => {
+      const api = fakeApi({
+        authorized: true,
+        folders,
+        listChatsImpl: (_limit, options) => (options?.folderId ? folderChats[options.folderId] : chats),
+      })
+      const bridge = fakeBridge()
+      return { api, bridge, controller: new TelegramAppController(api, bridge) }
+    }
+
+    it('shows the folder position in the title and opens a picker on double press', async () => {
+      const { controller, bridge } = make()
+      await controller.init()
+      expect(screenModel(controller.snapshot)).toMatchObject({ title: 'All chats 1/3' })
+
+      await controller.dispatch({ type: 'doublePress' })
+
+      expect(controller.snapshot).toMatchObject({
+        screen: 'folderPicker',
+        options: ['All chats', 'Work', 'Family', 'Sleep'],
+        selectedIndex: 0,
+      })
+      expect(bridge.turnScreenOff).not.toHaveBeenCalled()
+    })
+
+    it('switches to a folder, loads its chats and relabels the title', async () => {
+      const { controller, api } = make()
+      await controller.init()
+      await controller.dispatch({ type: 'doublePress' })
+      await controller.dispatch({ type: 'swipeDown' })
+      await controller.dispatch({ type: 'press' })
+
+      expect(api.listChats).toHaveBeenLastCalledWith(20, { folderId: '2' })
+      expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'chats', selectedChatIndex: 0 })
+      expect((controller.snapshot as { chats: Chat[] }).chats.map((c) => c.title)).toEqual(['Boss'])
+      expect(screenModel(controller.snapshot)).toMatchObject({ title: 'Work 2/3' })
+
+      // The picker highlights the folder we are in.
+      await controller.dispatch({ type: 'doublePress' })
+      expect(controller.snapshot).toMatchObject({ screen: 'folderPicker', selectedIndex: 1 })
+    })
+
+    it('restores the loaded chats when returning to a folder it already visited', async () => {
+      const { controller } = make()
+      await controller.init()
+      await controller.dispatch({ type: 'doublePress' })
+      await controller.dispatch({ type: 'swipeDown' })
+      await controller.dispatch({ type: 'press' })
+      await controller.dispatch({ type: 'doublePress' })
+      await controller.dispatch({ type: 'swipeUp' })
+      await controller.dispatch({ type: 'press' })
+
+      expect((controller.snapshot as { chats: Chat[] }).chats.map((c) => c.title)).toEqual(['Alice', 'Project'])
+      expect(screenModel(controller.snapshot)).toMatchObject({ title: 'All chats 1/3' })
+    })
+
+    it('double press in the picker goes back without changing folder', async () => {
+      const { controller, api } = make()
+      await controller.init()
+      await controller.dispatch({ type: 'swipeDown' })
+      await controller.dispatch({ type: 'doublePress' })
+      await controller.dispatch({ type: 'swipeDown' })
+      await controller.dispatch({ type: 'doublePress' })
+
+      expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'chats', selectedChatIndex: 1 })
+      expect(api.listChats).toHaveBeenCalledTimes(1)
+    })
+
+    it('sleeps from the last picker entry and wakes back into the same folder', async () => {
+      const { controller, bridge } = make()
+      await controller.init()
+      await controller.dispatch({ type: 'doublePress' })
+      for (let i = 0; i < 3; i++) await controller.dispatch({ type: 'swipeDown' })
+      expect(controller.snapshot).toMatchObject({ screen: 'folderPicker', selectedIndex: 3 })
+      await controller.dispatch({ type: 'press' })
+
+      expect(controller.snapshot).toMatchObject({ screen: 'asleep' })
+      expect(bridge.turnScreenOff).toHaveBeenCalledOnce()
+
+      await controller.dispatch({ type: 'doublePress' })
+      expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'chats' })
+      expect(screenModel(controller.snapshot)).toMatchObject({ title: 'All chats 1/3' })
+    })
+
+    it('keeps the folder label when backing out of a chat', async () => {
+      const { controller } = make()
+      await controller.init()
+      await controller.dispatch({ type: 'doublePress' })
+      await controller.dispatch({ type: 'swipeDown' })
+      await controller.dispatch({ type: 'swipeDown' })
+      await controller.dispatch({ type: 'press' })
+      await controller.dispatch({ type: 'press' })
+      await vi.waitFor(() => expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'messages' }))
+      await controller.dispatch({ type: 'doublePress' })
+
+      expect(screenModel(controller.snapshot)).toMatchObject({ title: 'Family 3/3' })
+    })
+
+    it('shows the new folder immediately while its chats load (400 ms network)', async () => {
+      const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+      const api = fakeApi({
+        authorized: true,
+        folders,
+        listChatsImpl: async (_limit, options) => {
+          if (!options?.folderId) return chats
+          await delay(400)
+          return folderChats[options.folderId]
+        },
+      })
+      const controller = new TelegramAppController(api, fakeBridge())
+      await controller.init()
+      await controller.dispatch({ type: 'doublePress' })
+      await controller.dispatch({ type: 'swipeDown' })
+
+      const started = performance.now()
+      const pressed = controller.dispatch({ type: 'press' })
+      await vi.waitFor(() => expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'chats', loadingMore: true }))
+      const toLoadingScreen = performance.now() - started
+
+      // The title already names the new folder and the footer says it is loading, well before the data arrives.
+      expect(toLoadingScreen).toBeLessThan(150)
+      expect(screenModel(controller.snapshot)).toMatchObject({ title: 'Work 2/3', panelFooter: 'Loading more chats...' })
+      await pressed
+      expect((controller.snapshot as { chats: Chat[] }).chats.map((c) => c.title)).toEqual(['Boss'])
+      expect(controller.snapshot).not.toMatchObject({ loadingMore: true })
+    })
+
+    it('lets you reopen the picker while a folder loads without being pulled out of it', async () => {
+      const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+      const api = fakeApi({
+        authorized: true,
+        folders,
+        listChatsImpl: async (_limit, options) => {
+          if (!options?.folderId) return chats
+          await delay(300)
+          return folderChats[options.folderId]
+        },
+      })
+      const controller = new TelegramAppController(api, fakeBridge())
+      await controller.init()
+      await controller.dispatch({ type: 'doublePress' })
+      await controller.dispatch({ type: 'swipeDown' })
+      const pressed = controller.dispatch({ type: 'press' })
+      await vi.waitFor(() => expect(controller.snapshot).toMatchObject({ screen: 'sidebar', loadingMore: true }))
+
+      // Input is not blocked by the in-flight fetch: open the picker again straight away.
+      const started = performance.now()
+      await controller.dispatch({ type: 'doublePress' })
+      expect(performance.now() - started).toBeLessThan(50)
+      expect(controller.snapshot).toMatchObject({ screen: 'folderPicker', selectedIndex: 1 })
+
+      await pressed
+      // The folder finished loading underneath; the picker stays put and cancelling shows the loaded chats.
+      expect(controller.snapshot).toMatchObject({ screen: 'folderPicker' })
+      await controller.dispatch({ type: 'doublePress' })
+      expect((controller.snapshot as { chats: Chat[] }).chats.map((c) => c.title)).toEqual(['Boss'])
+    })
+
+    it('falls back to the previous folder when a folder fails to load', async () => {
+      const api = fakeApi({
+        authorized: true,
+        folders,
+        listChatsImpl: (_limit, options) => {
+          if (options?.folderId) throw new Error('Telegram request timed out')
+          return chats
+        },
+      })
+      const controller = new TelegramAppController(api, fakeBridge())
+      await controller.init()
+      await controller.dispatch({ type: 'doublePress' })
+      await controller.dispatch({ type: 'swipeDown' })
+      await controller.dispatch({ type: 'press' })
+
+      expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'chats', status: 'Telegram request timed out' })
+      expect((controller.snapshot as { chats: Chat[] }).chats.map((c) => c.title)).toEqual(['Alice', 'Project'])
+      expect(screenModel(controller.snapshot)).toMatchObject({ title: 'All chats 1/3' })
+    })
+  })
+
   it('only wakes the screen-off state with double press', async () => {
     const api = fakeApi({ authorized: true })
     const bridge = fakeBridge()
@@ -535,6 +802,7 @@ describe('TelegramAppController', () => {
       verifyPhoneAuth: vi.fn(async () => ({ authorized: true })),
       logout: vi.fn(async () => undefined),
       listChats: vi.fn(async () => chats),
+      listFolders: vi.fn(async () => []),
       listTopics: vi.fn(async () => topics),
       listMessages,
       sendMessage: vi.fn(async () => ({ id: 'new', sender: 'Me', text: 'x', sentAt: '2026-06-01T10:01:00Z' } as Message)),
@@ -1399,13 +1667,28 @@ describe('TelegramAppController', () => {
     expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'chats' })
   })
 
+  it('does not fetch any messages while browsing the chat list', async () => {
+    const api = fakeApi({ authorized: true })
+    const controller = new TelegramAppController(api, fakeBridge(), 50)
+
+    await controller.init()
+    await controller.dispatch({ type: 'swipeDown' })
+    await controller.dispatch({ type: 'swipeDown' })
+    await controller.dispatch({ type: 'swipeUp' })
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+
+    expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'chats' })
+    expect(api.listMessages).not.toHaveBeenCalled()
+    expect(api.listTopics).not.toHaveBeenCalled()
+  })
+
   it('clears all timers and stops polling on dispose', async () => {
     const api = fakeApi({ authorized: true })
     const bridge = fakeBridge()
     const controller = new TelegramAppController(api, bridge, 50)
 
     await controller.init()
-    // Init schedules a startupPrefetchTimer.
+    // The chat list no longer schedules a startup prefetch; the field must stay cleared.
     const internals = controller as unknown as {
       startupPrefetchTimer: unknown
       renderTimer: unknown
@@ -1413,8 +1696,7 @@ describe('TelegramAppController', () => {
       openRequestId: number
       pendingMessagePress: unknown
     }
-    // Verify timer was scheduled.
-    expect(internals.startupPrefetchTimer).toBeDefined()
+    expect(internals.startupPrefetchTimer).toBeUndefined()
 
     controller.dispose()
 
@@ -1730,7 +2012,7 @@ describe('TelegramAppController', () => {
     }
   })
  })
-function fakeApi(options: { authorized: boolean; transcription?: TranscriptionResult; latestMessages?: Message[] | (() => Message[] | Promise<Message[]>); olderMessages?: Message[] | (() => Message[] | Promise<Message[]>); chats?: Chat[] | (() => Chat[]); topics?: Topic[] | (() => Topic[] | Promise<Topic[]>) }): TelegramApi {
+function fakeApi(options: { authorized: boolean; transcription?: TranscriptionResult; latestMessages?: Message[] | (() => Message[] | Promise<Message[]>); olderMessages?: Message[] | (() => Message[] | Promise<Message[]>); chats?: Chat[] | (() => Chat[]); topics?: Topic[] | (() => Topic[] | Promise<Topic[]>); folders?: Folder[]; listChatsImpl?: (limit?: number, options?: { offset?: number; folderId?: string }) => Chat[] | Promise<Chat[]> }): TelegramApi {
   const listMessages = vi.fn(async (_chatId, request) => {
     if (request?.beforeId !== undefined) {
       if (typeof options.olderMessages === 'function') return options.olderMessages()
@@ -1745,7 +2027,11 @@ function fakeApi(options: { authorized: boolean; transcription?: TranscriptionRe
     startPhoneAuth: vi.fn(async (phone: string) => ({ phone, sent: true })),
     verifyPhoneAuth: vi.fn(async () => ({ authorized: options.authorized })),
     logout: vi.fn(async () => undefined),
-    listChats: vi.fn(async () => typeof options.chats === 'function' ? options.chats() : options.chats ?? chats),
+    listChats: vi.fn(async (limit?: number, listOptions?: { offset?: number; folderId?: string }) => {
+      if (options.listChatsImpl) return options.listChatsImpl(limit, listOptions)
+      return typeof options.chats === 'function' ? options.chats() : options.chats ?? chats
+    }),
+    listFolders: vi.fn(async () => options.folders ?? []),
     listTopics: vi.fn(async () => typeof options.topics === 'function' ? options.topics() : options.topics ?? topics),
     listMessages,
     sendMessage: vi.fn(async (_chatId: unknown, request: { text: string }) => ({

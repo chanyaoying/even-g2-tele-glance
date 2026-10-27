@@ -545,30 +545,52 @@ describe('screenModel', () => {
     }
   })
 
-  it('does not double-render boxed chat previews as body text', () => {
-    // Regression: the chats focus screen model used to set panelBody to msg.body
-    // even when msg.box was set, so a long chat preview painted both the
-    // ASCII-bordered box text and the native bordered panelBox on top of each
-    // other (ghost text). Both topics and messages focus already cleared the
-    // body when a box was present; chats focus was missing the same check.
-    // 30+ words — long enough to trigger formatMessageBox (>25 word threshold
-    // after trimming) but short enough to fit in a single box page.
-    const longText = 'lorem ipsum dolor sit amet '.repeat(6)
+  it('renders the chat list full width with no message preview', () => {
+    const chats = Array.from({ length: 12 }, (_, i) => ({
+      id: String(i), title: `Chat ${i}`, kind: 'user' as const, isForum: false, lastMessage: 'preview text',
+      unreadCount: i === 5 ? 3 : 0,
+    }))
     const state: AppState = {
-      screen: 'sidebar', focus: 'chats',
-      chats: [{ id: '1', title: 'Akira', kind: 'user', isForum: false, lastMessage: 'preview' }],
-      selectedChatIndex: 0,
-      previewMessages: [{ id: '1', sender: 'Akira', text: longText }],
+      screen: 'sidebar', focus: 'chats', chats, selectedChatIndex: 5,
+      // Even if stale preview data is present it must never be drawn on the chat list.
+      previewMessages: [{ id: '1', sender: 'Akira', text: 'lorem ipsum '.repeat(20) }],
     }
 
     const model = screenModel(state)
     expect(model.kind).toBe('sidebar')
     if (model.kind === 'sidebar') {
-      expect(model.panelBox).toBeDefined()
-      expect(model.panelBody).toBe('')
+      expect(model.fullWidth).toBe(true)
+      expect(model.panelBox).toBeUndefined()
+      expect(model.panelBody).toContain('> Chat 5 (3)')
+      expect(model.panelBody).not.toContain('lorem')
+      expect(model.panelBody).not.toContain('preview text')
+      expect(model.panelBody.split('\n')).toHaveLength(7)
     }
   })
 
+  it('uses the folder label as the chat-list title and shows the loading-more footer', () => {
+    const state: AppState = {
+      screen: 'sidebar', focus: 'chats',
+      chats: [{ id: '1', title: 'Alice', kind: 'user' }], selectedChatIndex: 0,
+      folderLabel: 'Work 2/3', loadingMore: true,
+    }
+    const model = screenModel(state)
+    expect(model).toMatchObject({ kind: 'sidebar', title: 'Work 2/3', fullWidth: true, panelFooter: 'Loading more chats...' })
+  })
+
+  it('renders the folder picker as a full-width list with the marker on the selection', () => {
+    const state: AppState = {
+      screen: 'folderPicker',
+      chats: [], selectedChatIndex: 0,
+      options: ['All chats', 'Work', 'Family', 'Sleep'], selectedIndex: 2,
+    }
+    const model = screenModel(state)
+    expect(model).toMatchObject({ kind: 'sidebar', title: 'Folders', fullWidth: true, sidebarSelected: 2 })
+    if (model.kind === 'sidebar') {
+      expect(model.panelBody.split('\n')).toEqual(['  All chats', '  Work', '> Family', '  Sleep'])
+      expect(model.panelBox).toBeUndefined()
+    }
+  })
 
   it('shows selected-topic loading instead of mirroring the topic list before preview loads', () => {
     const state: AppState = {

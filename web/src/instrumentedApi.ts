@@ -1,6 +1,7 @@
 import type {
   AuthStatus,
   Chat,
+  Folder,
   Id,
   MarkReadRequest,
   Message,
@@ -12,7 +13,7 @@ import type {
   Topic,
   TranscriptionResult,
 } from './types'
-import type { TelegramApi } from './api'
+import type { ListChatsOptions, TelegramApi } from './api'
 import { isTeleGlanceFixtureMode, logApiEvent, logApiTiming } from './testMode'
 
 export class InstrumentedTelegramApi implements TelegramApi {
@@ -34,8 +35,12 @@ export class InstrumentedTelegramApi implements TelegramApi {
     return this.wrap('logout', undefined, () => this.inner.logout())
   }
 
-  async listChats(limit = 5): Promise<Chat[]> {
-    return this.wrap('listChats', { limit }, () => this.inner.listChats(limit))
+  async listChats(limit = 5, options: ListChatsOptions = {}): Promise<Chat[]> {
+    return this.wrap('listChats', { limit, ...options }, () => this.inner.listChats(limit, options))
+  }
+
+  async listFolders(): Promise<Folder[]> {
+    return this.wrap('listFolders', undefined, () => this.inner.listFolders())
   }
 
   async listTopics(chatId: Id): Promise<Topic[]> {
