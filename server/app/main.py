@@ -1,4 +1,6 @@
+import asyncio
 from collections import deque
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import json
 import logging
@@ -48,7 +50,14 @@ def raise_telegram_http_error(exc: Exception) -> None:
 
 def create_app(settings: Optional[Settings] = None) -> FastAPI:
     app_settings = settings or get_settings()
-    api = FastAPI(title="TeleGlance Backend")
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        if app_settings.whisper_preload:
+            # Warm the model in the background so the first recording after a restart is not slow.
+            _app.state.preload_task = asyncio.create_task(get_transcription_service().preload())
+        yield
+
+    api = FastAPI(title="TeleGlance Backend", lifespan=lifespan)
     debug_events: deque[dict] = deque(maxlen=100)
     api.add_middleware(
         CORSMiddleware,
@@ -295,6 +304,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 raw = pcm16le_to_wav(raw)
             return await transcription.transcribe_wav(raw, language=language or None)
         except (ValueError, TranscriptionServiceError) as exc:
+            timing_logger.warning("transcribe rejected (%d bytes): %s", len(raw), exc)
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"transcription failed: {exc}") from exc

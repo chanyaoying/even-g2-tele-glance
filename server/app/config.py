@@ -30,6 +30,7 @@ class Settings(BaseSettings):
         default=False,
         validation_alias="WHISPER_CONDITION_ON_PREVIOUS_TEXT",
     )
+    whisper_preload: bool = Field(default=True, validation_alias="WHISPER_PRELOAD")
     whisper_model_revision: Optional[str] = Field(default=None, validation_alias="WHISPER_MODEL_REVISION")
     transcribe_max_upload_bytes: int = Field(default=2_000_000, validation_alias="TRANSCRIBE_MAX_UPLOAD_BYTES")
     teleglance_shared_secret: Optional[str] = Field(default=None, validation_alias="TELEGLANCE_SHARED_SECRET")

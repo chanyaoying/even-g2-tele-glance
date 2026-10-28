@@ -167,11 +167,11 @@ def test_page_one_is_always_fresh_but_keeps_the_deeper_cache():
 
     # A background refresh of page one fetches only the head ...
     run(service.list_chats(limit=20, offset=0))
-    assert client.get_dialogs_limits == [100, 200, 100]
+    assert client.get_dialogs_limits == [100, 200, 40]
     # ... and the deeper pages scrolled in earlier are still served from memory.
     deep = run(service.list_chats(limit=20, offset=140))
     assert ids(deep) == list(range(141, 161))
-    assert client.get_dialogs_limits == [100, 200, 100]
+    assert client.get_dialogs_limits == [100, 200, 40]
 
 
 def test_refresh_after_a_new_chat_arrives_keeps_the_list_contiguous():
@@ -321,3 +321,43 @@ def test_listing_chats_seeds_the_entity_cache_so_opening_needs_no_lookup():
 
     assert set(service._entity_cache) == {1, 2, 3, 4, 5}
     assert run(service._get_entity(3)) is service._entity_cache[3]
+
+
+def test_refreshing_page_one_downloads_only_the_top_not_a_full_block():
+    client = FakeClient(many(500), [])
+    service = make_service(client)
+    run(service.list_chats(limit=20, offset=0))
+    first = run(service.list_chats(limit=20, offset=0))
+
+    assert ids(first) == list(range(1, 21))
+    assert client.get_dialogs_limits == [100, 40]
+    # The cached tail survives, so page two still needs no new request.
+    assert ids(run(service.list_chats(limit=20, offset=20))) == list(range(21, 41))
+    assert client.get_dialogs_limits == [100, 40]
+
+
+def test_folder_page_one_reuses_the_cached_list_instead_of_rescanning_the_account():
+    dialogs = [make_dialog(-i, kind="group") if i % 10 == 0 else make_dialog(i) for i in range(1, 301)]
+    client = FakeClient(dialogs, [make_filter(id=2, groups=True)])
+    service = make_service(client)
+
+    run(service.list_chats(limit=5, offset=0))  # the chat list was loaded first
+    folder = run(service.list_chats(limit=5, offset=0, folder_id=2))
+
+    assert ids(folder) == [-10, -20, -30, -40, -50]
+    assert client.iter_passes == 0  # no account scan: the cache already held enough matches
+    again = run(service.list_chats(limit=5, offset=0, folder_id=2))
+    assert ids(again) == ids(folder)
+    assert client.iter_passes == 0
+
+
+def test_folder_with_too_few_cached_matches_still_scans():
+    dialogs = [make_dialog(-i, kind="group") if i % 150 == 0 else make_dialog(i) for i in range(1, 301)]
+    client = FakeClient(dialogs, [make_filter(id=2, groups=True)])
+    service = make_service(client)
+
+    run(service.list_chats(limit=5, offset=0))
+    folder = run(service.list_chats(limit=5, offset=0, folder_id=2))
+
+    assert ids(folder) == [-150, -300]
+    assert client.iter_passes == 1

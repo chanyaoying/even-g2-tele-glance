@@ -38,6 +38,13 @@ class WhisperTranscriptionService:
             )
         return self._model
 
+    async def preload(self) -> None:
+        """Load the model ahead of the first recording; failures are left for the first real request."""
+        try:
+            await asyncio.to_thread(self._load_model)
+        except Exception:
+            pass
+
     async def transcribe_wav(self, wav_bytes: bytes, language: Optional[str] = None) -> TranscriptionResponse:
         if not wav_bytes:
             raise TranscriptionServiceError("audio payload is empty")

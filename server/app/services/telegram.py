@@ -191,6 +191,8 @@ DIALOG_BLOCK = 100
 DIALOG_CACHE_TTL_SECONDS = 45.0
 # Deep folder pages scan this many extra matching chats ahead so the next few pages are cache hits.
 FOLDER_LOOKAHEAD = 60
+# A refresh of page one only needs the top of the list; the deeper cached chats are kept.
+HEAD_REFRESH = 40
 
 
 @dataclass
@@ -718,8 +720,13 @@ class TelethonTelegramService:
     async def _page_unfiltered(self, client: Any, limit: int, offset: int) -> list[Any]:
         need = offset + limit
         snapshot = self._valid_snapshot()
+        if offset == 0 and snapshot is not None and need <= HEAD_REFRESH:
+            # Page one is always fresh, but with a cached list only the top needs downloading.
+            fresh = list(await client.get_dialogs(limit=HEAD_REFRESH))
+            self._store_head(fresh, exhausted=len(fresh) < HEAD_REFRESH)
+            return list(self._dialog_snapshot.dialogs[offset:need])
         if offset == 0 or snapshot is None or (len(snapshot.dialogs) < need and not snapshot.exhausted):
-            # Page one is always fresh. A deeper miss refetches down to the next block boundary.
+            # A cold start or a deeper miss fetches down to the next block boundary.
             target = max(DIALOG_BLOCK, math.ceil(need / DIALOG_BLOCK) * DIALOG_BLOCK)
             fresh = list(await client.get_dialogs(limit=target))
             self._store_head(fresh, exhausted=len(fresh) < target)
@@ -729,7 +736,13 @@ class TelethonTelegramService:
     async def _page_folder(self, client: Any, limit: int, offset: int, dialog_filter: Any) -> list[Any]:
         need = offset + limit
         snapshot = self._valid_snapshot()
-        if offset > 0 and snapshot is not None:
+        if snapshot is not None:
+            if offset == 0:
+                # Refresh just the top of the list, then answer from the cache when it already holds enough
+                # matches. This avoids rescanning the whole account for a sparse folder.
+                fresh = list(await client.get_dialogs(limit=HEAD_REFRESH))
+                self._store_head(fresh, exhausted=len(fresh) < HEAD_REFRESH)
+                snapshot = self._dialog_snapshot
             matches = [dialog for dialog in snapshot.dialogs if dialog_matches_filter(dialog_filter, dialog)]
             if len(matches) >= need or snapshot.exhausted:
                 return matches[offset:need]
