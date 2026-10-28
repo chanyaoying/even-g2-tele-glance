@@ -359,6 +359,84 @@ describe('TelegramAppController', () => {
     expect(controller.snapshot).toMatchObject({ screen: 'asleep' })
   })
 
+  describe('double press goes back one level from every sub-page', () => {
+    const listTitles = (controller: TelegramAppController) =>
+      (controller.snapshot as { chats: Chat[] }).chats.map((chat) => chat.title)
+
+    it('topic list -> chat list with the forum still selected', async () => {
+      const controller = new TelegramAppController(fakeApi({ authorized: true }), fakeBridge())
+      await controller.init()
+      await controller.dispatch({ type: 'swipeDown' })
+      await controller.dispatch({ type: 'press' })
+      expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'topics' })
+
+      await controller.dispatch({ type: 'doublePress' })
+
+      expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'chats', selectedChatIndex: 1 })
+    })
+
+    it('topic messages -> topic list -> chat list', async () => {
+      const controller = new TelegramAppController(fakeApi({ authorized: true }), fakeBridge())
+      await controller.init()
+      await controller.dispatch({ type: 'swipeDown' })
+      await controller.dispatch({ type: 'press' })
+      await controller.dispatch({ type: 'press' })
+      await vi.waitFor(() => expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'messages' }))
+
+      await controller.dispatch({ type: 'doublePress' })
+      expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'topics' })
+      await controller.dispatch({ type: 'doublePress' })
+      expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'chats', selectedChatIndex: 1 })
+    })
+
+    it('normal chat messages -> chat list', async () => {
+      const controller = new TelegramAppController(fakeApi({ authorized: true }), fakeBridge())
+      await controller.init()
+      await controller.dispatch({ type: 'press' })
+      await vi.waitFor(() => expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'messages' }))
+
+      await controller.dispatch({ type: 'doublePress' })
+
+      expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'chats', selectedChatIndex: 0 })
+      expect(listTitles(controller)).toEqual(['Alice', 'Project'])
+    })
+
+    it('a chat opened while topics are still loading still goes back to the chat list', async () => {
+      const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+      const api = fakeApi({ authorized: true, topics: async () => { await delay(200); return topics } })
+      const controller = new TelegramAppController(api, fakeBridge())
+      await controller.init()
+      await controller.dispatch({ type: 'swipeDown' })
+      const opening = controller.dispatch({ type: 'press' })
+      await vi.waitFor(() => expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'messages' }))
+
+      await controller.dispatch({ type: 'doublePress' })
+      await opening
+
+      expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'chats' })
+    })
+
+    it('inside a folder, backing out of a chat returns to that folder list', async () => {
+      const api = fakeApi({
+        authorized: true,
+        folders: [{ id: '2', title: 'Work' }],
+        listChatsImpl: (_limit, options) => (options?.folderId ? [{ id: '1', title: 'Alice', kind: 'user' }] : chats),
+      })
+      const controller = new TelegramAppController(api, fakeBridge())
+      await controller.init()
+      await controller.dispatch({ type: 'doublePress' })
+      await controller.dispatch({ type: 'swipeDown' })
+      await controller.dispatch({ type: 'press' })
+      await controller.dispatch({ type: 'press' })
+      await vi.waitFor(() => expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'messages' }))
+      await controller.dispatch({ type: 'doublePress' })
+
+      expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'chats' })
+      expect(listTitles(controller)).toEqual(['Alice'])
+      expect(screenModel(controller.snapshot)).toMatchObject({ title: 'Work 2/2' })
+    })
+  })
+
   describe('endless chat list', () => {
     const manyChats = (from: number, count: number): Chat[] =>
       Array.from({ length: count }, (_, i) => ({ id: String(from + i), title: `Chat ${from + i}`, kind: 'user' as const }))
@@ -503,7 +581,7 @@ describe('TelegramAppController', () => {
       expect(screenModel(controller.snapshot)).toMatchObject({ title: 'All chats 1/3' })
     })
 
-    it('double press in the picker goes back without changing folder', async () => {
+    it('double press in the picker returns to the top of the chat list without changing folder', async () => {
       const { controller, api } = make()
       await controller.init()
       await controller.dispatch({ type: 'swipeDown' })
@@ -511,7 +589,9 @@ describe('TelegramAppController', () => {
       await controller.dispatch({ type: 'swipeDown' })
       await controller.dispatch({ type: 'doublePress' })
 
-      expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'chats', selectedChatIndex: 1 })
+      // Back on the main page, first chat selected (not the row that was highlighted before the picker).
+      expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'chats', selectedChatIndex: 0 })
+      expect(screenModel(controller.snapshot)).toMatchObject({ title: 'All chats 1/3' })
       expect(api.listChats).toHaveBeenCalledTimes(1)
     })
 

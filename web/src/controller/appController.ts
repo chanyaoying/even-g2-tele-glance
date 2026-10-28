@@ -1214,7 +1214,9 @@ export class TelegramAppController {
 
   private async handleFolderPicker(state: Extract<AppState, { screen: 'folderPicker' }>, input: AppInput) {
     if (input.type === 'doublePress') {
-      await this.setState(this.chatsState(state.chats, state.selectedChatIndex))
+      // Leaving the picker lands on the top of the chat list (the "main page"), not on whichever row
+      // was highlighted before the picker opened.
+      await this.setState(this.chatsState(state.chats, 0))
       return
     }
     if (input.type === 'swipeUp' || input.type === 'swipeDown') {

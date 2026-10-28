@@ -168,7 +168,7 @@ Per-step latencies are split into `stateMs` (input -> matching state event), `ap
   - `swipeUp` / `swipeDown` -> `selectedIndex` moves (clamped)
   - `press` on a folder -> `sidebar.chats` for that folder (cached pages are restored; otherwise page 1 is fetched, falling back to the previous folder with an error status on failure)
   - `press` on `Sleep` -> `asleep`
-  - `doublePress` -> `sidebar.chats` unchanged
+  - `doublePress` -> `sidebar.chats` for the current folder, scrolled to the top (first chat selected)
 - **fixture note**: the fixture account has no folders, so the simulator harness never reaches this screen; it is covered by `web/test/controller.test.ts` (`folders`).
 
 ### 4.6 `sidebar.topics.noPreview` (forum topics, preview not yet loaded)
