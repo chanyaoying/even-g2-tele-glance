@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { messageScrollUnitCount, nextMessageScrollOffset, screenModel } from '../src/controller/model'
+import { formatMessageTime, messageScrollUnitCount, nextMessageScrollOffset, screenModel } from '../src/controller/model'
 import type { AppState } from '../src/controller/model'
 import type { Message } from '../src/types'
 import { getLocale, setLocale } from '../src/locales'
@@ -232,7 +232,9 @@ describe('screenModel', () => {
         const beforeFirst = nextMessageScrollOffset(messages, offset, 'up')
         const beforeFirstPart = boxPart(messages, beforeFirst)
         expect(beforeFirst === offset || beforeFirstPart?.sender !== first.sender).toBe(true)
-        if (beforeFirst !== offset) {
+        // Two boxed messages can be adjacent (no blank row between them); entering the older one lands on
+        // its first part, so the exact round trip only holds when the neighbour is not itself boxed.
+        if (beforeFirst !== offset && !beforeFirstPart) {
           expect(nextMessageScrollOffset(messages, beforeFirst, 'down')).toBe(offset)
         }
       }
@@ -806,5 +808,31 @@ describe('screenModel', () => {
     }
 
     setLocale(original)
+  })
+})
+
+describe('message timestamps', () => {
+  it('formats today as a clock time and other days with a short date', () => {
+    const now = new Date(2026, 9, 28, 15, 0)
+    const today = new Date(2026, 9, 28, 9, 5).toISOString()
+    const earlier = new Date(2026, 9, 27, 23, 41).toISOString()
+    expect(formatMessageTime(today, now)).toBe('09:05')
+    expect(formatMessageTime(earlier, now)).toBe('Oct 27 23:41')
+    expect(formatMessageTime(undefined, now)).toBe('')
+    expect(formatMessageTime('not a date', now)).toBe('')
+  })
+
+  it('puts the time in every message header and leaves no blank row between messages', () => {
+    const at = (h: number, m: number) => new Date(2026, 0, 2, h, m).toISOString()
+    const messages: Message[] = [
+      { id: '1', sender: 'Alice', text: 'first', sentAt: at(9, 5) },
+      { id: '2', sender: 'Bob', text: 'second', sentAt: at(9, 6) },
+    ]
+    const model = screenModel(messageState(messages))
+    const body = model.kind === 'sidebar' ? model.panelBody ?? '' : ''
+    const lines = body.split('\n')
+    expect(lines).toHaveLength(2)
+    expect(lines[0]).toMatch(/^Alice (Jan 2 )?09:05: first$/)
+    expect(lines[1]).toMatch(/^Bob (Jan 2 )?09:06: second$/)
   })
 })

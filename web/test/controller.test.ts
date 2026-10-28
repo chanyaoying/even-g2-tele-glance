@@ -1222,7 +1222,7 @@ describe('TelegramAppController', () => {
     await controller.dispatch({ type: 'press' })
     await controller.dispatch({ type: 'swipeUp' })
 
-    expect(api.listMessages).toHaveBeenCalledWith('1', { topicId: undefined, beforeId: 100, limit: 8 })
+    expect(api.listMessages).toHaveBeenCalledWith('1', { topicId: undefined, beforeId: 100, limit: 24 })
     expect(controller.snapshot).toMatchObject({
       screen: 'sidebar',
       focus: 'messages',
@@ -1254,19 +1254,19 @@ describe('TelegramAppController', () => {
     await controller.init()
     await controller.dispatch({ type: 'press' })
     await controller.dispatch({ type: 'swipeUp' })
-    expect(messagePanelHeading(controller.snapshot)).toContain('Bob 1/')
+    expect(messagePanelHeading(controller.snapshot)).toMatch(/Bob .*1\//)
 
     await controller.dispatch({ type: 'swipeDown' })
-    expect(messagePanelHeading(controller.snapshot)).toContain('Bob 2/')
+    expect(messagePanelHeading(controller.snapshot)).toMatch(/Bob .*2\//)
 
     await controller.dispatch({ type: 'swipeDown' })
-    expect(messagePanelHeading(controller.snapshot)).toContain('Bob 3/')
+    expect(messagePanelHeading(controller.snapshot)).toMatch(/Bob .*3\//)
 
     await controller.dispatch({ type: 'swipeUp' })
-    expect(messagePanelHeading(controller.snapshot)).toContain('Bob 2/')
+    expect(messagePanelHeading(controller.snapshot)).toMatch(/Bob .*2\//)
 
     await controller.dispatch({ type: 'swipeUp' })
-    expect(messagePanelHeading(controller.snapshot)).toContain('Bob 1/')
+    expect(messagePanelHeading(controller.snapshot)).toMatch(/Bob .*1\//)
 
     await controller.dispatch({ type: 'swipeUp' })
     expect(messagePanelBody(controller.snapshot)).toContain('Alice')
@@ -1278,9 +1278,12 @@ describe('TelegramAppController', () => {
 
     await controller.init()
     await controller.dispatch({ type: 'press' })
+    const newestLoadsBefore = vi.mocked(api.listMessages).mock.calls.filter(([, request]) => request?.beforeId === undefined).length
     await controller.dispatch({ type: 'swipeDown' })
 
-    expect(api.listMessages).not.toHaveBeenCalledWith('1', { topicId: undefined, beforeId: 100, limit: 8 })
+    // Swiping down at the bottom must not reload the newest page (older-history prefetch is separate).
+    const newestLoadsAfter = vi.mocked(api.listMessages).mock.calls.filter(([, request]) => request?.beforeId === undefined).length
+    expect(newestLoadsAfter).toBe(newestLoadsBefore)
     expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'messages', messages, isNewestPage: true })
   })
 
@@ -1297,7 +1300,7 @@ describe('TelegramAppController', () => {
     await controller.dispatch({ type: 'swipeUp' })
     await controller.dispatch({ type: 'swipeDown' })
 
-    expect(api.listMessages).toHaveBeenCalledWith('1', { topicId: undefined, beforeId: 100, limit: 8 })
+    expect(api.listMessages).toHaveBeenCalledWith('1', { topicId: undefined, beforeId: 100, limit: 24 })
     expect(controller.snapshot).toMatchObject({
       screen: 'sidebar',
       focus: 'messages',
@@ -1454,7 +1457,7 @@ describe('TelegramAppController', () => {
     await controller.dispatch({ type: 'doublePress' })
 
     expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'topics', selectedTopicIndex: 0 })
-    expect(api.listMessages).toHaveBeenCalledWith('2', { topicId: '10', beforeId: 100, limit: 8 })
+    expect(api.listMessages).toHaveBeenCalledWith('2', { topicId: '10', beforeId: 100, limit: 24 })
   })
 
   it('lets double press win before delayed recording starts', async () => {

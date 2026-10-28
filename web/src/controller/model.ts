@@ -1,3 +1,4 @@
+import { isTeleGlanceFixtureMode } from '../testMode'
 import type { Chat, Id, Message, Topic } from '../types'
 import { getLocale } from '../locales'
 
@@ -413,7 +414,11 @@ export function nextMessageScrollOffset(messages: Message[], scrollOffset = 0, d
       return offsetForBoxPart(pages, currentPage.boxGroupId, currentPage.boxPartIndex + 1) ?? currentOffset
     }
     const newerOffset = groupOffsets[0] - 1
-    return newerOffset >= 0 ? newerOffset : currentOffset
+    if (newerOffset < 0) return currentOffset
+    // Two boxed messages can now sit side by side: enter the newer one at its first part.
+    const newerPage = pages[pages.length - 1 - newerOffset]
+    if (newerPage?.boxGroupId) return offsetForBoxPart(pages, newerPage.boxGroupId, 0) ?? newerOffset
+    return newerOffset
   }
 
   if (currentPage.boxPartIndex > 0) {
@@ -492,7 +497,8 @@ type MessageDisplayPage = {
 function messageDisplayBlocks(messages: Message[]): MessageDisplayBlock[] {
   const blocks: MessageDisplayBlock[] = []
   for (let i = 0; i < messages.length; i++) {
-    if (i > 0) blocks.push({ text: '', gap: true })
+    // No blank separator row: the timestamp in each header already separates messages, and the fixed
+    // firmware font means every row saved is room for more text.
     blocks.push(...formatMessageBlocks(messages[i]))
   }
   return blocks
@@ -511,9 +517,28 @@ function formatMessageBlocks(message: Message): MessageDisplayBlock[] {
   const l = getLocale()
   const sender = sanitizeGlassesText(message.outgoing ? l.senderMe : message.sender || l.senderUnknown)
   const text = sanitizeGlassesText(message.text || '').trim() || l.messageUnsupported
-  if (wordCount(text) > MESSAGE_BOX_WORD_THRESHOLD) return formatMessageBox(String(message.id), sender, text)
+  const header = withTimestamp(sender, message.sentAt)
+  if (wordCount(text) > MESSAGE_BOX_WORD_THRESHOLD) return formatMessageBox(String(message.id), header, text)
 
-  return [{ text: formatCompactMessageRows(sender, text).join('\n') }]
+  return [{ text: formatCompactMessageRows(header, text).join('\n') }]
+}
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+/** "14:32" for today, "Oct 27 14:32" for other days (device local time). Empty when unknown. */
+export function formatMessageTime(sentAt: string | null | undefined, now: Date = new Date()): string {
+  // Fixture runs (simulator goldens) must not depend on the machine's timezone or clock.
+  if (!sentAt || isTeleGlanceFixtureMode()) return ''
+  const date = new Date(sentAt)
+  if (Number.isNaN(date.getTime())) return ''
+  const clock = `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+  const sameDay = date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth() && date.getDate() === now.getDate()
+  return sameDay ? clock : `${MONTHS[date.getMonth()]} ${date.getDate()} ${clock}`
+}
+
+function withTimestamp(sender: string, sentAt: string | null | undefined) {
+  const time = formatMessageTime(sentAt)
+  return time ? `${sender} ${time}` : sender
 }
 
 function formatCompactMessageRows(sender: string, text: string) {
