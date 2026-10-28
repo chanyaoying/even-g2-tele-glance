@@ -29,6 +29,9 @@ const MESSAGE_PAGE_LIMIT = 8
 // Older pages are fetched in bigger chunks than the first page: a history call costs about the same for 8
 // or 24 messages, and a bigger chunk means far fewer waits at the edge of loaded history while scrolling.
 const OLDER_PAGE_LIMIT = 24
+// Optimistic folder loading: once the chat list is up and the user is idle, fetch each folder's first page
+// so switching folders later is instant.
+const FOLDER_WARM_DELAY_MS = 2500
 const OLDER_PREFETCH_LOW_WATER = 8
 const CHAT_LIST_LIMIT = 20
 // When the selection gets this close to the end of the loaded chats, fetch the next page.
@@ -93,6 +96,7 @@ export class TelegramAppController {
   private loadingMoreChats = false
   private folderSwitchId = 0
   private folderChatsCache = new Map<string, { chats: Chat[]; hasMore: boolean }>()
+  private folderWarmGeneration = 0
   private messageRefreshInFlight = false
   private topicPreviewDebounce: ReturnType<typeof setTimeout> | undefined
   private deferredRootRefreshTimer: ReturnType<typeof setTimeout> | undefined
@@ -192,6 +196,7 @@ export class TelegramAppController {
 
   dispose() {
     this.openRequestId += 1
+    this.folderWarmGeneration += 1
     this.stopMessagePolling()
     this.stopChatPolling()
     for (const timer of [
@@ -1137,8 +1142,42 @@ export class TelegramAppController {
       this.folderSwitchId += 1
       this.rememberChats(chats)
       await this.setState(this.chatsState(chats, 0))
+      this.scheduleFolderWarm()
       // The chat list has no preview panel, so nothing is fetched until a chat is opened.
     }, previous)
+  }
+
+  /** Fetch the first page of every folder in the background, one at a time, never during input. */
+  private scheduleFolderWarm() {
+    const generation = ++this.folderWarmGeneration
+    if (this.folders.length === 0) return
+    if (this.startupPrefetchTimer) clearTimeout(this.startupPrefetchTimer)
+    const step = async (pending: Folder[]) => {
+      if (generation !== this.folderWarmGeneration) return
+      const [folder, ...rest] = pending
+      if (!folder) return
+      if (this.isInputQuiet()) {
+        this.startupPrefetchTimer = setTimeout(() => void step(pending), Math.max(250, this.msUntilQuiet()))
+        return
+      }
+      const key = this.folderKey(folder.id)
+      if (!this.folderChatsCache.has(key)) {
+        try {
+          const chats = await this.api.listChats(CHAT_LIST_LIMIT, { folderId: folder.id })
+          // Never overwrite a folder the user loaded (and maybe scrolled further) in the meantime.
+          if (generation === this.folderWarmGeneration && !this.folderChatsCache.has(key)) {
+            this.folderChatsCache.set(key, { chats, hasMore: chats.length >= CHAT_LIST_LIMIT })
+          }
+        } catch {
+          // Warming is best effort; switching to the folder fetches it normally.
+        }
+      }
+      if (generation !== this.folderWarmGeneration) return
+      this.startupPrefetchTimer = setTimeout(() => void step(rest), 300)
+    }
+    this.startupPrefetchTimer = setTimeout(() => void step([...this.folders]), FOLDER_WARM_DELAY_MS)
+    const maybeNodeTimeout = this.startupPrefetchTimer as unknown as { unref?: () => void }
+    maybeNodeTimeout.unref?.()
   }
 
   /** Chat-list state for the active folder; every rebuild goes through here so the title keeps its folder label. */

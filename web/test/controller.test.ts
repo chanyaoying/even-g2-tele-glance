@@ -535,6 +535,29 @@ describe('TelegramAppController', () => {
       return { api, bridge, controller: new TelegramAppController(api, bridge) }
     }
 
+    it('warms every folder while idle so the first switch needs no loading state', async () => {
+      vi.useFakeTimers()
+      try {
+        const { controller, api } = make()
+        await controller.init()
+        expect(api.listChats).not.toHaveBeenCalledWith(20, { folderId: '2' })
+
+        await vi.advanceTimersByTimeAsync(4000)
+
+        expect(api.listChats).toHaveBeenCalledWith(20, { folderId: '2' })
+        expect(api.listChats).toHaveBeenCalledWith(20, { folderId: '3' })
+
+        await controller.dispatch({ type: 'doublePress' })
+        await controller.dispatch({ type: 'swipeDown' })
+        await controller.dispatch({ type: 'press' })
+        // The cached page is on screen immediately, with no empty "loading" list in between.
+        expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'chats', chats: folderChats['2'] })
+        controller.dispose()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
     it('shows the folder position in the title and opens a picker on double press', async () => {
       const { controller, bridge } = make()
       await controller.init()
