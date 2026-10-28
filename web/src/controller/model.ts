@@ -496,10 +496,13 @@ type MessageDisplayPage = {
 
 function messageDisplayBlocks(messages: Message[]): MessageDisplayBlock[] {
   const blocks: MessageDisplayBlock[] = []
+  const now = new Date()
   for (let i = 0; i < messages.length; i++) {
-    // No blank separator row: the timestamp in each header already separates messages, and the fixed
-    // firmware font means every row saved is room for more text.
-    blocks.push(...formatMessageBlocks(messages[i]))
+    // No blank separator row: the time at the start of each line already separates messages, and the
+    // fixed firmware font means every row saved is room for more text.
+    const startsDay = i === 0 || dayKey(messages[i].sentAt) !== dayKey(messages[i - 1].sentAt)
+    const dayLabel = startsDay ? formatDayLabel(messages[i].sentAt, now) : ''
+    blocks.push(...formatMessageBlocks(messages[i], dayLabel))
   }
   return blocks
 }
@@ -513,32 +516,54 @@ type MessageDisplayBlock = {
   gap?: true
 }
 
-function formatMessageBlocks(message: Message): MessageDisplayBlock[] {
+function formatMessageBlocks(message: Message, dayLabel = ''): MessageDisplayBlock[] {
   const l = getLocale()
   const sender = sanitizeGlassesText(message.outgoing ? l.senderMe : message.sender || l.senderUnknown)
   const text = sanitizeGlassesText(message.text || '').trim() || l.messageUnsupported
-  const header = withTimestamp(sender, message.sentAt)
-  if (wordCount(text) > MESSAGE_BOX_WORD_THRESHOLD) return formatMessageBox(String(message.id), header, text)
+  const time = formatMessageTime(message.sentAt)
+  if (wordCount(text) > MESSAGE_BOX_WORD_THRESHOLD) {
+    // A boxed message sits on a page of its own, so the day goes into its heading instead of a divider row.
+    return formatMessageBox(String(message.id), [dayLabel, time, sender].filter(Boolean).join(' '), text)
+  }
 
-  return [{ text: formatCompactMessageRows(header, text).join('\n') }]
+  const rows = formatCompactMessageRows(time ? `${time} ${sender}` : sender, text)
+  // The divider is part of the day's first message block, so it can never be split from that message.
+  if (dayLabel) rows.unshift(`----- ${dayLabel} -----`)
+  return [{ text: rows.join('\n') }]
 }
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
-/** "14:32" for today, "Oct 27 14:32" for other days (device local time). Empty when unknown. */
-export function formatMessageTime(sentAt: string | null | undefined, now: Date = new Date()): string {
+function parseSentAt(sentAt: string | null | undefined): Date | undefined {
   // Fixture runs (simulator goldens) must not depend on the machine's timezone or clock.
-  if (!sentAt || isTeleGlanceFixtureMode()) return ''
+  if (!sentAt || isTeleGlanceFixtureMode()) return undefined
   const date = new Date(sentAt)
-  if (Number.isNaN(date.getTime())) return ''
-  const clock = `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
-  const sameDay = date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth() && date.getDate() === now.getDate()
-  return sameDay ? clock : `${MONTHS[date.getMonth()]} ${date.getDate()} ${clock}`
+  return Number.isNaN(date.getTime()) ? undefined : date
 }
 
-function withTimestamp(sender: string, sentAt: string | null | undefined) {
-  const time = formatMessageTime(sentAt)
-  return time ? `${sender} ${time}` : sender
+/** "14:32" in the device's local time (24-hour). Empty when unknown. */
+export function formatMessageTime(sentAt: string | null | undefined): string {
+  const date = parseSentAt(sentAt)
+  if (!date) return ''
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+}
+
+function dayKey(sentAt: string | null | undefined): string {
+  const date = parseSentAt(sentAt)
+  return date ? `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}` : ''
+}
+
+/** "Today", "Yesterday", "Mon 26 Oct" (or with the year for other years). Empty when unknown. */
+export function formatDayLabel(sentAt: string | null | undefined, now: Date = new Date()): string {
+  const date = parseSentAt(sentAt)
+  if (!date) return ''
+  const startOf = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+  const days = Math.round((startOf(now) - startOf(date)) / 86_400_000)
+  if (days === 0) return 'Today'
+  if (days === 1) return 'Yesterday'
+  const label = `${WEEKDAYS[date.getDay()]} ${date.getDate()} ${MONTHS[date.getMonth()]}`
+  return date.getFullYear() === now.getFullYear() ? label : `${label} ${date.getFullYear()}`
 }
 
 function formatCompactMessageRows(sender: string, text: string) {

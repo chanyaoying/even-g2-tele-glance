@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatMessageTime, messageScrollUnitCount, nextMessageScrollOffset, screenModel } from '../src/controller/model'
+import { formatDayLabel, formatMessageTime, messageScrollUnitCount, nextMessageScrollOffset, screenModel } from '../src/controller/model'
 import type { AppState } from '../src/controller/model'
 import type { Message } from '../src/types'
 import { getLocale, setLocale } from '../src/locales'
@@ -812,27 +812,65 @@ describe('screenModel', () => {
 })
 
 describe('message timestamps', () => {
-  it('formats today as a clock time and other days with a short date', () => {
+  it('formats times as 24-hour local clock and days as relative labels', () => {
     const now = new Date(2026, 9, 28, 15, 0)
-    const today = new Date(2026, 9, 28, 9, 5).toISOString()
-    const earlier = new Date(2026, 9, 27, 23, 41).toISOString()
-    expect(formatMessageTime(today, now)).toBe('09:05')
-    expect(formatMessageTime(earlier, now)).toBe('Oct 27 23:41')
-    expect(formatMessageTime(undefined, now)).toBe('')
-    expect(formatMessageTime('not a date', now)).toBe('')
+    const at = (y: number, mo: number, d: number, h = 12, m = 0) => new Date(y, mo, d, h, m).toISOString()
+    expect(formatMessageTime(at(2026, 9, 28, 9, 5))).toBe('09:05')
+    expect(formatMessageTime(at(2026, 9, 27, 23, 41))).toBe('23:41')
+    expect(formatMessageTime(undefined)).toBe('')
+    expect(formatMessageTime('not a date')).toBe('')
+
+    expect(formatDayLabel(at(2026, 9, 28, 0, 5), now)).toBe('Today')
+    expect(formatDayLabel(at(2026, 9, 27, 23, 58), now)).toBe('Yesterday')
+    expect(formatDayLabel(at(2026, 9, 26), now)).toBe('Mon 26 Oct')
+    expect(formatDayLabel(at(2025, 11, 31), now)).toBe('Wed 31 Dec 2025')
+    expect(formatDayLabel(undefined, now)).toBe('')
   })
 
-  it('puts the time in every message header and leaves no blank row between messages', () => {
-    const at = (h: number, m: number) => new Date(2026, 0, 2, h, m).toISOString()
+  it('puts the time first on every line, with a divider row only where a new day starts', () => {
+    const today = new Date()
+    const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1, 23, 58)
+    const at = (h: number, m: number) => new Date(today.getFullYear(), today.getMonth(), today.getDate(), h, m).toISOString()
     const messages: Message[] = [
-      { id: '1', sender: 'Alice', text: 'first', sentAt: at(9, 5) },
-      { id: '2', sender: 'Bob', text: 'second', sentAt: at(9, 6) },
+      { id: '1', sender: 'Alice', text: 'night!', sentAt: yesterday.toISOString() },
+      { id: '2', sender: 'Bob', text: 'still up?', sentAt: at(0, 5) },
+      { id: '3', sender: 'Alice', text: 'morning', sentAt: at(9, 12) },
     ]
     const model = screenModel(messageState(messages))
     const body = model.kind === 'sidebar' ? model.panelBody ?? '' : ''
-    const lines = body.split('\n')
-    expect(lines).toHaveLength(2)
-    expect(lines[0]).toMatch(/^Alice (Jan 2 )?09:05: first$/)
-    expect(lines[1]).toMatch(/^Bob (Jan 2 )?09:06: second$/)
+    expect(body.split('\n')).toEqual([
+      '----- Yesterday -----',
+      '23:58 Alice: night!',
+      '----- Today -----',
+      '00:05 Bob: still up?',
+      '09:12 Alice: morning',
+    ])
+  })
+
+  it('leaves out time and dividers for messages without a timestamp', () => {
+    const model = screenModel(messageState([{ id: '1', sender: 'Alice', text: 'hi' }]))
+    expect(model.kind === 'sidebar' ? model.panelBody : '').toBe('Alice: hi')
+  })
+
+  it('scrolls the divider together with its day instead of leaving it behind', () => {
+    const base = new Date(2026, 0, 5, 10, 0).getTime()
+    const messages: Message[] = Array.from({ length: 12 }, (_, i) => ({
+      id: String(i),
+      sender: 'A',
+      text: `m${i}`,
+      sentAt: new Date(base + (i < 6 ? 0 : 86_400_000) + i * 60_000).toISOString(),
+    }))
+    const bodies = Array.from({ length: messageScrollUnitCount(messages) }, (_, offset) => {
+      const model = screenModel(messageState(messages, offset))
+      return model.kind === 'sidebar' ? model.panelBody ?? '' : ''
+    })
+    // Every divider is immediately followed by a message line, never the last row of a page.
+    for (const body of bodies) {
+      const lines = body.split('\n')
+      lines.forEach((line, index) => {
+        if (line.startsWith('-----')) expect(lines[index + 1]).toMatch(/^\d\d:\d\d /)
+      })
+    }
+    expect(bodies.some((body) => body.includes('-----'))).toBe(true)
   })
 })
