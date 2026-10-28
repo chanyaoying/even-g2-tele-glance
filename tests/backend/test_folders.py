@@ -311,3 +311,13 @@ def test_unknown_folder_is_an_error():
     service = make_service(FakeClient([], [make_filter(id=2)]))
     with pytest.raises(TelegramServiceError, match="folder not found"):
         run(service.list_chats(limit=5, folder_id=99))
+
+
+def test_listing_chats_seeds_the_entity_cache_so_opening_needs_no_lookup():
+    client = FakeClient(many(5), [])
+    service = make_service(client)
+
+    run(service.list_chats(limit=5, offset=0))
+
+    assert set(service._entity_cache) == {1, 2, 3, 4, 5}
+    assert run(service._get_entity(3)) is service._entity_cache[3]

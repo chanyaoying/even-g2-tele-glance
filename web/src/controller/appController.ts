@@ -26,7 +26,10 @@ export interface GlassesBridge {
 }
 
 const MESSAGE_PAGE_LIMIT = 8
-const OLDER_PREFETCH_LOW_WATER = 4
+// Older pages are fetched in bigger chunks than the first page: a history call costs about the same for 8
+// or 24 messages, and a bigger chunk means far fewer waits at the edge of loaded history while scrolling.
+const OLDER_PAGE_LIMIT = 24
+const OLDER_PREFETCH_LOW_WATER = 8
 const CHAT_LIST_LIMIT = 20
 // When the selection gets this close to the end of the loaded chats, fetch the next page.
 const CHAT_LOAD_MORE_THRESHOLD = 3
@@ -1513,7 +1516,9 @@ export class TelegramAppController {
   private maybePrefetchOlder() {
     const state = this.state
     if (state.screen !== 'sidebar' || state.focus !== 'messages') return
-    if (this.isInputQuiet()) return
+    // Deliberately not gated on the input quiet window: while the user keeps scrolling that window never
+    // closes, so the prefetch would never run and they would hit the end of loaded history. It is one
+    // small request, only issued when close to the edge, and de-duplicated per cursor.
     const maxOffset = maxScrollOffset(state.messages)
     const remainingLoadedScroll = maxOffset - (state.scrollOffset ?? 0)
     if (remainingLoadedScroll > OLDER_PREFETCH_LOW_WATER) return
@@ -1588,7 +1593,7 @@ export class TelegramAppController {
     const older = await this.api.listMessages(state.chat.id, {
       topicId: topicThreadId(state.topic),
       beforeId: state.cursor,
-      limit: MESSAGE_PAGE_LIMIT,
+      limit: OLDER_PAGE_LIMIT,
     })
     if (older.length === 0) return false
 

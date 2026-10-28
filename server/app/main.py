@@ -1,6 +1,8 @@
 from collections import deque
 from datetime import datetime, timezone
 import json
+import logging
+import time
 from typing import Optional
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
@@ -32,6 +34,8 @@ from app.services.audio import pcm16le_to_wav
 from app.services.secure_auth import SecureAuthError, decrypt_payload, encrypt_payload
 from app.services.telegram import TelegramService, TelegramServiceError, TelegramServiceTimeoutError, TelegramSessionExpiredError
 from app.services.transcription import TranscriptionServiceError, WhisperTranscriptionService
+
+timing_logger = logging.getLogger("uvicorn.error")
 
 
 def raise_telegram_http_error(exc: Exception) -> None:
@@ -78,7 +82,12 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             except (json.JSONDecodeError, UnicodeDecodeError, SecureAuthError) as exc:
                 return JSONResponse({"detail": str(exc)}, status_code=400)
 
+        started = time.perf_counter()
         response = await call_next(request)
+        handled_ms = (time.perf_counter() - started) * 1000
+        if request.url.path.startswith("/api/") and request.url.path != "/api/updates":
+            # Handler time (Telegram + normalising), excluding wire transfer; shows where a slow load went.
+            timing_logger.info("%s %s -> %s in %.0f ms", request.method, request.url.path, response.status_code, handled_ms)
         if not should_encrypt or not _is_json_response(response):
             return response
 

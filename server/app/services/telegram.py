@@ -670,7 +670,12 @@ class TelethonTelegramService:
                 timeout=30,
             )
             for dialog in dialogs:
-                self._cache_user_name(getattr(dialog, "entity", None))
+                entity = getattr(dialog, "entity", None)
+                self._cache_user_name(entity)
+                # Seed the entity cache so opening a listed chat never needs a get_entity round trip.
+                dialog_id = getattr(dialog, "id", None)
+                if entity is not None and dialog_id is not None:
+                    self._entity_cache[int(dialog_id)] = entity
             return [normalize_dialog(dialog) for dialog in dialogs]
         except TelegramServiceError:
             raise
