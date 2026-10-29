@@ -47,6 +47,15 @@ export type Message = {
   text: string
   sentAt?: string | null
   outgoing?: boolean
+  /** "photo" when the message carries a photo the glasses can show inline. */
+  media?: string | null
+}
+
+export type Photo = {
+  width: number
+  height: number
+  /** Base64 greyscale PNG already fitted to the glasses image container. */
+  data: string
 }
 
 export type TelegramUpdate = {

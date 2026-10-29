@@ -7,6 +7,7 @@ import type {
   Message,
   PhoneAuthStart,
   PhoneAuthStatus,
+  Photo,
   SendMessageRequest,
   TelegramTypingUpdate,
   TelegramUpdate,
@@ -49,6 +50,10 @@ export class InstrumentedTelegramApi implements TelegramApi {
 
   async listMessages(chatId: Id, options: { topicId?: Id; beforeId?: Id; limit?: number } = {}): Promise<Message[]> {
     return this.wrap('listMessages', { chatId, options }, () => this.inner.listMessages(chatId, options))
+  }
+
+  async getPhoto(chatId: Id, messageId: Id): Promise<Photo> {
+    return this.wrap('getPhoto', { chatId, messageId }, () => this.inner.getPhoto(chatId, messageId))
   }
 
   async sendMessage(chatId: Id, request: SendMessageRequest): Promise<Message> {

@@ -334,3 +334,92 @@ def test_phone_login_requests_then_uses_two_step_password():
         assert second.password_required is False
 
     asyncio.run(scenario())
+
+
+class MessageMediaPhoto:
+    """Stand-in with the same class name Telethon uses for a real photo attachment."""
+
+
+class MessageMediaWebPage:
+    pass
+
+
+def test_photo_messages_are_flagged_and_keep_a_text_fallback():
+    captioned = RichMessage(id=30, message="Look", raw_text="Look", media=MessageMediaPhoto(), date=datetime(2026, 1, 1, tzinfo=timezone.utc))
+    bare = RichMessage(id=31, message="", raw_text="", media=MessageMediaPhoto(), date=datetime(2026, 1, 1, tzinfo=timezone.utc))
+
+    assert normalize_message(captioned).media == "photo"
+    assert normalize_message(captioned).text == "Look [photo]"
+    assert normalize_message(bare).text == "[photo]"
+
+
+def test_link_previews_and_other_media_are_not_treated_as_photos():
+    preview = RichMessage(id=32, message="see this", raw_text="see this", media=MessageMediaWebPage(), date=datetime(2026, 1, 1, tzinfo=timezone.utc))
+
+    normalized = normalize_message(preview)
+
+    assert normalized.media is None
+    assert normalized.text == "see this [unsupported content]"
+
+
+class _PhotoClient:
+    def __init__(self, message, payload):
+        self.message = message
+        self.payload = payload
+        self.downloads = 0
+
+    async def get_messages(self, entity, ids=None):
+        return self.message
+
+    async def download_media(self, message, file=None, thumb=None):
+        self.downloads += 1
+        assert thumb == -1
+        return self.payload
+
+
+def _photo_service(client):
+    service = TelethonTelegramService(
+        Settings(TELEGLANCE_SHARED_SECRET="test-secret-long-enough"),
+        TelegramClientCredentials(api_id=1, api_hash="hash", session_string="s"),
+    )
+
+    async def get_client():
+        return client
+
+    async def get_entity(chat_id):
+        return object()
+
+    service._get_client = get_client
+    service._get_entity = get_entity
+    return service
+
+
+def test_get_photo_downloads_converts_and_caches():
+    pil = __import__("pytest").importorskip("PIL.Image")
+    import base64, io
+
+    buffer = io.BytesIO()
+    pil.new("RGB", (800, 400), (200, 40, 40)).save(buffer, format="JPEG")
+    message = RichMessage(id=40, message="", raw_text="", media=MessageMediaPhoto(), date=datetime(2026, 1, 1, tzinfo=timezone.utc))
+    client = _PhotoClient(message, buffer.getvalue())
+    service = _photo_service(client)
+
+    first = asyncio.run(service.get_photo(1, 40))
+    second = asyncio.run(service.get_photo(1, 40))
+
+    assert (first.width, first.height) == (288, 144)
+    image = pil.open(io.BytesIO(base64.b64decode(first.data)))
+    assert image.mode == "L" and image.size == (288, 144)
+    assert second is first
+    assert client.downloads == 1
+
+
+def test_get_photo_rejects_a_message_without_a_photo():
+    import pytest
+    from app.services.telegram import TelegramServiceError
+
+    message = RichMessage(id=41, message="text only", raw_text="text only", media=None, date=datetime(2026, 1, 1, tzinfo=timezone.utc))
+    service = _photo_service(_PhotoClient(message, b""))
+
+    with pytest.raises(TelegramServiceError, match="no photo"):
+        asyncio.run(service.get_photo(1, 41))

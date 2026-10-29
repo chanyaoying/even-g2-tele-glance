@@ -12,6 +12,7 @@ from app.models import (
     ChatSummary,
     FolderSummary,
     MessageSummary,
+    PhotoResponse,
     PhoneLoginStart,
     SendMessageResponse,
     TelegramUpdate,
@@ -67,6 +68,11 @@ class FakeTelegramService:
                 sent_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
             )
         ]
+
+    async def get_photo(self, chat_id, message_id, *, max_width=288, max_height=144):
+        self.photo_calls = getattr(self, "photo_calls", [])
+        self.photo_calls.append((chat_id, message_id, max_width, max_height))
+        return PhotoResponse(width=2, height=1, data="UE5H")
 
     async def send_message(self, chat_id, *, text, topic_id=None):
         self.sent.append({"chat_id": chat_id, "text": text, "topic_id": topic_id})
@@ -383,3 +389,17 @@ def encrypted_json_body(payload):
 def decrypted_json(response):
     encrypted = response.json()["encryptedPayload"]
     return json.loads(decrypt_payload(encrypted, "shared-secret"))
+
+
+@pytest.mark.asyncio
+async def test_photo_endpoint_returns_the_prepared_image_and_forwards_the_size_limits(app, fake_services):
+    telegram, _ = fake_services
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/chats/2/messages/8/photo?max_width=200&max_height=100")
+        too_big = await client.get("/api/chats/2/messages/8/photo?max_width=999")
+
+    assert response.status_code == 200
+    assert response.json() == {"width": 2, "height": 1, "format": "png", "data": "UE5H"}
+    assert telegram.photo_calls == [(2, 8, 200, 100)]
+    assert too_big.status_code == 422

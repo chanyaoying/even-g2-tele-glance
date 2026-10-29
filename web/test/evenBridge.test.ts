@@ -461,3 +461,92 @@ function activeEventCaptureCount(value: unknown): number {
     return sum + activeEventCaptureCount(item)
   }, 0)
 }
+
+describe('EvenHubGlassesBridge photos', () => {
+  const baseModel: Extract<ScreenModel, { kind: 'sidebar' }> = {
+    kind: 'sidebar',
+    title: 'Chat',
+    sidebarTitle: 'Chats',
+    sidebarItems: ['A'],
+    sidebarSelected: 0,
+    panelTitle: '',
+    panelBody: 'Alice',
+    panelFooter: 'Swipe',
+    fullWidth: true,
+    focus: 'panel',
+  }
+
+  function makeBridge(extra: Record<string, unknown> = {}) {
+    const rebuilt: unknown[] = []
+    const bridge = new EvenHubGlassesBridge({
+      async createStartUpPageContainer(container: unknown) {
+        rebuilt.push(container)
+        return 0
+      },
+      async rebuildPageContainer(container: unknown) {
+        rebuilt.push(container)
+        return true
+      },
+      async audioControl() {
+        return undefined
+      },
+      onEvenHubEvent() {
+        return undefined
+      },
+      ...extra,
+    } as never)
+    return { bridge, rebuilt }
+  }
+
+  const imageObject = (container: unknown) =>
+    ((container as { imageObject?: Array<Record<string, number>> }).imageObject ?? [])[0]
+
+  it('always includes the image container: 288x144 beside the text for a photo, a 20x20 blank otherwise', async () => {
+    const { bridge, rebuilt } = makeBridge()
+
+    await bridge.render({ ...baseModel, panelImage: { chatId: '1', messageId: '2' } } as ScreenModel)
+    await bridge.render({ ...baseModel } as ScreenModel)
+
+    const withPhoto = imageObject(rebuilt[0])
+    expect(withPhoto).toMatchObject({ containerID: 9, width: 288, height: 144 })
+    expect(withPhoto.xPosition + withPhoto.width).toBeLessThanOrEqual(576)
+    expect(withPhoto.yPosition + withPhoto.height).toBeLessThanOrEqual(288)
+    expect(textObjectById(rebuilt[0], 6)).toMatchObject({ width: 282 })
+
+    expect(imageObject(rebuilt[1])).toMatchObject({ containerID: 9, width: 20, height: 20 })
+    expect(textObjectById(rebuilt[1], 6)).toMatchObject({ width: 572 })
+  })
+
+  it('sends photo pixels one transfer at a time and keeps only the latest queued image', async () => {
+    const sent: number[][] = []
+    let release: (value: unknown) => void = () => undefined
+    const { bridge } = makeBridge({
+      updateImageRawData: vi.fn((data: { imageData: Uint8Array }) => {
+        sent.push(Array.from(data.imageData))
+        return new Promise((resolve) => {
+          release = resolve
+        })
+      }),
+    })
+
+    const first = bridge.updateImage(new Uint8Array([1]))
+    bridge.updateImage(new Uint8Array([2]))
+    const last = bridge.updateImage(new Uint8Array([3]))
+    expect(sent).toEqual([[1]]) // the second transfer waits for the first
+
+    release('success')
+    await flushAsync(5)
+    release('success')
+    await Promise.all([first, last])
+
+    expect(sent).toEqual([[1], [3]]) // [2] was superseded before it was sent
+  })
+
+  it('reports whether the glasses accepted the image', async () => {
+    const { bridge } = makeBridge({ updateImageRawData: vi.fn(async () => 'imageToGray4Failed') })
+    expect(await bridge.updateImage(new Uint8Array([1]))).toBe(false)
+
+    const accepted = makeBridge({ updateImageRawData: vi.fn(async () => 'success') })
+    expect(await accepted.bridge.updateImage(new Uint8Array([1]))).toBe(true)
+  })
+})

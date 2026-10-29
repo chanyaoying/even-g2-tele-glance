@@ -1,5 +1,5 @@
 import type { ListChatsOptions, TelegramApi } from './api'
-import type { Chat, Folder, Id, Message, TelegramTypingUpdate, TelegramUpdate, Topic, TranscriptionResult } from './types'
+import type { Chat, Folder, Id, Message, Photo, TelegramTypingUpdate, TelegramUpdate, Topic, TranscriptionResult } from './types'
 import { getFixtureTestOverrides } from './testMode'
 
 const fixtureChats: Chat[] = [
@@ -249,6 +249,11 @@ export class FixtureTelegramApi implements TelegramApi {
     await fixtureDelay(60)
     if (String(chatId) !== 'fixture-chat-1') return []
     return this.getTopics().map((topic) => ({ ...topic }))
+  }
+
+  async getPhoto(): Promise<Photo> {
+    // 1x1 greyscale PNG: fixture runs never reach real glasses pixels.
+    return { width: 20, height: 20, data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==' }
   }
 
   async listMessages(chatId: Id, options: { topicId?: Id; beforeId?: Id; limit?: number } = {}) {

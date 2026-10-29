@@ -1,5 +1,7 @@
 import {
   CreateStartUpPageContainer,
+  ImageContainerProperty,
+  ImageRawDataUpdate,
   ListContainerProperty,
   ListItemContainerProperty,
   RebuildPageContainer,
@@ -23,6 +25,9 @@ import {
 import { createBoundedInputDispatcher, createInputCoalescer, mapEvenHubEvent } from './eventMapping'
 
 const encoder = new TextEncoder()
+const IMAGE_CONTAINER_ID = 9
+const IMAGE_CONTAINER_NAME = 'panel-image'
+const PHOTO_TEXT_WIDTH = 282
 export const APP_BUILD_VERSION: string = (typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0')
 
 type DispatchContextSnapshot = { inputQuiet: boolean; backgroundWorkActive: boolean }
@@ -44,6 +49,7 @@ type EvenBridgeInstance = {
   createStartUpPageContainer(container: unknown): Promise<number>
   rebuildPageContainer(container: unknown): Promise<boolean>
   textContainerUpgrade?(container: unknown): Promise<boolean>
+  updateImageRawData?(data: unknown): Promise<unknown>
   audioControl(enabled: boolean): Promise<unknown>
   shutDownPageContainer?(exitMode?: number): Promise<boolean>
   callEvenApp?(method: string, payload: unknown): Promise<boolean>
@@ -56,6 +62,8 @@ type EvenBridgeInstance = {
 
 export class EvenHubGlassesBridge implements GlassesBridge {
   private hasRendered = false
+  private pendingImage: Uint8Array | undefined
+  private imageSending: Promise<boolean> | undefined
   private pageGeneration = 0
   private renderSequence = 0
   private pendingPanelModel: { model: Extract<ScreenModel, { kind: 'sidebar' }>; generation: number } | undefined
@@ -412,6 +420,43 @@ export class EvenHubGlassesBridge implements GlassesBridge {
       staleDropped: this.stalePartialRenderDropped,
     }
   }
+  /**
+   * Send photo pixels to the panel image container. The SDK forbids concurrent image transfers and
+   * warns against frequent ones, so requests are serialised and only the latest pending one is kept.
+   */
+  updateImage(png: Uint8Array): Promise<boolean> {
+    if (typeof this.sdk.updateImageRawData !== 'function') return Promise.resolve(false)
+    this.pendingImage = png
+    if (this.imageSending) return this.imageSending
+    const run = async (): Promise<boolean> => {
+      let ok = false
+      try {
+        while (this.pendingImage) {
+          const next = this.pendingImage
+          this.pendingImage = undefined
+          const result = await withTimeout(
+            this.sdk.updateImageRawData!(new ImageRawDataUpdate({
+              containerID: IMAGE_CONTAINER_ID,
+              containerName: IMAGE_CONTAINER_NAME,
+              imageData: next,
+            })),
+            8000,
+            'updateImageRawData',
+          )
+          ok = isImageSuccess(result)
+          logTeleGlanceTest('image', { bytes: next.byteLength, result: String(result), ok })
+        }
+      } catch {
+        ok = false
+      } finally {
+        this.imageSending = undefined
+      }
+      return ok
+    }
+    this.imageSending = run()
+    return this.imageSending
+  }
+
   async setAudioEnabled(enabled: boolean) {
     logTeleGlanceTest('bridge', { method: 'setAudioEnabled', args: { enabled } })
     // In fixture mode the audio pipeline is fully simulated: the test
@@ -537,7 +582,8 @@ function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Cont
     content: trimForContainer(fillToContainer(model.panelBody || ' '), 999),
     xPosition: fullWidth ? 2 : 170,
     yPosition: 38,
-    width: fullWidth ? 572 : 404,
+    // With a photo the text moves into a narrow left column and the picture takes the right side.
+    width: model.panelImage ? PHOTO_TEXT_WIDTH : fullWidth ? 572 : 404,
     height: fullWidth ? 188 : 206,
     borderWidth: 0,
     borderColor: 8,
@@ -571,6 +617,24 @@ function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Cont
         paddingLength: 0,
         isEventCapture: 0,
       })
+  // Always present (stable container ids). Without a photo it is a 20x20 blank in the gap above the footer.
+  const panelImage = model.panelImage
+    ? new ImageContainerProperty({
+        containerID: IMAGE_CONTAINER_ID,
+        containerName: IMAGE_CONTAINER_NAME,
+        xPosition: 286,
+        yPosition: 40,
+        width: 288,
+        height: 144,
+      })
+    : new ImageContainerProperty({
+        containerID: IMAGE_CONTAINER_ID,
+        containerName: IMAGE_CONTAINER_NAME,
+        xPosition: 552,
+        yPosition: 226,
+        width: 20,
+        height: 20,
+      })
   const footer = new TextContainerProperty({
     containerID: 4,
     containerName: 'footer',
@@ -603,9 +667,10 @@ function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Cont
   const list = hiddenListContainer()
   const textObjects = [outerBorder, title, overlay, sidebarSeparator, sidebar, panelBody, panelBox, footer]
   return new Container({
-    containerTotalNum: textObjects.length + 1,
+    containerTotalNum: textObjects.length + 2,
     textObject: textObjects,
     listObject: [list],
+    imageObject: [panelImage],
   })
 }
 
@@ -984,4 +1049,10 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
   return Promise.race([promise, timeout]).finally(() => {
     if (timer) clearTimeout(timer)
   })
+}
+
+/** The SDK reports success as `success`, 0 or true depending on the host build. */
+function isImageSuccess(result: unknown): boolean {
+  if (result === undefined) return false
+  return result === true || result === 0 || result === 'success' || result === 'imageSuccess'
 }

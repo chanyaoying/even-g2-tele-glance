@@ -874,3 +874,45 @@ describe('message timestamps', () => {
     expect(bodies.some((body) => body.includes('-----'))).toBe(true)
   })
 })
+
+describe('photo messages', () => {
+  const photoMessage = (id: string, text = '[photo]'): Message => ({ id, sender: 'Alice', text, media: 'photo' })
+  const sidebarAt = (messages: Message[], offset: number) => {
+    const model = screenModel(messageState(messages, offset))
+    if (model.kind !== 'sidebar') throw new Error('expected sidebar')
+    return model
+  }
+
+  it('gives a photo its own page with the picture reference and a narrow text column', () => {
+    const messages: Message[] = [
+      { id: '1', sender: 'Bob', text: 'before' },
+      photoMessage('2', 'look at this lovely sunset over the bay [photo]'),
+      { id: '3', sender: 'Bob', text: 'after' },
+    ]
+
+    expect(messageScrollUnitCount(messages)).toBe(3)
+    const photoPage = sidebarAt(messages, 1)
+    expect(photoPage.panelImage).toEqual({ chatId: '1', messageId: '2' })
+    for (const line of photoPage.panelBody.split('\n')) expect(line.length).toBeLessThanOrEqual(20)
+    expect(photoPage.panelBody).toContain('Alice')
+    expect(photoPage.panelBody).toContain('[photo]')
+
+    expect(sidebarAt(messages, 0).panelImage).toBeUndefined()
+    expect(sidebarAt(messages, 2).panelImage).toBeUndefined()
+  })
+
+  it('scrolls through photo pages one step at a time', () => {
+    const messages: Message[] = [photoMessage('1'), photoMessage('2'), photoMessage('3')]
+
+    expect(sidebarAt(messages, 0).panelImage?.messageId).toBe('3')
+    expect(nextMessageScrollOffset(messages, 0, 'up')).toBe(1)
+    expect(sidebarAt(messages, 1).panelImage?.messageId).toBe('2')
+    expect(nextMessageScrollOffset(messages, 1, 'down')).toBe(0)
+  })
+
+  it('shows no picture while the thread is still loading', () => {
+    const state = { ...messageState([photoMessage('1')]), status: 'Loading messages...' } as AppState
+    const model = screenModel(state)
+    expect(model.kind === 'sidebar' ? model.panelImage : 'x').toBeUndefined()
+  })
+})

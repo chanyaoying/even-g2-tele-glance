@@ -71,6 +71,14 @@ class MessageSummary(ApiModel):
     text: str
     sent_at: Optional[datetime] = None
     outgoing: bool = False
+    media: Optional[str] = None  # "photo" when the message carries a photo the glasses can show
+
+
+class PhotoResponse(ApiModel):
+    width: int
+    height: int
+    format: str = "png"
+    data: str  # base64
 
 
 class TelegramUpdate(ApiModel):

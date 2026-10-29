@@ -19,6 +19,7 @@ from app.models import (
     FolderSummary,
     DebugEvent,
     MessageSummary,
+    PhotoResponse,
     MarkReadRequest,
     MarkReadResponse,
     PhoneLoginStart,
@@ -265,6 +266,19 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 "Connection": "keep-alive",
             },
         )
+
+    @api.get("/api/chats/{chat_id}/messages/{message_id}/photo", response_model=PhotoResponse)
+    async def get_photo(
+        chat_id: int,
+        message_id: int,
+        max_width: int = Query(default=288, ge=20, le=288),
+        max_height: int = Query(default=144, ge=20, le=144),
+        telegram: TelegramService = Depends(get_telegram_service),
+    ) -> PhotoResponse:
+        try:
+            return await telegram.get_photo(chat_id, message_id, max_width=max_width, max_height=max_height)
+        except (TelegramServiceError, TimeoutError) as exc:
+            raise_telegram_http_error(exc)
 
     @api.post("/api/chats/{chat_id}/messages", response_model=SendMessageResponse)
     async def send_message(

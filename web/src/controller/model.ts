@@ -5,6 +5,8 @@ import { getLocale } from '../locales'
 const TEXT_CONTAINER_BYTE_LIMIT = 999
 const MESSAGE_ROW_BYTE_LIMIT = 120
 const MESSAGE_ROW_CHAR_LIMIT = 44
+// A photo page puts the text in a narrow left column (about 282 px) and the picture on the right.
+const PHOTO_TEXT_CHARS = 20
 const MESSAGE_VISIBLE_ROW_LIMIT = 7
 const MESSAGE_BOX_WIDTH = 42
 const MESSAGE_BOX_CONTENT_WIDTH = MESSAGE_BOX_WIDTH - 4
@@ -40,8 +42,15 @@ export type ScreenModel =
       sidebarTitle: string; sidebarItems: string[]; sidebarSelected: number;
       panelTitle: string; panelBody: string; panelFooter: string;
       panelBox?: BoxedText;
+      panelImage?: PanelImage;
       fullWidth?: boolean;
       focus: 'sidebar' | 'panel'; }
+
+/** A photo shown beside the message text; the controller fetches the pixels and sends them to the glasses. */
+export type PanelImage = {
+  chatId: string
+  messageId: string
+}
 
 export type BoxedText = {
   heading: string
@@ -211,6 +220,9 @@ export function screenModel(state: AppState): ScreenModel {
               ? typingFooter(state.typing.userName, l.typingSuffix)
               : footerText(state.status, l.footerSwipeScroll),
             panelBox: loadingBody ? undefined : msg.box,
+            panelImage: loadingBody || !msg.imageMessageId
+              ? undefined
+              : { chatId: String(state.chat.id), messageId: msg.imageMessageId },
             fullWidth: true,
             focus: 'panel',
           }
@@ -457,7 +469,7 @@ function messageDisplayPages(messages: Message[]): MessageDisplayPage[] {
 
     for (let index = endExclusive - 1; index >= 0; index -= 1) {
       const block = blocks[index]
-      if (block.box) {
+      if (block.box || block.imageMessageId) {
         if (selected.length === 0) {
           selected.unshift(block)
           start = index
@@ -488,6 +500,7 @@ function messageDisplayPages(messages: Message[]): MessageDisplayPage[] {
 
 type MessageDisplayPage = {
   body: string
+  imageMessageId?: string
   box?: BoxedText
   boxGroupId?: string
   boxPartIndex?: number
@@ -509,6 +522,7 @@ function messageDisplayBlocks(messages: Message[]): MessageDisplayBlock[] {
 
 type MessageDisplayBlock = {
   text: string
+  imageMessageId?: string
   box?: BoxedText
   boxGroupId?: string
   boxPartIndex?: number
@@ -524,6 +538,14 @@ function formatMessageBlocks(message: Message, dayLabel = ''): MessageDisplayBlo
   if (wordCount(text) > MESSAGE_BOX_WORD_THRESHOLD) {
     // A boxed message sits on a page of its own, so the day goes into its heading instead of a divider row.
     return formatMessageBox(String(message.id), [dayLabel, time, sender].filter(Boolean).join(' '), text)
+  }
+
+  if (message.media === 'photo') {
+    // A photo gets a page of its own: a narrow text column on the left, the picture on the right.
+    const heading = (time ? `${time} ${sender}` : sender).slice(0, PHOTO_TEXT_CHARS)
+    const photoRows = [heading, ...splitDisplayWordRows(text, PHOTO_TEXT_CHARS, MESSAGE_ROW_BYTE_LIMIT)]
+    if (dayLabel) photoRows.unshift(`-- ${dayLabel} --`)
+    return [{ text: photoRows.join('\n'), imageMessageId: String(message.id) }]
   }
 
   const rows = formatCompactMessageRows(time ? `${time} ${sender}` : sender, text)
@@ -692,6 +714,7 @@ function formatPage(blocks: MessageDisplayBlock[]): MessageDisplayPage {
   })
   return {
     body: content.map((block) => block.text).join('\n'),
+    imageMessageId: content.length === 1 ? content[0].imageMessageId : undefined,
     box: content.length === 1 ? content[0].box : undefined,
     boxGroupId: content.length === 1 ? content[0].boxGroupId : undefined,
     boxPartIndex: content.length === 1 ? content[0].boxPartIndex : undefined,
