@@ -6,6 +6,7 @@ import type { AppInput, AppState, RecoverableState, ScreenModel } from './model'
 import { messageScrollUnitCount, nextMessageScrollOffset, screenModel } from './model'
 import { isTeleGlanceFixtureMode, logLifecycleEvent, logRecordingEvent, logStateWork, nowMs } from '../testMode'
 import { consumeInjectedAudioChunks } from '../fixtureApi'
+import type { Photo } from '../types'
 
 export interface GlassesBridge {
   render(model: ScreenModel): Promise<void>
@@ -17,6 +18,8 @@ export interface GlassesBridge {
    * partial-render support may fall back to a queued full `render` call.
    */
   enqueueSidebarPanel?(model: Extract<ScreenModel, { kind: 'sidebar' }>): void
+  /** Push photo pixels (a PNG) to the panel image container; resolves true when the glasses accepted it. */
+  updateImage?(png: Uint8Array): Promise<boolean>
   setAudioEnabled(enabled: boolean): Promise<void>
   getLocalStorage?(key: string): Promise<string>
   setLocalStorage?(key: string, value: string): Promise<boolean>
@@ -33,6 +36,8 @@ const OLDER_PAGE_LIMIT = 24
 // so switching folders later is instant.
 const FOLDER_WARM_DELAY_MS = 2500
 const OLDER_PREFETCH_LOW_WATER = 8
+const PHOTO_CACHE_LIMIT = 16
+const PHOTO_PREFETCH_COUNT = 2
 const CHAT_LIST_LIMIT = 20
 // When the selection gets this close to the end of the loaded chats, fetch the next page.
 const CHAT_LOAD_MORE_THRESHOLD = 3
@@ -97,6 +102,8 @@ export class TelegramAppController {
   private folderSwitchId = 0
   private folderChatsCache = new Map<string, { chats: Chat[]; hasMore: boolean }>()
   private folderWarmGeneration = 0
+  private photoCache = new Map<string, Photo>()
+  private photoInFlight = new Map<string, Promise<Photo>>()
   private messageRefreshInFlight = false
   private topicPreviewDebounce: ReturnType<typeof setTimeout> | undefined
   private deferredRootRefreshTimer: ReturnType<typeof setTimeout> | undefined
@@ -128,7 +135,8 @@ export class TelegramAppController {
   // glasses. The partial-render path only updates `panelBox` content, not its
   // position/size/border, so a box→no-box transition must trigger a full rebuild to
   // hide the previously-rendered container.
-  private lastRenderedHasPanelBox = false
+  // Also covers the photo container: a layout key, not a boolean (see `panelLayoutKey`).
+  private lastRenderedHasPanelBox = ''
   // Snapshot of the most recent sidebar page rendered on the glasses. Partial
   // rendering is only valid while focus stays on the same input surface because
   // TextContainerUpgrade cannot change event-capture flags.
@@ -1147,6 +1155,50 @@ export class TelegramAppController {
     }, previous)
   }
 
+  /** Photo pixels for a message, fetched once and kept for the next visit. */
+  private loadPhoto(chatId: string, messageId: string): Promise<Photo> {
+    const key = `${chatId}:${messageId}`
+    const cached = this.photoCache.get(key)
+    if (cached) return Promise.resolve(cached)
+    const inFlight = this.photoInFlight.get(key)
+    if (inFlight) return inFlight
+    const promise = this.api.getPhoto(chatId, messageId)
+      .then((photo) => {
+        this.photoCache.set(key, photo)
+        while (this.photoCache.size > PHOTO_CACHE_LIMIT) {
+          const oldest = this.photoCache.keys().next().value
+          if (oldest === undefined) break
+          this.photoCache.delete(oldest)
+        }
+        return photo
+      })
+      .finally(() => {
+        this.photoInFlight.delete(key)
+      })
+    this.photoInFlight.set(key, promise)
+    return promise
+  }
+
+  /** Fetch a photo page's picture and push it to the glasses, unless the user has scrolled on meanwhile. */
+  private async showPanelImage(image: { chatId: string; messageId: string }) {
+    if (!this.bridge.updateImage) return
+    const photo = await this.loadPhoto(image.chatId, image.messageId)
+    const current = this.state
+    if (current.screen !== 'sidebar' || current.focus !== 'messages') return
+    const shown = screenModel(current)
+    if (shown.kind !== 'sidebar' || shown.panelImage?.messageId !== image.messageId || shown.panelImage.chatId !== image.chatId) return
+    await this.bridge.updateImage(base64ToBytes(photo.data))
+  }
+
+  /** Warm the newest photos of an opened thread so they are ready when scrolled to. */
+  private prefetchPhotos(chat: Chat, messages: Message[]) {
+    if (!this.bridge.updateImage) return
+    const photos = messages.filter((message) => message.media === 'photo').slice(-PHOTO_PREFETCH_COUNT)
+    for (const message of photos) {
+      void this.loadPhoto(String(chat.id), String(message.id)).catch(() => undefined)
+    }
+  }
+
   /** Fetch the first page of every folder in the background, one at a time, never during input. */
   private scheduleFolderWarm() {
     const generation = ++this.folderWarmGeneration
@@ -1602,6 +1654,7 @@ export class TelegramAppController {
   }
 
   private cacheMessages(chat: Chat, topic: Topic | undefined, messages: Message[]) {
+    this.prefetchPhotos(chat, messages)
     this.messageCache.set(messageThreadKey({ chat, topic }), {
       messages,
       cursor: oldestMessageId(messages),
@@ -1711,7 +1764,7 @@ export class TelegramAppController {
     if (prev.screen === 'sidebar' && state.screen === 'sidebar' && this.bridge.renderSidebarPanel) {
       const newModel = screenModel(state)
       if (newModel.kind === 'sidebar') {
-        const newHasPanelBox = Boolean(newModel.panelBox)
+        const newHasPanelBox = panelLayoutKey(newModel)
         const listUnchanged = this.lastRenderedListItems !== undefined
           && this.listItemsMatch(this.lastRenderedListItems, newModel.sidebarItems)
         if (prev.focus === state.focus && newHasPanelBox === this.lastRenderedHasPanelBox && listUnchanged) {
@@ -1733,7 +1786,7 @@ export class TelegramAppController {
       // the next state change (chats → messages) can use the partial path.
       const newModel = screenModel(state)
       if (newModel.kind === 'sidebar') {
-        this.lastRenderedHasPanelBox = Boolean(newModel.panelBox)
+        this.lastRenderedHasPanelBox = panelLayoutKey(newModel)
         this.lastRenderedListItems = newModel.sidebarItems
       }
     }
@@ -1798,7 +1851,9 @@ export class TelegramAppController {
       this.pendingRenderState = undefined
       if (state) {
         this.lastFullRenderAt = Date.now()
-        await this.bridge.render(screenModel(state))
+        const model = screenModel(state)
+        await this.bridge.render(model)
+        if (model.kind === 'sidebar' && model.panelImage) void this.showPanelImage(model.panelImage).catch(() => undefined)
       }
     } catch {
       // Rendering failures should not block controller state/input handling.
@@ -2011,8 +2066,8 @@ export class TelegramAppController {
     // The partial-render path only updates `panelBox` content, not its
     // position/size/border, so a visibility flip must trigger a full rebuild.
     const nextHasPanelBox = next.screen === 'sidebar'
-      ? Boolean((screenModel(next) as Extract<ScreenModel, { kind: 'sidebar' }>).panelBox)
-      : false
+      ? panelLayoutKey(screenModel(next) as Extract<ScreenModel, { kind: 'sidebar' }>)
+      : ''
     this.applyState(next, false)
     if (nextHasPanelBox !== this.lastRenderedHasPanelBox) {
       this.lastRenderedHasPanelBox = nextHasPanelBox
@@ -2057,8 +2112,8 @@ export class TelegramAppController {
       ? screenModel(state) as Extract<ScreenModel, { kind: 'sidebar' }>
       : undefined
     const nextHasPanelBox = sidebarModel
-      ? Boolean(sidebarModel.panelBox)
-      : false
+      ? panelLayoutKey(sidebarModel)
+      : ''
     this.applyState(state, true)
     if (!sidebarModel) { finish(); return }
     if (nextHasPanelBox !== this.lastRenderedHasPanelBox) {
@@ -2609,4 +2664,17 @@ function hasRecordableAudio(chunks: Uint8Array[]) {
     }
   }
   return false
+}
+
+/** Identifies the native container layout: a change means the glasses need a full rebuild, not a text update. */
+function panelLayoutKey(model: Extract<ScreenModel, { kind: 'sidebar' }>): string {
+  const image = model.panelImage ? `${model.panelImage.chatId}:${model.panelImage.messageId}` : ''
+  return `${model.panelBox ? 'box' : ''}|${image}`
+}
+
+function base64ToBytes(value: string): Uint8Array {
+  const binary = atob(value)
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index)
+  return bytes
 }

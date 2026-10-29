@@ -1295,6 +1295,48 @@ describe('TelegramAppController', () => {
     expect(messagePanelBody(controller.snapshot)).toContain('Alice')
   })
 
+  it('fetches a photo for the visible photo page and pushes it to the glasses once', async () => {
+    const photoMessages: Message[] = [
+      { id: '90', sender: 'Alice', text: 'hello' },
+      { id: '100', sender: 'Alice', text: '[photo]', media: 'photo', sentAt: '2026-05-29T10:00:00Z' },
+    ]
+    const api = fakeApi({ authorized: true, latestMessages: photoMessages })
+    const bridge = fakeBridge()
+    const controller = new TelegramAppController(api, bridge)
+
+    await controller.init()
+    await controller.dispatch({ type: 'press' })
+    await vi.waitFor(() => expect(bridge.updateImage).toHaveBeenCalledTimes(1))
+
+    expect(api.getPhoto).toHaveBeenCalledWith('1', '100')
+    expect(vi.mocked(bridge.updateImage!).mock.calls[0][0]).toEqual(new Uint8Array([1, 2, 3]))
+    controller.dispose()
+  })
+
+  it('does not push a photo the user has already scrolled away from', async () => {
+    const photoMessages: Message[] = [
+      { id: '90', sender: 'Alice', text: 'hello' },
+      { id: '100', sender: 'Alice', text: '[photo]', media: 'photo' },
+    ]
+    let resolvePhoto: (photo: { width: number; height: number; data: string }) => void = () => undefined
+    const api = fakeApi({ authorized: true, latestMessages: photoMessages })
+    vi.mocked(api.getPhoto).mockImplementation(() => new Promise((resolve) => {
+      resolvePhoto = resolve
+    }))
+    const bridge = fakeBridge()
+    const controller = new TelegramAppController(api, bridge)
+
+    await controller.init()
+    await controller.dispatch({ type: 'press' })
+    await vi.waitFor(() => expect(api.getPhoto).toHaveBeenCalled())
+    await controller.dispatch({ type: 'swipeUp' }) // older text page: no photo on screen any more
+    resolvePhoto({ width: 2, height: 1, data: 'AQID' })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    expect(bridge.updateImage).not.toHaveBeenCalled()
+    controller.dispose()
+  })
+
   it('does not cycle when swiping down on the newest message page', async () => {
     const api = fakeApi({ authorized: true })
     const controller = new TelegramAppController(api, fakeBridge())
@@ -2138,6 +2180,7 @@ function fakeApi(options: { authorized: boolean; transcription?: TranscriptionRe
       return typeof options.chats === 'function' ? options.chats() : options.chats ?? chats
     }),
     listFolders: vi.fn(async () => options.folders ?? []),
+    getPhoto: vi.fn(async () => ({ width: 2, height: 1, data: 'AQID' })),
     listTopics: vi.fn(async () => typeof options.topics === 'function' ? options.topics() : options.topics ?? topics),
     listMessages,
     sendMessage: vi.fn(async (_chatId: unknown, request: { text: string }) => ({
@@ -2166,6 +2209,7 @@ function speechLikePcm() {
 
 function fakeBridge(): GlassesBridge {
   return {
+    updateImage: vi.fn(async () => true),
     render: vi.fn(async () => undefined),
     setAudioEnabled: vi.fn(async () => undefined),
     showExitConfirmation: vi.fn(async () => undefined),

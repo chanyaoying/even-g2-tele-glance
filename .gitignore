@@ -56,3 +56,6 @@ coverage/
 # Others
 .graphiq/
 .a5c/
+
+# Even Terminal session logs
+even-terminal-*.log

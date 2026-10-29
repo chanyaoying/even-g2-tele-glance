@@ -7,6 +7,7 @@ import type {
   Message,
   PhoneAuthStart,
   PhoneAuthStatus,
+  Photo,
   SendMessageRequest,
   SendMessageResponse,
   Topic,
@@ -27,6 +28,7 @@ export interface TelegramApi {
   listFolders(): Promise<Folder[]>
   listTopics(chatId: Id): Promise<Topic[]>
   listMessages(chatId: Id, options?: { topicId?: Id; beforeId?: Id; limit?: number }): Promise<Message[]>
+  getPhoto(chatId: Id, messageId: Id): Promise<Photo>
   sendMessage(chatId: Id, request: SendMessageRequest): Promise<Message>
   markRead(chatId: Id, request: MarkReadRequest): Promise<void>
   transcribe(wav: Blob, language?: string): Promise<TranscriptionResult>
@@ -67,7 +69,11 @@ export function effectiveBackendSharedSecret(config: TelegramAuthConfig, baseUrl
 export const API_BASE_URL_STORAGE_KEY = 'teleGlance.apiBaseUrl'
 export const G2_TELE_API_BASE_URL_STORAGE_KEY = 'g2Tele.apiBaseUrl'
 export const LEGACY_API_BASE_URL_STORAGE_KEY = 'evenTelegram.apiBaseUrl'
-export const BACKEND_UNREACHABLE_MESSAGE = 'Backend is not reachable. Fill Backend URL in Settings and make sure the backend server is running.'
+export const BACKEND_BUSY_MESSAGE = 'Backend is busy. Retrying in a moment.'
+const BACKOFF_AFTER_FAILURES = 3
+const BACKOFF_BASE_MS = 2000
+const BACKOFF_MAX_MS = 30_000
+export const BACKEND_UNREACHABLE_MESSAGE ='Backend is not reachable. Fill Backend URL in Settings and make sure the backend server is running.'
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000
 function REQUEST_TIMEOUT_MESSAGE(ms: number) {
   return `Backend request timed out after ${Math.round(ms / 1000)}s. The server may be unreachable or stuck. Try again or check the backend.`
@@ -141,6 +147,10 @@ export class HttpTelegramApi implements TelegramApi {
     return this.get(`/api/chats/${encodeURIComponent(String(chatId))}/messages?${params.toString()}`)
   }
 
+  async getPhoto(chatId: Id, messageId: Id): Promise<Photo> {
+    return this.get(`/api/chats/${encodeURIComponent(String(chatId))}/messages/${encodeURIComponent(String(messageId))}/photo`)
+  }
+
   async sendMessage(chatId: Id, request: SendMessageRequest): Promise<Message> {
     const response = await this.post<SendMessageResponse>(`/api/chats/${encodeURIComponent(String(chatId))}/messages`, {
       text: request.text,
@@ -178,7 +188,38 @@ export class HttpTelegramApi implements TelegramApi {
   }
 
   private get<T>(path: string): Promise<T> {
-    return this.request(path, { method: 'GET' })
+    // Identical requests that overlap share one network call. A burst of duplicates (for example the same
+    // folder page asked for many times at once) then costs the backend one fetch, not dozens.
+    const key = `${this.baseUrl}${path}`
+    const existing = this.inflightGets.get(key)
+    if (existing) return existing as Promise<T>
+    const promise = this.request<T>(path, { method: 'GET' }).finally(() => {
+      this.inflightGets.delete(key)
+    })
+    this.inflightGets.set(key, promise)
+    return promise
+  }
+
+  private inflightGets = new Map<string, Promise<unknown>>()
+  private failureStreak = 0
+  private blockedUntil = 0
+
+  /** After repeated timeouts or gateway errors, fail fast for a moment instead of piling more requests on. */
+  private assertBackendNotBackedOff(path: string) {
+    if (path.startsWith('/api/session/')) return // sign-in must always be able to try
+    if (Date.now() < this.blockedUntil) throw new Error(BACKEND_BUSY_MESSAGE)
+  }
+
+  private noteBackendResult(failed: boolean) {
+    if (!failed) {
+      this.failureStreak = 0
+      return
+    }
+    this.failureStreak += 1
+    if (this.failureStreak >= BACKOFF_AFTER_FAILURES) {
+      const steps = this.failureStreak - BACKOFF_AFTER_FAILURES
+      this.blockedUntil = Date.now() + Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** steps)
+    }
   }
 
   private post<T>(path: string, body?: unknown): Promise<T> {
@@ -196,6 +237,8 @@ export class HttpTelegramApi implements TelegramApi {
   }
 
   private async request<T>(path: string, init: RequestInit, baseUrl = this.baseUrl, includeTelegramAuth = true): Promise<T> {
+    const ownBackend = baseUrl === this.baseUrl
+    if (ownBackend) this.assertBackendNotBackedOff(path)
     const headers = await this.withTelegramHeaders(init.headers, includeTelegramAuth)
     const requestInit = await this.withEncryptedJsonBody(init, headers, includeTelegramAuth)
     const controller = new AbortController()
@@ -209,6 +252,7 @@ export class HttpTelegramApi implements TelegramApi {
         signal: controller.signal,
       })
     } catch (error) {
+      if (ownBackend) this.noteBackendResult(true)
       if (controller.signal.aborted) {
         throw new Error(REQUEST_TIMEOUT_MESSAGE(timeoutMs))
       }
@@ -216,6 +260,7 @@ export class HttpTelegramApi implements TelegramApi {
     } finally {
       clearTimeout(timer)
     }
+    if (ownBackend) this.noteBackendResult(response.status === 502 || response.status === 503 || response.status === 504)
     const text = await this.responseText(response, includeTelegramAuth)
     if (!response.ok) throw new Error(readableErrorText(response.status, text))
     return JSON.parse(text) as T

@@ -1,5 +1,7 @@
 import asyncio
+import base64
 import logging
+from collections import OrderedDict
 import math
 import time
 from dataclasses import dataclass
@@ -7,10 +9,12 @@ from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Literal, Optional, Protocol, Union
 
 from app.config import Settings
+from app.services.imaging import ImagingError, prepare_glasses_image
 from app.models import (
     ChatSummary,
     FolderSummary,
     MessageSummary,
+    PhotoResponse,
     PhoneLoginStart,
     PhoneLoginStatus,
     SendMessageResponse,
@@ -92,6 +96,16 @@ class TelegramService(Protocol):
         before_id: Optional[int] = None,
         limit: int = 8,
     ) -> list[MessageSummary]:
+        ...
+
+    async def get_photo(
+        self,
+        chat_id: int,
+        message_id: int,
+        *,
+        max_width: int = 288,
+        max_height: int = 144,
+    ) -> PhotoResponse:
         ...
 
     async def send_message(
@@ -193,6 +207,7 @@ DIALOG_CACHE_TTL_SECONDS = 45.0
 FOLDER_LOOKAHEAD = 60
 # A refresh of page one only needs the top of the list; the deeper cached chats are kept.
 HEAD_REFRESH = 40
+PHOTO_CACHE_SIZE = 48
 
 
 @dataclass
@@ -242,14 +257,26 @@ def normalize_message(message: Any, entities_by_peer: Optional[dict[int, Any]] =
     if sender is None and entities_by_peer:
         sender = entities_by_peer.get(_message_peer_key(message))
     sender_name = _display_name(sender) if sender is not None else None
-    text = _message_readable_text(message)
+    media = "photo" if _is_photo_message(message) else None
+    text = _photo_text(message) if media else _message_readable_text(message)
     return MessageSummary(
         id=int(getattr(message, "id")),
         sender=sender_name,
         text=text,
         sent_at=getattr(message, "date", None),
         outgoing=bool(getattr(message, "out", False)),
+        media=media,
     )
+
+
+def _is_photo_message(message: Any) -> bool:
+    # Only real photos: link previews also expose `.photo` but are not worth an image download.
+    return type(getattr(message, "media", None)).__name__ == "MessageMediaPhoto"
+
+
+def _photo_text(message: Any) -> str:
+    caption = str(getattr(message, "message", None) or getattr(message, "raw_text", None) or "").strip()
+    return f"{caption} [photo]" if caption else "[photo]"
 
 
 def _message_readable_text(message: Any) -> str:
@@ -408,6 +435,9 @@ class TelethonTelegramService:
         self._update_queues: set[asyncio.Queue[Union[TelegramUpdate, TypingUpdate]]] = set()
         self._updates_registered = False
         self._entity_cache: dict[int, Any] = {}
+        self._photo_cache: OrderedDict = OrderedDict()
+        self._chat_requests: dict = {}
+        self._dialog_lock = asyncio.Lock()
         self._user_name_cache: dict[int, str] = {}
         self._phone_code_hashes: dict[str, str] = {}
         self._dialog_snapshot: Optional[_DialogSnapshot] = None
@@ -664,13 +694,33 @@ class TelethonTelegramService:
             await self._discard_client()
 
     async def list_chats(self, limit: int, offset: int = 0, folder_id: Optional[int] = None) -> list[ChatSummary]:
+        # Identical requests that arrive together share one Telegram fetch. Without this a burst of duplicate
+        # requests runs the same account scan many times over one connection and they all time out together.
+        key = (int(limit), int(offset), folder_id)
+        task = self._chat_requests.get(key)
+        if task is None:
+            task = asyncio.ensure_future(self._list_chats_uncoalesced(limit, offset, folder_id))
+            self._chat_requests[key] = task
+
+            def finished(done: "asyncio.Future[Any]", key=key) -> None:
+                self._chat_requests.pop(key, None)
+                if not done.cancelled():
+                    done.exception()  # mark retrieved: every waiter may have gone away
+
+            task.add_done_callback(finished)
+        # shield: one client giving up must not cancel the fetch the others are waiting for.
+        return await asyncio.shield(task)
+
+    async def _list_chats_uncoalesced(self, limit: int, offset: int, folder_id: Optional[int]) -> list[ChatSummary]:
         client = await self._get_client()
         try:
             dialog_filter = await self._get_folder_filter(client, folder_id) if folder_id else None
-            dialogs = await asyncio.wait_for(
-                self._page_dialogs(client, limit=limit, offset=offset, dialog_filter=dialog_filter),
-                timeout=30,
-            )
+            # One dialog fetch at a time: a second, different request then finds the cache the first one filled.
+            async with self._dialog_lock:
+                dialogs = await asyncio.wait_for(
+                    self._page_dialogs(client, limit=limit, offset=offset, dialog_filter=dialog_filter),
+                    timeout=30,
+                )
             for dialog in dialogs:
                 entity = getattr(dialog, "entity", None)
                 self._cache_user_name(entity)
@@ -874,6 +924,40 @@ class TelethonTelegramService:
             return [normalize_message(message) for message in messages]
         except Exception as exc:
             raise wrap_telegram_error(exc) from exc
+
+    async def get_photo(
+        self,
+        chat_id: int,
+        message_id: int,
+        *,
+        max_width: int = 288,
+        max_height: int = 144,
+    ) -> PhotoResponse:
+        key = (int(chat_id), int(message_id), int(max_width), int(max_height))
+        cached = self._photo_cache.get(key)
+        if cached is not None:
+            self._photo_cache.move_to_end(key)
+            return cached
+        client = await self._get_client()
+        try:
+            entity = await self._get_entity(chat_id)
+            message = await asyncio.wait_for(client.get_messages(entity, ids=int(message_id)), timeout=20)
+            if message is None or not _is_photo_message(message):
+                raise TelegramServiceError("Telegram message has no photo")
+            # thumb=-1 is the largest size Telegram offers for the photo: plenty for a 288x144 screen.
+            raw = await asyncio.wait_for(client.download_media(message, file=bytes, thumb=-1), timeout=40)
+            png, width, height = await asyncio.to_thread(prepare_glasses_image, raw or b"", max_width, max_height)
+        except ImagingError as exc:
+            raise TelegramServiceError(str(exc)) from exc
+        except TelegramServiceError:
+            raise
+        except Exception as exc:
+            raise wrap_telegram_error(exc) from exc
+        photo = PhotoResponse(width=width, height=height, data=base64.b64encode(png).decode("ascii"))
+        self._photo_cache[key] = photo
+        while len(self._photo_cache) > PHOTO_CACHE_SIZE:
+            self._photo_cache.popitem(last=False)
+        return photo
 
     async def send_message(
         self,
