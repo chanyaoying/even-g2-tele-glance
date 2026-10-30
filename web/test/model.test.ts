@@ -569,7 +569,7 @@ describe('screenModel', () => {
     if (model.kind === 'sidebar') {
       expect(model.fullWidth).toBe(true)
       expect(model.panelBox).toBeUndefined()
-      expect(model.panelBody).toContain('> Chat 5 (3)')
+      expect(model.panelBody).toContain('> (3) Chat 5')
       expect(model.panelBody).not.toContain('lorem')
       expect(model.panelBody).not.toContain('preview text')
       expect(model.panelBody.split('\n')).toHaveLength(7)
@@ -675,12 +675,53 @@ describe('screenModel', () => {
     const sendSelected = screenModel(baseState)
     const cancelSelected = screenModel({ ...baseState, selectedIndex: 1 })
 
-    expect(sendSelected.kind).toBe('text')
-    expect(cancelSelected.kind).toBe('text')
-    if (sendSelected.kind === 'text' && cancelSelected.kind === 'text') {
-      expect(sendSelected.body).toBe('reply\n\n> Send\n  Cancel')
-      expect(cancelSelected.body).toBe('reply\n\n  Send\n> Cancel')
+    // The confirmation is a dialog over the thread, not a separate screen.
+    expect(sendSelected.kind).toBe('sidebar')
+    expect(cancelSelected.kind).toBe('sidebar')
+    if (sendSelected.kind === 'sidebar' && cancelSelected.kind === 'sidebar') {
+      expect(sendSelected.popup?.body).toBe('reply\n\n> Send\n  Cancel')
+      expect(cancelSelected.popup?.body).toBe('reply\n\n  Send\n> Cancel')
+      expect(sendSelected.panelBody).toContain('hello') // the conversation stays visible underneath
+      expect(sendSelected.panelBox).toBeUndefined()
+      expect(sendSelected.panelImage).toBeUndefined()
     }
+  })
+
+  it('clamps a long transcript in the dialog but not in what is sent', () => {
+    const long = 'word '.repeat(80).trim()
+    const model = screenModel({
+      screen: 'sidebarConfirm', focus: 'messages',
+      chats: [], selectedChatIndex: 0,
+      chat: { id: '1', title: 'Project', kind: 'group' },
+      messages: [], transcript: long, selectedIndex: 0,
+    })
+    expect(model.kind === 'sidebar' && model.popup?.body.split('\n')[0].length).toBeLessThanOrEqual(110)
+    expect(model.kind === 'sidebar' && model.popup?.body).toContain('...')
+    expect(model.kind === 'sidebar' && model.popup?.body).toContain('> Send')
+  })
+
+  it('keeps the unread count visible when a chat name is long', () => {
+    const model = screenModel({
+      screen: 'sidebar', focus: 'chats',
+      chats: [{ id: '1', title: 'An extremely long group name that will be cut', kind: 'group', unreadCount: 12 }],
+      selectedChatIndex: 0,
+    })
+    expect(model.kind === 'sidebar' && model.sidebarItems[0]).toMatch(/^\(12\) /)
+  })
+
+  it('shows REC while recording and how far back you have scrolled', () => {
+    const base: AppState = {
+      screen: 'sidebarRecording', focus: 'messages',
+      chats: [], selectedChatIndex: 0,
+      chat: { id: '1', title: 'Project', kind: 'group' },
+      messages: [{ id: '1', sender: 'A', text: 'one' }, { id: '2', sender: 'B', text: 'two' }, { id: '3', sender: 'C', text: 'three' }],
+      chunks: [], startedAt: 0,
+    }
+    expect(screenModel(base).kind === 'sidebar' && (screenModel(base) as { title: string }).title).toMatch(/^REC /)
+    const scrolled = screenModel({ screen: 'sidebar', focus: 'messages', chats: [], selectedChatIndex: 0, chat: base.chat, messages: base.messages, scrollOffset: 2 })
+    const newest = screenModel({ screen: 'sidebar', focus: 'messages', chats: [], selectedChatIndex: 0, chat: base.chat, messages: base.messages })
+    expect(scrolled.kind === 'sidebar' && scrolled.panelFooter).toContain('2 newer')
+    expect(newest.kind === 'sidebar' && newest.panelFooter).not.toContain('newer')
   })
 
   it('renders an opened message thread across the full glasses width', () => {

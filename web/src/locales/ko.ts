@@ -22,6 +22,7 @@ const ko: LocaleStrings = {
   statusSent: 'Jeonsong-wallyo',
   statusOlderMessages: 'Ijeon Mesiji',
   statusNewerMessages: 'Sae Mesiji',
+  statusNewerCount: '{n} saeroun',
   statusNoOlderMessages: 'Ijeon mesiji eopseum',
   statusNewReply: 'Sae Dapjang',
   statusLoadingOlderMessages: 'Ijeon mesiji loding-jung...',

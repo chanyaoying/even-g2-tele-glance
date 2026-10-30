@@ -18,6 +18,7 @@ const vi: LocaleStrings = {
   statusSent: 'Đã gửi',
   statusOlderMessages: 'Tin nhắn cũ hơn',
   statusNewerMessages: 'Tin nhắn mới hơn',
+  statusNewerCount: '{n} mới hơn',
   statusNoOlderMessages: 'Không có tin nhắn cũ hơn',
   statusNewReply: 'Trả lời mới',
   statusLoadingOlderMessages: 'Đang tải tin nhắn cũ hơn...',

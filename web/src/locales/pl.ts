@@ -18,6 +18,7 @@ const pl: LocaleStrings = {
   statusSent: 'Wysłano',
   statusOlderMessages: 'Starsze wiadomości',
   statusNewerMessages: 'Nowsze wiadomości',
+  statusNewerCount: '{n} nowszych',
   statusNoOlderMessages: 'Brak starszych wiadomości',
   statusNewReply: 'Nowa odpowiedź',
   statusLoadingOlderMessages: 'Wczytywanie starszych wiadomości...',

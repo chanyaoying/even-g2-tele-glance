@@ -18,6 +18,7 @@ const sv: LocaleStrings = {
   statusSent: 'Skickat',
   statusOlderMessages: 'Äldre meddelanden',
   statusNewerMessages: 'Nyare meddelanden',
+  statusNewerCount: '{n} nyare',
   statusNoOlderMessages: 'Inga äldre meddelanden',
   statusNewReply: 'Nytt svar',
   statusLoadingOlderMessages: 'Laddar äldre meddelanden...',

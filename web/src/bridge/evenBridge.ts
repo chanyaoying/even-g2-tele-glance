@@ -27,6 +27,8 @@ import { createBoundedInputDispatcher, createInputCoalescer, mapEvenHubEvent } f
 const encoder = new TextEncoder()
 const IMAGE_CONTAINER_ID = 9
 const IMAGE_CONTAINER_NAME = 'panel-image'
+const POPUP_CONTAINER_ID = 10
+const POPUP_CONTAINER_NAME = 'popup'
 const PHOTO_TEXT_WIDTH = 282
 export const APP_BUILD_VERSION: string = (typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0')
 
@@ -557,6 +559,7 @@ function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Cont
     borderColor: 8,
     paddingLength: 0,
     isEventCapture: 0,
+    zOrderIndex: 1,
   })
   const title = new TextContainerProperty({
     containerID: 1,
@@ -570,6 +573,7 @@ function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Cont
     borderColor: 8,
     paddingLength: 4,
     isEventCapture: 0,
+    zOrderIndex: 2,
   })
   const overlay = new TextContainerProperty({
     containerID: 2,
@@ -583,6 +587,7 @@ function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Cont
     borderColor: 8,
     paddingLength: 0,
     isEventCapture: 1,
+    zOrderIndex: 3,
   })
   const sidebarSeparator = new TextContainerProperty({
     containerID: 3,
@@ -596,6 +601,7 @@ function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Cont
     borderColor: 8,
     paddingLength: 0,
     isEventCapture: 0,
+    zOrderIndex: 4,
   })
   const panelBody = new TextContainerProperty({
     containerID: 6,
@@ -609,6 +615,7 @@ function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Cont
     borderColor: 8,
     paddingLength: 4,
     isEventCapture: 0,
+    zOrderIndex: 6,
   })
   const panelBox = model.panelBox
     ? new TextContainerProperty({
@@ -623,6 +630,7 @@ function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Cont
         borderColor: 8,
         paddingLength: 8,
         isEventCapture: 0,
+        zOrderIndex: 7,
       })
     : new TextContainerProperty({
         containerID: 7,
@@ -636,6 +644,7 @@ function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Cont
         borderColor: 8,
         paddingLength: 0,
         isEventCapture: 0,
+        zOrderIndex: 7,
       })
   // Always present (stable container ids). Without a photo it is a 20x20 blank in the gap above the footer.
   const panelImage = model.panelImage
@@ -646,6 +655,7 @@ function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Cont
         yPosition: 40,
         width: 288,
         height: 144,
+        zOrderIndex: 8,
       })
     : new ImageContainerProperty({
         containerID: IMAGE_CONTAINER_ID,
@@ -654,6 +664,7 @@ function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Cont
         yPosition: 226,
         width: 20,
         height: 20,
+        zOrderIndex: 8,
       })
   const footer = new TextContainerProperty({
     containerID: 4,
@@ -667,6 +678,7 @@ function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Cont
     borderColor: 8,
     paddingLength: 4,
     isEventCapture: 0,
+    zOrderIndex: 9,
   })
   const sidebar = new TextContainerProperty({
     containerID: 5,
@@ -680,12 +692,43 @@ function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Cont
     borderColor: 8,
     paddingLength: 4,
     isEventCapture: 0,
+    zOrderIndex: 5,
   })
+  // Dialog drawn above everything else. Always present (stable ids): a 1x1 blank when there is no popup.
+  const popup = model.popup
+    ? new TextContainerProperty({
+        containerID: POPUP_CONTAINER_ID,
+        containerName: POPUP_CONTAINER_NAME,
+        content: trimForContainer(`${model.popup.title}\n\n${model.popup.body}`, 999),
+        xPosition: 48,
+        yPosition: 44,
+        width: 480,
+        height: 196,
+        borderWidth: 2,
+        borderColor: 8,
+        paddingLength: 10,
+        isEventCapture: 0,
+        zOrderIndex: 10,
+      })
+    : new TextContainerProperty({
+        containerID: POPUP_CONTAINER_ID,
+        containerName: POPUP_CONTAINER_NAME,
+        content: '',
+        xPosition: 0,
+        yPosition: 287,
+        width: 1,
+        height: 1,
+        borderWidth: 0,
+        borderColor: 8,
+        paddingLength: 0,
+        isEventCapture: 0,
+        zOrderIndex: 10,
+      })
   // The SDK native list moves its highlight without reporting each movement to
   // the app, so it cannot keep the right-side preview in sync. Use one event
   // overlay plus an app-rendered sidebar marker instead.
-  const list = hiddenListContainer()
-  const textObjects = [outerBorder, title, overlay, sidebarSeparator, sidebar, panelBody, panelBox, footer]
+  const list = hiddenListContainer(0)
+  const textObjects = [outerBorder, title, overlay, sidebarSeparator, sidebar, panelBody, panelBox, footer, popup]
   return new Container({
     containerTotalNum: textObjects.length + 2,
     textObject: textObjects,
@@ -905,8 +948,9 @@ function buildListPage(model: Extract<ScreenModel, { kind: 'list' }>, Container:
   })
 }
 
-function hiddenListContainer() {
+function hiddenListContainer(zOrderIndex?: number) {
   return new ListContainerProperty({
+    ...(zOrderIndex === undefined ? {} : { zOrderIndex }),
     containerID: 8,
     containerName: 'list',
     xPosition: 0,

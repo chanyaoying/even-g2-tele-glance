@@ -45,6 +45,7 @@ export type ScreenModel =
       panelTitle: string; panelBody: string; panelFooter: string;
       panelBox?: BoxedText;
       panelImage?: PanelImage;
+      popup?: PopupOverlay;
       fullWidth?: boolean;
       focus: 'sidebar' | 'panel'; }
 
@@ -52,6 +53,12 @@ export type ScreenModel =
 export type PanelImage = {
   chatId: string
   messageId: string
+}
+
+/** A dialog drawn over the page (a bordered container stacked above everything else). */
+export type PopupOverlay = {
+  title: string
+  body: string
 }
 
 export type BoxedText = {
@@ -220,7 +227,7 @@ export function screenModel(state: AppState): ScreenModel {
             // the chats list footer at line 139 for consistency.
             panelFooter: state.typing
               ? typingFooter(state.typing.userName, l.typingSuffix)
-              : footerText(state.status, l.footerSwipeScroll),
+              : footerText(state.status, scrollControls(state.scrollOffset ?? 0)),
             panelBox: loadingBody ? undefined : msg.box,
             panelImage: loadingBody || !msg.imageMessageId
               ? undefined
@@ -261,7 +268,7 @@ export function screenModel(state: AppState): ScreenModel {
       const msg = formatMessages(state.messages, state.scrollOffset ?? 0)
       return {
         kind: 'sidebar',
-        title: l.titleRecordingReply,
+        title: `REC ${l.titleRecordingReply}`,
         sidebarTitle: state.topic ? l.titleTopics : l.titleChats,
         sidebarItems: state.topic ? [] : state.chats.map(chatLabel),
         sidebarSelected: state.selectedChatIndex,
@@ -280,12 +287,26 @@ export function screenModel(state: AppState): ScreenModel {
         body: l.bodyConvertingVoice,
       }
     case 'sidebarConfirm': {
-      const actions = `${state.selectedIndex === 0 ? '> ' : '  '}${l.confirmSend}\n${state.selectedIndex === 1 ? '> ' : '  '}${l.confirmCancel}`
+      // A dialog over the thread: the conversation stays visible underneath (as plain text; the native
+      // box container would collide with the dialog).
+      const msg = formatMessages(state.messages, state.scrollOffset ?? 0)
+      const send = `${state.selectedIndex === 0 ? '> ' : '  '}${l.confirmSend}`
+      const cancel = `${state.selectedIndex === 1 ? '> ' : '  '}${l.confirmCancel}`
       return {
-        kind: 'text',
-        title: l.titleConfirmReply,
-        body: trimUtf8Bytes(`${sanitizeGlassesText(state.transcript)}\n\n${actions}`, TEXT_CONTAINER_BYTE_LIMIT),
-        footer: l.footerSwipeSelect,
+        kind: 'sidebar',
+        title: state.topic ? state.topic.title.slice(0, 20) : state.chat.title.slice(0, 20),
+        sidebarTitle: state.topic ? l.titleTopics : l.titleChats,
+        sidebarItems: state.topic ? [] : state.chats.map(chatLabel),
+        sidebarSelected: state.selectedChatIndex,
+        panelTitle: '',
+        panelBody: msg.body,
+        panelFooter: l.footerSwipeSelect,
+        fullWidth: true,
+        focus: 'panel',
+        popup: {
+          title: l.titleConfirmReply,
+          body: `${clampTranscript(sanitizeGlassesText(state.transcript))}\n\n${send}\n${cancel}`,
+        },
       }
     }
     case 'sidebarSending':
@@ -334,9 +355,18 @@ function formatFullWidthChatList(labels: string[], selected: number): string {
   return trimUtf8Bytes(body, TEXT_CONTAINER_BYTE_LIMIT)
 }
 
+// The unread count leads the label: the glasses cut long labels at the end, and the count is the part that matters.
 function chatLabel(chat: Chat) {
-  const unread = chat.unreadCount ? ` (${chat.unreadCount})` : ''
-  return sanitizeGlassesText(`${chat.title}${unread}`)
+  const unread = chat.unreadCount ? `(${chat.unreadCount}) ` : ''
+  return sanitizeGlassesText(`${unread}${chat.title}`)
+}
+
+const POPUP_TRANSCRIPT_CHARS = 110
+
+/** Keep a long transcript inside the dialog (about three rows); the full text is still what gets sent. */
+function clampTranscript(text: string) {
+  const flat = text.replace(/\s+/g, ' ').trim()
+  return flat.length <= POPUP_TRANSCRIPT_CHARS ? flat : `${flat.slice(0, POPUP_TRANSCRIPT_CHARS - 3).trimEnd()}...`
 }
 
 function formatTopicPreviews(topics: Topic[]) {
@@ -352,8 +382,14 @@ function formatTopicPreviews(topics: Topic[]) {
 }
 
 function topicLabel(topic: Topic) {
-  const unread = topic.unreadCount ? ` (${topic.unreadCount})` : ''
-  return sanitizeGlassesText(`${topic.title}${unread}`)
+  const unread = topic.unreadCount ? `(${topic.unreadCount}) ` : ''
+  return sanitizeGlassesText(`${unread}${topic.title}`)
+}
+
+/** While scrolled back, lead the controls with how far from the newest message the view is. */
+function scrollControls(scrollOffset: number) {
+  const l = getLocale()
+  return scrollOffset > 0 ? `${l.statusNewerCount.replace('{n}', String(scrollOffset))} | ${l.footerSwipeScroll}` : l.footerSwipeScroll
 }
 
 function footerText(status: string | undefined, controls: string) {

@@ -87,6 +87,7 @@ export class TelegramAppController {
   private chatPoll: ReturnType<typeof setInterval> | undefined
   private pendingMessagePress: ReturnType<typeof setTimeout> | undefined
   private holdRecording = false
+  private autoStopping = false
   private lastHoldEventAt = 0
   private lastMessagePressAt = 0
   private chatFingerprints = new Map<string, string>()
@@ -386,7 +387,14 @@ export class TelegramAppController {
     if (input.type === 'audioChunk') {
       if (this.state.screen === 'sidebarRecording') {
         const recordedBytes = this.state.chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0)
-        if (recordedBytes + input.pcm.byteLength > MAX_RECORDING_BYTES) return // keep the upload under the server cap
+        if (recordedBytes + input.pcm.byteLength > MAX_RECORDING_BYTES) {
+          // Out of room: stop and transcribe what we have instead of waiting for a release that may never come.
+          if (!this.autoStopping) {
+            this.autoStopping = true
+            void this.dispatch({ type: this.holdRecording ? 'longPressRelease' : 'press' }).finally(() => { this.autoStopping = false })
+          }
+          return // keep the upload under the server cap
+        }
         this.state = { ...this.state, chunks: [...this.state.chunks, input.pcm] }
         if (isTeleGlanceFixtureMode()) {
           const total = this.state.chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0)

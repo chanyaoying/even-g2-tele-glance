@@ -22,6 +22,7 @@ const zh: LocaleStrings = {
   statusSent: 'Yi Fasong',
   statusOlderMessages: 'Gengzao Xiaoxi',
   statusNewerMessages: 'Xin Xiaoxi',
+  statusNewerCount: '{n} geng xin',
   statusNoOlderMessages: 'Wu Gengzao Xiaoxi',
   statusNewReply: 'Xin Huifu',
   statusLoadingOlderMessages: 'Jiazai gengzao xiaoxi...',

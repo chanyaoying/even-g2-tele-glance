@@ -40,6 +40,7 @@ const pt: LocaleStrings = {
   statusLoadingOlderMessages: 'Carregando antigas...',
   statusNewReply: 'Nova resposta',
   statusNewerMessages: 'Mais recentes',
+  statusNewerCount: '{n} mais novas',
   statusNoOlderMessages: 'Sem mais antigas',
   statusOlderMessages: 'Mais antigas',
   statusSent: 'Enviado',

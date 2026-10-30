@@ -1721,9 +1721,9 @@ describe('TelegramAppController', () => {
     expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'messages', topic: topics[0] })
   })
 
-  it('stops collecting audio after the maximum recording length', async () => {
-    const api = fakeApi({ authorized: true })
-    const controller = new TelegramAppController(api, fakeBridge(), 0)
+  it('stops the recording by itself when the maximum length is reached', async () => {
+    const bridge = fakeBridge()
+    const controller = new TelegramAppController(fakeApi({ authorized: true }), bridge, 0)
 
     await controller.init()
     await controller.dispatch({ type: 'press' })
@@ -1731,9 +1731,12 @@ describe('TelegramAppController', () => {
     const chunk = new Uint8Array(MAX_RECORDING_BYTES / 2)
     await controller.dispatch({ type: 'audioChunk', pcm: chunk })
     await controller.dispatch({ type: 'audioChunk', pcm: chunk })
-    await controller.dispatch({ type: 'audioChunk', pcm: chunk }) // would exceed the cap: dropped
-    const state = controller.snapshot as { chunks: Uint8Array[] }
-    expect(state.chunks.reduce((sum, c) => sum + c.byteLength, 0)).toBe(MAX_RECORDING_BYTES)
+    expect(controller.snapshot.screen).toBe('sidebarRecording')
+    await controller.dispatch({ type: 'audioChunk', pcm: chunk }) // would exceed the cap: stop instead of waiting for a release
+    await flushAsync()
+
+    expect(controller.snapshot.screen).not.toBe('sidebarRecording')
+    expect(bridge.setAudioEnabled).toHaveBeenLastCalledWith(false)
   })
 
   it('returns to messages without transcribing when audio is too short', async () => {

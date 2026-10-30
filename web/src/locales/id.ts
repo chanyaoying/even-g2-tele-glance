@@ -18,6 +18,7 @@ const id: LocaleStrings = {
   statusSent: 'Terkirim',
   statusOlderMessages: 'Pesan lama',
   statusNewerMessages: 'Pesan baru',
+  statusNewerCount: '{n} lebih baru',
   statusNoOlderMessages: 'Tidak ada pesan lama',
   statusNewReply: 'Balasan baru',
   statusLoadingOlderMessages: 'Memuat pesan lama...',

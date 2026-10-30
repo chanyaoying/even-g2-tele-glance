@@ -1,3 +1,4 @@
+import { validateEvenHubPageContainerZOrder } from '@evenrealities/even_hub_sdk'
 import { describe, expect, it, vi } from 'vitest'
 import { EvenHubGlassesBridge } from '../src/bridge/evenBridge'
 import type { ScreenModel } from '../src/controller/model'
@@ -548,5 +549,55 @@ describe('EvenHubGlassesBridge photos', () => {
 
     const accepted = makeBridge({ updateImageRawData: vi.fn(async () => 'success') })
     expect(await accepted.bridge.updateImage(new Uint8Array([1]))).toBe(true)
+  })
+
+  it('stacks a popup above every other container with valid, unique z-order and room to spare', async () => {
+    const pages: unknown[] = []
+    const bridge = new EvenHubGlassesBridge({
+      async createStartUpPageContainer(container: unknown) {
+        pages.push(container)
+        return 0
+      },
+      async rebuildPageContainer(container: unknown) {
+        pages.push(container)
+        return true
+      },
+      async audioControl() {
+        return undefined
+      },
+      onEvenHubEvent() {
+        return undefined
+      },
+    })
+    const base = {
+      kind: 'sidebar' as const,
+      title: 'Project',
+      sidebarTitle: 'Chats',
+      sidebarItems: [],
+      sidebarSelected: 0,
+      panelTitle: '',
+      panelBody: 'hello',
+      panelFooter: 'footer',
+      fullWidth: true,
+      focus: 'panel' as const,
+    }
+
+    await bridge.render({ ...base, popup: { title: 'Confirm reply', body: 'hi\n\n> Send\n  Cancel' } })
+    await bridge.render(base)
+
+    for (const page of pages) {
+      const p = page as { textObject: Array<{ containerID: number; zOrderIndex?: number; content?: string; width: number }>; listObject: unknown[]; imageObject: unknown[]; containerTotalNum: number }
+      expect(validateEvenHubPageContainerZOrder(p as never)).toEqual({ valid: true })
+      expect(p.containerTotalNum).toBeLessThanOrEqual(12)
+      expect(p.textObject.length + p.listObject.length + p.imageObject.length).toBe(p.containerTotalNum)
+      const popup = p.textObject.find((item) => item.containerID === 10)
+      const maxOther = Math.max(...p.textObject.filter((item) => item.containerID !== 10).map((item) => item.zOrderIndex ?? -1))
+      expect(popup).toBeDefined()
+      expect(popup!.zOrderIndex!).toBeGreaterThan(maxOther)
+    }
+    const shown = pages[0] as { textObject: Array<{ containerID: number; content?: string; width: number }> }
+    const hidden = pages[1] as { textObject: Array<{ containerID: number; content?: string; width: number }> }
+    expect(shown.textObject.find((item) => item.containerID === 10)?.content).toContain('> Send')
+    expect(hidden.textObject.find((item) => item.containerID === 10)).toMatchObject({ content: '', width: 1 })
   })
 })

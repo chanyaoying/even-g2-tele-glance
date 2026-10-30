@@ -40,6 +40,7 @@ const de: LocaleStrings = {
   statusLoadingOlderMessages: 'Lade ältere...',
   statusNewReply: 'Neue Antwort',
   statusNewerMessages: 'Neuere Nachrichten',
+  statusNewerCount: '{n} neuer',
   statusNoOlderMessages: 'Keine älteren',
   statusOlderMessages: 'Ältere Nachrichten',
   statusSent: 'Gesendet',

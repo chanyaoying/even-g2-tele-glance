@@ -22,6 +22,7 @@ const ja: LocaleStrings = {
   statusSent: 'Sōshin-zumi',
   statusOlderMessages: 'Furui Messēji',
   statusNewerMessages: 'Atarashii Messēji',
+  statusNewerCount: '{n} atarashii',
   statusNoOlderMessages: 'Furui Messēji nashi',
   statusNewReply: 'Shinki Henji',
   statusLoadingOlderMessages: 'Furui messēji yomikomi-chuu...',

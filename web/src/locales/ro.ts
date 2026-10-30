@@ -18,6 +18,7 @@ const ro: LocaleStrings = {
   statusSent: 'Trimis',
   statusOlderMessages: 'Mesaje mai vechi',
   statusNewerMessages: 'Mesaje mai noi',
+  statusNewerCount: '{n} mai noi',
   statusNoOlderMessages: 'Fără mesaje mai vechi',
   statusNewReply: 'Răspuns nou',
   statusLoadingOlderMessages: 'Se încarcă mesajele mai vechi...',

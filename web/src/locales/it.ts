@@ -40,6 +40,7 @@ const it: LocaleStrings = {
   statusLoadingOlderMessages: 'Caricamento precedenti...',
   statusNewReply: 'Nuova risposta',
   statusNewerMessages: 'Messaggi recenti',
+  statusNewerCount: '{n} più nuovi',
   statusNoOlderMessages: 'Nessun precedente',
   statusOlderMessages: 'Messaggi precedenti',
   statusSent: 'Inviato',
