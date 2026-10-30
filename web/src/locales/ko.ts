@@ -23,6 +23,7 @@ const ko: LocaleStrings = {
   statusOlderMessages: 'Ijeon Mesiji',
   statusNewerMessages: 'Sae Mesiji',
   statusNewerCount: '{n} saeroun',
+  dividerLastRead: 'majimak ilgeum',
   statusNoOlderMessages: 'Ijeon mesiji eopseum',
   statusNewReply: 'Sae Dapjang',
   statusLoadingOlderMessages: 'Ijeon mesiji loding-jung...',

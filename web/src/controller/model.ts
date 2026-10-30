@@ -547,13 +547,48 @@ function messageDisplayBlocks(messages: Message[]): MessageDisplayBlock[] {
     // fixed firmware font means every row saved is room for more text.
     const startsDay = i === 0 || dayKey(messages[i].sentAt) !== dayKey(messages[i - 1].sentAt)
     const dayLabel = startsDay ? formatDayLabel(messages[i].sentAt, now) : ''
-    blocks.push(...formatMessageBlocks(messages[i], dayLabel))
+    if (messages[i].firstUnread) blocks.push({ text: `----- ${getLocale().dividerLastRead} -----` })
+    const id = String(messages[i].id)
+    blocks.push(...formatMessageBlocks(messages[i], dayLabel).map((block) => ({ ...block, messageId: id })))
   }
   return blocks
 }
 
+/** How many blocks past the divider the opening view reaches, so a few unread messages show below it. */
+const UNREAD_LOOKAHEAD_BLOCKS = 2
+
+/** Scroll offset that opens a thread at its "last read" divider, or 0 when no message is flagged. */
+export function unreadScrollOffset(messages: Message[]): number {
+  if (!messages.some((message) => message.firstUnread)) return 0
+  const blocks = messageDisplayBlocks(messages)
+  const flagged = String(messages.find((message) => message.firstUnread)!.id)
+  let last = -1
+  blocks.forEach((block, index) => { if (block.messageId === flagged) last = index })
+  if (last < 0) return 0
+  const anchor = Math.min(blocks.length - 1, last + UNREAD_LOOKAHEAD_BLOCKS)
+  return blocks.length - 1 - anchor
+}
+
+/** The message at the bottom of the view for a scroll offset (used to keep a place across refreshes). */
+export function anchorMessageId(messages: Message[], scrollOffset: number): string | undefined {
+  const blocks = messageDisplayBlocks(messages)
+  for (let index = blocks.length - 1 - scrollOffset; index >= 0; index -= 1) {
+    if (blocks[index]?.messageId) return blocks[index].messageId
+  }
+  return undefined
+}
+
+/** Scroll offset that puts the given message at the bottom of the view, if it is loaded. */
+export function offsetForAnchorMessage(messages: Message[], messageId: string): number | undefined {
+  const blocks = messageDisplayBlocks(messages)
+  let last = -1
+  blocks.forEach((block, index) => { if (block.messageId === messageId) last = index })
+  return last < 0 ? undefined : blocks.length - 1 - last
+}
+
 type MessageDisplayBlock = {
   text: string
+  messageId?: string
   imageMessageId?: string
   box?: BoxedText
   boxGroupId?: string

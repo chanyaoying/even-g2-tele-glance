@@ -19,6 +19,7 @@ const da: LocaleStrings = {
   statusOlderMessages: 'Ældre beskeder',
   statusNewerMessages: 'Nyere beskeder',
   statusNewerCount: '{n} nyere',
+  dividerLastRead: 'sidst læst',
   statusNoOlderMessages: 'Ingen ældre beskeder',
   statusNewReply: 'Nyt svar',
   statusLoadingOlderMessages: 'Indlæser ældre beskeder...',

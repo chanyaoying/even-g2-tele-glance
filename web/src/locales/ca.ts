@@ -19,6 +19,7 @@ const ca: LocaleStrings = {
   statusOlderMessages: '& Missatges més antics:',
   statusNewerMessages: 'Missatges més nous',
   statusNewerCount: '{n} més nous',
+  dividerLastRead: 'darrer llegit',
   statusNoOlderMessages: 'No hi ha missatges antics',
   statusNewReply: 'Nova resposta',
   statusLoadingOlderMessages: 'S\'estan carregant missatges antics...',

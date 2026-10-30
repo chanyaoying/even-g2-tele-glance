@@ -19,6 +19,7 @@ const tr: LocaleStrings = {
   statusOlderMessages: 'Eski mesajlar',
   statusNewerMessages: 'Yeni mesajlar',
   statusNewerCount: '{n} daha yeni',
+  dividerLastRead: 'son okunan',
   statusNoOlderMessages: 'Daha eski mesaj yok',
   statusNewReply: 'Yeni yanıt',
   statusLoadingOlderMessages: 'Eski mesajlar yükleniyor...',

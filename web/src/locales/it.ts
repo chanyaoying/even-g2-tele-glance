@@ -41,6 +41,7 @@ const it: LocaleStrings = {
   statusNewReply: 'Nuova risposta',
   statusNewerMessages: 'Messaggi recenti',
   statusNewerCount: '{n} più nuovi',
+  dividerLastRead: 'ultimo letto',
   statusNoOlderMessages: 'Nessun precedente',
   statusOlderMessages: 'Messaggi precedenti',
   statusSent: 'Inviato',

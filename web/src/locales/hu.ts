@@ -19,6 +19,7 @@ const hu: LocaleStrings = {
   statusOlderMessages: 'Régebbi üzenetek',
   statusNewerMessages: 'Újabb üzenetek',
   statusNewerCount: '{n} újabb',
+  dividerLastRead: 'utoljára olvasott',
   statusNoOlderMessages: 'Nincsenek régebbi üzenetek',
   statusNewReply: 'Új válasz',
   statusLoadingOlderMessages: 'Régebbi üzenetek betöltése...',

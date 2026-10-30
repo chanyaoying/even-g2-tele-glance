@@ -41,6 +41,7 @@ const pt: LocaleStrings = {
   statusNewReply: 'Nova resposta',
   statusNewerMessages: 'Mais recentes',
   statusNewerCount: '{n} mais novas',
+  dividerLastRead: 'última lida',
   statusNoOlderMessages: 'Sem mais antigas',
   statusOlderMessages: 'Mais antigas',
   statusSent: 'Enviado',

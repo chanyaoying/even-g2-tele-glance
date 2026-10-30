@@ -211,6 +211,8 @@ Requirements:
 - Popups: the sidebar page always carries a `popup` text container (id 10, stacked above everything via `zOrderIndex`, a 1x1 blank when unused). Z-order is all-or-nothing and unique per page, so every sidebar container has an index; text/list pages have none. The reply confirmation (transcript + Send/Cancel) is the first popup, drawn over the thread. Whether the container is opaque on real glasses is unverified.
 - Recording auto-stops and transcribes when the byte cap is reached; the recording screen title carries `REC`. Chat/topic labels lead with the unread count (`(3) Title`). The message footer leads with `N newer` while scrolled back.
 
+- Unread-aware opening: a thread with unread messages opens at its last read point, not the newest message. The Nth newest incoming message (N = the thread's unread count) is flagged `firstUnread` and a `----- last read -----` divider is drawn before it; the view opens a couple of blocks past it. Nothing is acknowledged as read until the user scrolls down to the newest message, and refreshes keep the same message in view (`keepPlace`). If more messages are unread than are loaded, it opens at the newest message as before.
+
 ## Observed Issues and Learnings
 
 - Even Hub text/list container limits are strict on device and simulator. Message display must be byte-bounded, not character-bounded, because content over 999 UTF-8 bytes can fail rendering or leave the glasses on a stale screen.

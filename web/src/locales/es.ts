@@ -22,6 +22,7 @@ const es: LocaleStrings = {
   statusOlderMessages: 'Más antiguos',
   statusNewerMessages: 'Más recientes',
   statusNewerCount: '{n} más nuevos',
+  dividerLastRead: 'último leído',
   statusNoOlderMessages: 'Sin más mensajes',
   statusNewReply: 'Nueva respuesta',
   statusLoadingOlderMessages: 'Cargando más antiguos...',

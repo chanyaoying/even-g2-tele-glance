@@ -3,7 +3,7 @@ import type { TelegramApi } from '../api'
 import type { Chat, Folder, Id, Message, TelegramUpdate, TelegramTypingUpdate, Topic } from '../types'
 import { getLocale } from '../locales'
 import type { AppInput, AppState, RecoverableState, ScreenModel } from './model'
-import { messageScrollUnitCount, nextMessageScrollOffset, screenModel } from './model'
+import { anchorMessageId, messageScrollUnitCount, nextMessageScrollOffset, offsetForAnchorMessage, screenModel, unreadScrollOffset } from './model'
 import { isTeleGlanceFixtureMode, logLifecycleEvent, logRecordingEvent, logStateWork, nowMs } from '../testMode'
 import { consumeInjectedAudioChunks } from '../fixtureApi'
 import type { Photo } from '../types'
@@ -87,6 +87,8 @@ export class TelegramAppController {
   private chatPoll: ReturnType<typeof setInterval> | undefined
   private pendingMessagePress: ReturnType<typeof setTimeout> | undefined
   private holdRecording = false
+  /** threadKey -> id of the oldest unread message, while a thread is being read from its "last read" point. */
+  private unreadBoundaries = new Map<string, string>()
   private autoStopping = false
   private lastHoldEventAt = 0
   private lastMessagePressAt = 0
@@ -1466,6 +1468,52 @@ export class TelegramAppController {
     }, previous)
   }
 
+  /**
+   * Work out where this thread's unread messages start, flag that message (it gets the "last read" divider) and
+   * return where the view should open. Unread messages are the newest incoming ones, so the Nth incoming message
+   * from the newest is the first unread. If more are unread than are loaded the start cannot be found and the
+   * thread opens at the newest message as before.
+   */
+  private planUnreadOpen(chat: Chat, topic: Topic | undefined, messages: Message[]): { messages: Message[]; scrollOffset: number } {
+    const key = messageThreadKey({ chat, topic })
+    const unread = Number((topic ? topic.unreadCount : chat.unreadCount) ?? 0) || 0
+    this.unreadBoundaries.delete(key)
+    if (unread <= 0) return { messages, scrollOffset: 0 }
+    let seen = 0
+    let firstUnread: Message | undefined
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (messages[index].outgoing) continue
+      seen += 1
+      if (seen === unread) {
+        firstUnread = messages[index]
+        break
+      }
+    }
+    if (!firstUnread) return { messages, scrollOffset: 0 }
+    this.unreadBoundaries.set(key, String(firstUnread.id))
+    const flagged = this.flagUnread(chat, topic, messages)
+    return { messages: flagged, scrollOffset: unreadScrollOffset(flagged) }
+  }
+
+  /** Re-apply the "last read" flag to a freshly fetched message list. */
+  private flagUnread(chat: Chat, topic: Topic | undefined, messages: Message[]): Message[] {
+    const id = this.unreadBoundaries.get(messageThreadKey({ chat, topic }))
+    if (!id) return messages
+    return messages.map((message) => (String(message.id) === id ? { ...message, firstUnread: true } : message))
+  }
+
+  /** True while the user is reading up from the newest message in a thread that had unread messages. */
+  private isReadingFromUnread(state: Extract<AppState, { screen: 'sidebar'; focus: 'messages' }>) {
+    return (state.scrollOffset ?? 0) > 0 && this.unreadBoundaries.has(messageThreadKey(state))
+  }
+
+  /** New messages arrived while reading above the bottom: keep the same message in view instead of jumping. */
+  private keepPlace(state: Extract<AppState, { screen: 'sidebar'; focus: 'messages' }>, next: Message[]) {
+    const anchor = anchorMessageId(state.messages, state.scrollOffset ?? 0)
+    const offset = anchor === undefined ? undefined : offsetForAnchorMessage(next, anchor)
+    return offset ?? state.scrollOffset ?? 0
+  }
+
   private async openMessages(chat: Chat, topic: Topic | undefined, previous: RecoverableState, requestId = ++this.openRequestId) {
     const chats = previous.screen === 'sidebar' ? previous.chats : []
     const selectedChatIndex = previous.screen === 'sidebar' ? previous.selectedChatIndex : 0
@@ -1474,19 +1522,23 @@ export class TelegramAppController {
     await this.run(async () => {
       const cached = this.messageCache.get(messageThreadKey({ chat, topic }))
       if (cached) {
-        await this.setStateWithVisibleRead({
+        const plan = this.planUnreadOpen(chat, topic, cached.messages)
+        const openState: AppState = {
           screen: 'sidebar', focus: 'messages',
           chats, selectedChatIndex,
           chat, topic,
-          messages: cached.messages,
+          messages: plan.messages,
           cursor: cached.cursor,
           back: messageBackTarget(previous),
           newerPages: [],
-          isNewestPage: true,
-          scrollOffset: 0,
+          isNewestPage: plan.scrollOffset === 0,
+          scrollOffset: plan.scrollOffset,
           topics,
           selectedTopicIndex,
-        }, chat, topic, cached.messages)
+        }
+        // Opened at the "last read" point: nothing counts as read until the user scrolls down to the newest message.
+        if (plan.scrollOffset > 0) await this.setState(openState)
+        else await this.setStateWithVisibleRead(openState, chat, topic, cached.messages)
         void this.refreshOpenMessagesInBackground(chat, topic, requestId)
         return
       }
@@ -1507,19 +1559,22 @@ export class TelegramAppController {
       const messages = await this.prefetchMessages(chat, topic)
       if (requestId !== this.openRequestId || !this.isStillOpeningMessages(chat, topic, requestId)) return
       const normalized = normalizeMessagePage(messages)
-      await this.setStateWithVisibleRead({
+      const plan = this.planUnreadOpen(chat, topic, normalized)
+      const openState: AppState = {
         screen: 'sidebar', focus: 'messages',
         chats, selectedChatIndex,
         chat, topic,
-        messages: normalized,
+        messages: plan.messages,
         cursor: oldestMessageId(normalized),
         back: messageBackTarget(previous),
         newerPages: [],
-        isNewestPage: true,
-        scrollOffset: 0,
+        isNewestPage: plan.scrollOffset === 0,
+        scrollOffset: plan.scrollOffset,
         topics,
         selectedTopicIndex,
-      }, chat, topic, normalized)
+      }
+      if (plan.scrollOffset > 0) await this.setState(openState)
+      else await this.setStateWithVisibleRead(openState, chat, topic, normalized)
       this.maybePrefetchOlder()
     }, previous)
   }
@@ -1531,6 +1586,13 @@ export class TelegramAppController {
     const state = this.state
     if (state.screen !== 'sidebar' || state.focus !== 'messages') return
     if (!hasMessageChanges(state.messages, messages)) return
+    if (this.isReadingFromUnread(state)) {
+      const flagged = this.flagUnread(chat, topic, messages)
+      const scrollOffset = this.keepPlace(state, flagged)
+      await this.setState({ ...state, messages: flagged, cursor: oldestMessageId(flagged), newerPages: [], isNewestPage: scrollOffset === 0, scrollOffset })
+      this.maybePrefetchOlder()
+      return
+    }
     await this.setStateWithVisibleRead({
       ...state,
       messages,
@@ -1579,12 +1641,15 @@ export class TelegramAppController {
   private async loadNewerMessages(state: Extract<AppState, { screen: 'sidebar'; focus: 'messages' }>) {
     const nextOffset = nextMessageScrollOffset(state.messages, state.scrollOffset ?? 0, 'down')
     if (nextOffset === (state.scrollOffset ?? 0)) return
-    await this.setState({
+    const next = {
       ...state,
       scrollOffset: nextOffset,
       isNewestPage: nextOffset === 0,
       status: nextOffset === 0 ? undefined : 'Newer messages',
-    })
+    }
+    // Reaching the newest message is what marks the thread read.
+    if (nextOffset === 0) await this.setStateWithVisibleRead(next, state.chat, state.topic, state.messages)
+    else await this.setState(next)
     this.maybePrefetchOlder()
   }
 
@@ -2039,8 +2104,14 @@ export class TelegramAppController {
       const merged = normalizeMessagePage([...current.messages, ...messages])
       if (!hasMessageChanges(current.messages, merged)) return
       const hasIncoming = hasIncomingChange(current.messages, merged)
+      if (current.screen === 'sidebar' && current.focus === 'messages' && this.isReadingFromUnread(current)) {
+        const flagged = this.flagUnread(current.chat, current.topic, merged)
+        const scrollOffset = this.keepPlace(current, flagged)
+        await this.setState({ ...current, messages: flagged, cursor: oldestMessageId(flagged), newerPages: [], isNewestPage: scrollOffset === 0, scrollOffset })
+        return
+      }
       if (current.screen === 'sidebar' && current.focus === 'messages') {
-        await this.setStateWithVisibleRead({ ...current, messages: merged, cursor: oldestMessageId(merged), status: hasIncoming ? 'New reply' : undefined, newerPages: [], isNewestPage: true, scrollOffset: 0 }, current.chat, current.topic, merged, { forceAck: hasIncoming })
+        await this.setStateWithVisibleRead({ ...current, messages: this.flagUnread(current.chat, current.topic, merged), cursor: oldestMessageId(merged), status: hasIncoming ? 'New reply' : undefined, newerPages: [], isNewestPage: true, scrollOffset: 0 }, current.chat, current.topic, merged, { forceAck: hasIncoming })
         this.maybePrefetchOlder()
         return
       }

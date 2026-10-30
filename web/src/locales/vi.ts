@@ -19,6 +19,7 @@ const vi: LocaleStrings = {
   statusOlderMessages: 'Tin nhắn cũ hơn',
   statusNewerMessages: 'Tin nhắn mới hơn',
   statusNewerCount: '{n} mới hơn',
+  dividerLastRead: 'đọc gần nhất',
   statusNoOlderMessages: 'Không có tin nhắn cũ hơn',
   statusNewReply: 'Trả lời mới',
   statusLoadingOlderMessages: 'Đang tải tin nhắn cũ hơn...',

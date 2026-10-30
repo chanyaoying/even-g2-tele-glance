@@ -49,6 +49,8 @@ export type Message = {
   outgoing?: boolean
   /** "photo" when the message carries a photo the glasses can show inline. */
   media?: string | null
+  /** Set locally on the oldest unread message when a thread is opened; drives the "last read" divider. */
+  firstUnread?: boolean
 }
 
 export type Photo = {

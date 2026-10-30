@@ -19,6 +19,7 @@ const nl: LocaleStrings = {
   statusOlderMessages: 'Oudere berichten',
   statusNewerMessages: 'Nieuwere berichten',
   statusNewerCount: '{n} nieuwer',
+  dividerLastRead: 'laatst gelezen',
   statusNoOlderMessages: 'Geen oudere berichten',
   statusNewReply: 'Nieuw antwoord',
   statusLoadingOlderMessages: 'Oudere berichten laden...',

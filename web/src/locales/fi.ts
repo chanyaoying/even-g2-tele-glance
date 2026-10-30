@@ -19,6 +19,7 @@ const fi: LocaleStrings = {
   statusOlderMessages: 'Vanhemmat viestit',
   statusNewerMessages: 'Uudemmat viestit',
   statusNewerCount: '{n} uudempaa',
+  dividerLastRead: 'viimeksi luettu',
   statusNoOlderMessages: 'Ei vanhempia viestejä',
   statusNewReply: 'Uusi vastaus',
   statusLoadingOlderMessages: 'Ladataan vanhempia viestejä...',

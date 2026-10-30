@@ -19,6 +19,7 @@ const cs: LocaleStrings = {
   statusOlderMessages: 'Starší & zprávy:',
   statusNewerMessages: 'Novější zprávy',
   statusNewerCount: '{n} novějších',
+  dividerLastRead: 'naposledy přečteno',
   statusNoOlderMessages: 'Žádné starší zprávy',
   statusNewReply: 'Nová reakce',
   statusLoadingOlderMessages: 'Načítání starších zpráv...',

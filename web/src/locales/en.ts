@@ -23,6 +23,7 @@ const en = {
   statusOlderMessages: 'Older messages',
   statusNewerMessages: 'Newer messages',
   statusNewerCount: '{n} newer',
+  dividerLastRead: 'last read',
   statusNoOlderMessages: 'No older messages',
   statusNewReply: 'New reply',
   statusLoadingOlderMessages: 'Loading older messages...',

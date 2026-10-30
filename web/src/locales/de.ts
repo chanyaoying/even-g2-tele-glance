@@ -41,6 +41,7 @@ const de: LocaleStrings = {
   statusNewReply: 'Neue Antwort',
   statusNewerMessages: 'Neuere Nachrichten',
   statusNewerCount: '{n} neuer',
+  dividerLastRead: 'zuletzt gelesen',
   statusNoOlderMessages: 'Keine älteren',
   statusOlderMessages: 'Ältere Nachrichten',
   statusSent: 'Gesendet',

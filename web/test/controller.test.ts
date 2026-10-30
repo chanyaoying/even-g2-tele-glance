@@ -1108,6 +1108,80 @@ describe('TelegramAppController', () => {
     expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'chats', selectedChatIndex: 1, status: undefined })
   })
 
+  describe('opening at the last read message', () => {
+    const thread: Message[] = [
+      { id: '1', sender: 'Bob', text: 'old one', sentAt: '2026-05-29T09:00:00Z' },
+      { id: '2', sender: 'Bob', text: 'old two', sentAt: '2026-05-29T09:01:00Z' },
+      { id: '3', sender: 'Me', text: 'my reply', sentAt: '2026-05-29T09:02:00Z', outgoing: true },
+      { id: '4', sender: 'Bob', text: 'first unread', sentAt: '2026-05-29T09:03:00Z' },
+      { id: '5', sender: 'Bob', text: 'second unread', sentAt: '2026-05-29T09:04:00Z' },
+      { id: '6', sender: 'Bob', text: 'third unread', sentAt: '2026-05-29T09:05:00Z' },
+      { id: '7', sender: 'Bob', text: 'fourth unread', sentAt: '2026-05-29T09:06:00Z' },
+    ]
+
+    async function openUnread(unreadCount: number, api = fakeApi({ authorized: true, chats: [{ ...chats[0], unreadCount }, chats[1]], latestMessages: thread })) {
+      const controller = new TelegramAppController(api, fakeBridge())
+      await controller.init()
+      await controller.dispatch({ type: 'press' })
+      await flushAsync()
+      return { api, controller }
+    }
+
+    it('opens above the newest message with the divider before the first unread one', async () => {
+      const { controller } = await openUnread(4)
+      const state = controller.snapshot as { scrollOffset?: number; messages: Array<Message & { firstUnread?: boolean }> }
+
+      expect(state.scrollOffset ?? 0).toBeGreaterThan(0)
+      expect(state.messages.filter((m) => m.firstUnread).map((m) => m.id)).toEqual(['4'])
+      const body = messagePanelBody(controller.snapshot)
+      expect(body).toContain('last read')
+      expect(body).toContain('old two')
+      expect(body).not.toContain('fourth unread') // not yanked to the newest message
+    })
+
+    it('does not mark anything read until the newest message is reached', async () => {
+      const { api, controller } = await openUnread(4)
+      flushReadAcks(controller)
+      expect(api.markRead).not.toHaveBeenCalled()
+
+      for (let step = 0; step < 10; step += 1) await controller.dispatch({ type: 'swipeDown' })
+      await flushAsync()
+      flushReadAcks(controller)
+
+      expect((controller.snapshot as { scrollOffset?: number }).scrollOffset).toBe(0)
+      expect(api.markRead).toHaveBeenCalledWith('1', { topicId: undefined, maxId: 7 })
+    })
+
+    it('skips outgoing messages when counting unread ones', async () => {
+      // 2 unread: the two newest incoming messages are #6 and #7; my own #3 is irrelevant either way.
+      const { controller } = await openUnread(2)
+      const flagged = (controller.snapshot as { messages: Array<Message & { firstUnread?: boolean }> }).messages.filter((m) => m.firstUnread)
+      expect(flagged.map((m) => m.id)).toEqual(['6'])
+    })
+
+    it('falls back to the newest message when more are unread than are loaded', async () => {
+      const { controller } = await openUnread(40)
+      expect((controller.snapshot as { scrollOffset?: number }).scrollOffset ?? 0).toBe(0)
+      expect(messagePanelBody(controller.snapshot)).not.toContain('last read')
+    })
+
+    it('keeps the same message in view when a refresh brings new messages', async () => {
+      let latest = thread
+      const api = fakeApi({ authorized: true, chats: [{ ...chats[0], unreadCount: 4 }, chats[1]], latestMessages: () => latest })
+      const { controller } = await openUnread(4, api)
+      const before = messagePanelBody(controller.snapshot)
+      expect(before).toContain('first unread')
+
+      latest = [...thread, { id: '8', sender: 'Bob', text: 'brand new', sentAt: '2026-05-29T09:07:00Z' }]
+      await refreshVisibleMessages(controller)
+      await flushAsync()
+
+      expect((controller.snapshot as { scrollOffset?: number }).scrollOffset ?? 0).toBeGreaterThan(0)
+      expect(messagePanelBody(controller.snapshot)).toContain('first unread')
+      expect(messagePanelBody(controller.snapshot)).not.toContain('brand new')
+    })
+  })
+
   it('marks normal chat messages read and clears the local unread badge when viewed', async () => {
     const unreadChats = [{ ...chats[0], unreadCount: 2 }, chats[1]]
     const api = fakeApi({ authorized: true, chats: unreadChats })

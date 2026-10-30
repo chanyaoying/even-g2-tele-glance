@@ -21,6 +21,7 @@ const ms: LocaleStrings = {
   statusOlderMessages: 'Mesej lama',
   statusNewerMessages: 'Mesej baru',
   statusNewerCount: '{n} lebih baru',
+  dividerLastRead: 'terakhir dibaca',
   statusNoOlderMessages: 'Tiada mesej lama',
   statusNewReply: 'Balasan baru',
   statusLoadingOlderMessages: 'Memuat mesej lama...',

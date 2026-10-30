@@ -19,6 +19,7 @@ const sk: LocaleStrings = {
   statusOlderMessages: 'Staršie správy',
   statusNewerMessages: 'Novšie správy',
   statusNewerCount: '{n} novších',
+  dividerLastRead: 'naposledy prečítané',
   statusNoOlderMessages: 'Žiadne staršie správy',
   statusNewReply: 'Nová odpoveď',
   statusLoadingOlderMessages: 'Načítavanie starších správ...',
