@@ -10,6 +10,14 @@ describe('mapEvenHubEvent', () => {
     expect(mapEvenHubEvent({ textEvent: { eventType: 2 } })).toEqual({ type: 'swipeDown' })
   })
 
+  it('maps long press and its release from every payload shape', () => {
+    expect(mapEvenHubEvent({ textEvent: { eventType: 9 } })).toEqual({ type: 'longPress' })
+    expect(mapEvenHubEvent({ textEvent: { eventType: 10 } })).toEqual({ type: 'longPressRelease' })
+    expect(mapEvenHubEvent({ sysEvent: { eventType: 'LONG_PRESS_EVENT' } })).toEqual({ type: 'longPress' })
+    expect(mapEvenHubEvent({ sysEvent: { eventType: 'LONG_PRESS_RELEASE_EVENT' } })).toEqual({ type: 'longPressRelease' })
+    expect(mapEvenHubEvent({ jsonData: { eventType: 9 } })).toEqual({ type: 'longPress' })
+  })
+
   it('maps list selection and audio chunks', () => {
     expect(mapEvenHubEvent({ listEvent: { currentSelectItemIndex: 2 } })).toEqual({ type: 'selectIndex', index: 2 })
     expect(mapEvenHubEvent({ listEvent: { eventType: 0, currentSelectItemIndex: 2 } })).toEqual({ type: 'press', index: 2 })

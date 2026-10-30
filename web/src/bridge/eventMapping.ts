@@ -7,6 +7,8 @@ export const EvenEventType = {
   scrollBottom: 2,
   doubleClick: 3,
   foregroundEnter: 4,
+  longPress: 9,
+  longPressRelease: 10,
 } as const
 
 const EvenEventTypeName = {
@@ -15,6 +17,8 @@ const EvenEventTypeName = {
   scrollBottom: 'SCROLL_BOTTOM_EVENT',
   doubleClick: 'DOUBLE_CLICK_EVENT',
   foregroundEnter: 'FOREGROUND_ENTER_EVENT',
+  longPress: 'LONG_PRESS_EVENT',
+  longPressRelease: 'LONG_PRESS_RELEASE_EVENT',
 } as const
 
 type EvenHubEventLike = {
@@ -126,6 +130,8 @@ export function mapEvenHubEvent(event: EvenHubEventLike | unknown): AppInput | u
   if (eventTypeEquals(rawEventType, EvenEventType.foregroundEnter, EvenEventTypeName.foregroundEnter)) {
     return withEventSource({ type: 'foreground' }, rawEventSource)
   }
+  if (eventTypeEquals(rawEventType, EvenEventType.longPress, EvenEventTypeName.longPress)) return withEventSource({ type: 'longPress' }, rawEventSource)
+  if (eventTypeEquals(rawEventType, EvenEventType.longPressRelease, EvenEventTypeName.longPressRelease)) return withEventSource({ type: 'longPressRelease' }, rawEventSource)
   if (eventTypeEquals(rawEventType, EvenEventType.doubleClick, EvenEventTypeName.doubleClick)) return withEventSource(withOptionalSelection('doublePress', rawIndex, rawItemName), rawEventSource)
   if (eventTypeEquals(rawEventType, EvenEventType.click, EvenEventTypeName.click)) return withEventSource(withOptionalSelection('press', rawIndex, rawItemName), rawEventSource)
   if (eventTypeEquals(rawEventType, EvenEventType.scrollTop, EvenEventTypeName.scrollTop)) return withEventSource({ type: 'swipeUp' }, rawEventSource)
@@ -152,6 +158,8 @@ export function mapEvenHubEvent(event: EvenHubEventLike | unknown): AppInput | u
     return withEventSource(withOptionalSelection('selectIndex', index, itemName), normalizedEventSource)
   }
 
+  if (eventTypeEquals(eventType, EvenEventType.longPress, EvenEventTypeName.longPress)) return withEventSource({ type: 'longPress' }, normalizedEventSource)
+  if (eventTypeEquals(eventType, EvenEventType.longPressRelease, EvenEventTypeName.longPressRelease)) return withEventSource({ type: 'longPressRelease' }, normalizedEventSource)
   if (eventTypeEquals(eventType, EvenEventType.doubleClick, EvenEventTypeName.doubleClick)) return withEventSource(withOptionalSelection('doublePress', index, itemName), normalizedEventSource)
   if (eventType === undefined || eventTypeEquals(eventType, EvenEventType.click, EvenEventTypeName.click)) return withEventSource(withOptionalSelection('press', index, itemName), normalizedEventSource)
   if (eventTypeEquals(eventType, EvenEventType.scrollTop, EvenEventTypeName.scrollTop)) return withEventSource({ type: 'swipeUp' }, normalizedEventSource)

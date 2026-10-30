@@ -64,6 +64,8 @@ export class EvenHubGlassesBridge implements GlassesBridge {
   private hasRendered = false
   private pendingImage: Uint8Array | undefined
   private imageSending: Promise<boolean> | undefined
+  private audioOn = false
+  private audioChain: Promise<void> = Promise.resolve()
   private pageGeneration = 0
   private renderSequence = 0
   private pendingPanelModel: { model: Extract<ScreenModel, { kind: 'sidebar' }>; generation: number } | undefined
@@ -185,6 +187,10 @@ export class EvenHubGlassesBridge implements GlassesBridge {
     this.fullRenderInFlight = true
     this.emitQueueDepth('full-render-start')
     try {
+      // Let a pending mic start/stop finish first; rebuilding the page mid-teardown is the
+      // suspected cause of crashes right after cancelling a recording.
+      await this.audioChain
+
       if (this.hasRendered) {
         const container = buildPage(model, RebuildPageContainer)
         logTeleGlanceTest('bridge', { method: 'rebuildPageContainer', args: { sequence, generation, hasPanelBox: model.kind === 'sidebar' ? Boolean(model.panelBox) : false } })
@@ -474,7 +480,21 @@ export class EvenHubGlassesBridge implements GlassesBridge {
     // simulator's HTTP server from responding to subsequent /api/input
     // requests. On real hardware audio control is fast (<50ms), so this
     // timeout only fires on the simulator.
-    await withTimeout(this.sdk.audioControl(enabled), 1000, 'audioControl')
+    // Queue mic on/off one at a time and skip redundant calls, so a quick start-then-cancel
+    // never overlaps two native audioControl calls (or a page rebuild, see render()).
+    const run = async () => {
+      if (this.audioOn === enabled) return
+      this.audioOn = enabled
+      try {
+        await withTimeout(this.sdk.audioControl(enabled), 1000, 'audioControl')
+      } catch (error) {
+        this.audioOn = !enabled
+        throw error
+      }
+    }
+    const queued = this.audioChain.then(run, run)
+    this.audioChain = queued.catch(() => undefined)
+    await queued
   }
 
   async showExitConfirmation() {

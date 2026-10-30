@@ -28,6 +28,8 @@ const messagePageCache = new WeakMap<Message[], MessageDisplayPage[]>()
 export type AppInput =
   | { type: 'press'; index?: number; itemName?: string; eventSource?: number }
   | { type: 'doublePress'; index?: number; itemName?: string; eventSource?: number }
+  | { type: 'longPress'; eventSource?: number }
+  | { type: 'longPressRelease'; eventSource?: number }
   | { type: 'swipeUp'; eventSource?: number }
   | { type: 'swipeDown'; eventSource?: number }
   | { type: 'selectIndex'; index?: number; itemName?: string; eventSource?: number }

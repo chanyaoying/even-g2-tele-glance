@@ -31,6 +31,8 @@ export interface GlassesBridge {
 const MESSAGE_PAGE_LIMIT = 8
 // Older pages are fetched in bigger chunks than the first page: a history call costs about the same for 8
 // or 24 messages, and a bigger chunk means far fewer waits at the edge of loaded history while scrolling.
+/** Ignore a plain click this soon after a hold event (some firmware double-reports). */
+const HOLD_PRESS_GUARD_MS = 350
 const OLDER_PAGE_LIMIT = 24
 // Optimistic folder loading: once the chat list is up and the user is idle, fetch each folder's first page
 // so switching folders later is instant.
@@ -84,6 +86,8 @@ export class TelegramAppController {
   private messagePoll: ReturnType<typeof setInterval> | undefined
   private chatPoll: ReturnType<typeof setInterval> | undefined
   private pendingMessagePress: ReturnType<typeof setTimeout> | undefined
+  private holdRecording = false
+  private lastHoldEventAt = 0
   private lastMessagePressAt = 0
   private chatFingerprints = new Map<string, string>()
   private olderPrefetch:
@@ -368,6 +372,15 @@ export class TelegramAppController {
       }
       await this.init()
       return
+    }
+
+    if (input.type === 'longPress' || input.type === 'longPressRelease') {
+      const here = this.state
+      const inMessages = here.screen === 'sidebar' && here.focus === 'messages'
+      if (!inMessages && here.screen !== 'sidebarRecording') return // hold gestures only mean something here
+      this.lastHoldEventAt = Date.now()
+    } else if (input.type === 'press' && Date.now() - this.lastHoldEventAt < HOLD_PRESS_GUARD_MS) {
+      return // some firmware also reports a click around a hold; never let it start/stop a recording
     }
 
     if (input.type === 'audioChunk') {
@@ -777,6 +790,13 @@ export class TelegramAppController {
       await this.loadNewerMessages(state)
       return
     }
+    if (input.type === 'longPress') {
+      // Hold to record: start now, skipping the double-click wait.
+      this.cancelPendingMessagePress()
+      this.holdRecording = true
+      await this.startRecordingFromMessages(state, sidebarContext(state))
+      return
+    }
     if (input.type !== 'press') return
 
     await this.scheduleMessagePress(state)
@@ -914,6 +934,7 @@ export class TelegramAppController {
     state: Extract<AppState, { screen: 'sidebarRecording' }>, input: AppInput
   ) {
     if (input.type === 'doublePress') {
+      this.holdRecording = false
       // The dispatch-level filter in `dispatch` has already dropped
       // any idle system `doublePress`. See `isIdleSystemDoublePress`.
       void this.bridge.setAudioEnabled(false).catch(() => undefined)
@@ -948,7 +969,9 @@ export class TelegramAppController {
       })
       return
     }
-    if (input.type !== 'press') return
+    if (input.type === 'longPressRelease' && !this.holdRecording) return
+    if (input.type !== 'press' && input.type !== 'longPressRelease') return
+    this.holdRecording = false
     await this.setState({
       screen: 'sidebarTranscribing', focus: 'messages',
       chats: state.chats, selectedChatIndex: state.selectedChatIndex,

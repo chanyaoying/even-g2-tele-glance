@@ -1576,6 +1576,53 @@ describe('TelegramAppController', () => {
     expect(vi.mocked(bridge.setAudioEnabled)).toHaveBeenCalledWith(true)
   })
 
+  it('hold to record: long press starts recording at once and releasing stops and transcribes', async () => {
+    const api = fakeApi({ authorized: true, transcription: { text: 'Held reply' } })
+    const bridge = fakeBridge()
+    const controller = new TelegramAppController(api, bridge, { messagePressDelayMs: 200 })
+
+    await controller.init()
+    await controller.dispatch({ type: 'press' })
+    await flushAsync()
+    expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'messages' })
+
+    await controller.dispatch({ type: 'longPress' })
+    expect(controller.snapshot.screen).toBe('sidebarRecording') // no double-click wait
+    expect(bridge.setAudioEnabled).toHaveBeenCalledWith(true)
+
+    await controller.dispatch({ type: 'audioChunk', pcm: speechLikePcm() })
+    await controller.dispatch({ type: 'longPressRelease' })
+
+    expect(bridge.setAudioEnabled).toHaveBeenLastCalledWith(false)
+    expect(api.transcribe).toHaveBeenCalledOnce()
+    expect(controller.snapshot).toMatchObject({ screen: 'sidebarConfirm', transcript: 'Held reply' })
+  })
+
+  it('a click reported around a hold does not stop the recording; a stray release is ignored', async () => {
+    const api = fakeApi({ authorized: true, transcription: { text: 'x' } })
+    const controller = new TelegramAppController(api, fakeBridge(), { messagePressDelayMs: 0 })
+    await controller.init()
+    await controller.dispatch({ type: 'press' })
+    await flushAsync()
+
+    await controller.dispatch({ type: 'longPressRelease' }) // release with nothing held: ignored
+    expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'messages' })
+
+    await controller.dispatch({ type: 'longPress' })
+    await controller.dispatch({ type: 'press' }) // duplicate click right after the hold begins
+    expect(controller.snapshot.screen).toBe('sidebarRecording')
+    expect(api.transcribe).not.toHaveBeenCalled()
+  })
+
+  it('ignores long press outside the message view', async () => {
+    const controller = new TelegramAppController(fakeApi({ authorized: true }), fakeBridge(), 0)
+    await controller.init()
+    const before = controller.snapshot
+    await controller.dispatch({ type: 'longPress' })
+    await controller.dispatch({ type: 'longPressRelease' })
+    expect(controller.snapshot).toBe(before)
+  })
+
   it('records, transcribes, confirms, and sends a voice reply', async () => {
     const api = fakeApi({ authorized: true, transcription: { text: 'Reply text' } })
     const bridge = fakeBridge()
