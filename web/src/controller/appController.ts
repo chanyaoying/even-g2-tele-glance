@@ -2772,7 +2772,7 @@ function hasRecordableAudio(chunks: Uint8Array[]) {
 
 /** Identifies the native container layout: a change means the glasses need a full rebuild, not a text update. */
 function panelLayoutKey(model: Extract<ScreenModel, { kind: 'sidebar' }>): string {
-  const image = model.panelImage ? `${model.panelImage.chatId}:${model.panelImage.messageId}` : ''
+  const image = model.panelImage ? `${model.panelImage.chatId}:${model.panelImage.messageId}@${model.panelImage.topLine}` : ''
   return `${model.panelBox ? 'box' : ''}|${image}`
 }
 

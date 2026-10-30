@@ -1,4 +1,4 @@
-"""Fit photos into the Even G2 image container: exactly 288x144, letterboxed, greyscale, 16 levels."""
+"""Fit photos into the Even G2 image container: exactly 288x120, letterboxed, greyscale, 16 levels."""
 
 import io
 
@@ -9,7 +9,7 @@ class ImagingError(RuntimeError):
     pass
 
 
-def prepare_glasses_image(raw: bytes, max_width: int = 288, max_height: int = 144, levels: int = 16) -> tuple[bytes, int, int]:
+def prepare_glasses_image(raw: bytes, max_width: int = 288, max_height: int = 120, levels: int = 16) -> tuple[bytes, int, int]:
     """Return (png_bytes, width, height) fitted inside max_width x max_height."""
     if not raw:
         raise ImagingError("image is empty")

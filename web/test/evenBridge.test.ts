@@ -502,20 +502,22 @@ describe('EvenHubGlassesBridge photos', () => {
   const imageObject = (container: unknown) =>
     ((container as { imageObject?: Array<Record<string, number>> }).imageObject ?? [])[0]
 
-  it('always includes the image container: 288x144 beside the text for a photo, a 20x20 blank otherwise', async () => {
+  it('always includes the image container: 288x120 over the text gap for a picture, a 20x20 blank otherwise', async () => {
     const { bridge, rebuilt } = makeBridge()
 
-    await bridge.render({ ...baseModel, panelImage: { chatId: '1', messageId: '2' } } as ScreenModel)
+    await bridge.render({ ...baseModel, panelImage: { chatId: '1', messageId: '2', topLine: 1 } } as ScreenModel)
+    await bridge.render({ ...baseModel, panelImage: { chatId: '1', messageId: '2', topLine: 3 } } as ScreenModel)
     await bridge.render({ ...baseModel } as ScreenModel)
 
-    const withPhoto = imageObject(rebuilt[0])
-    expect(withPhoto).toMatchObject({ containerID: 9, width: 288, height: 144 })
-    expect(withPhoto.xPosition + withPhoto.width).toBeLessThanOrEqual(576)
-    expect(withPhoto.yPosition + withPhoto.height).toBeLessThanOrEqual(288)
-    expect(textObjectById(rebuilt[0], 6)).toMatchObject({ width: 282 })
+    const first = imageObject(rebuilt[0])
+    const lower = imageObject(rebuilt[1])
+    expect(first).toMatchObject({ containerID: 9, width: 288, height: 120 })
+    expect(first.xPosition + first.width).toBeLessThanOrEqual(576)
+    expect(first.yPosition + first.height).toBeLessThanOrEqual(226) // stays inside the message area
+    expect(lower.yPosition).toBeGreaterThan(first.yPosition) // follows the gap down the page
+    expect(textObjectById(rebuilt[0], 6)).toMatchObject({ width: 572 }) // text keeps the full width: no side panel
 
-    expect(imageObject(rebuilt[1])).toMatchObject({ containerID: 9, width: 20, height: 20 })
-    expect(textObjectById(rebuilt[1], 6)).toMatchObject({ width: 572 })
+    expect(imageObject(rebuilt[2])).toMatchObject({ containerID: 9, width: 20, height: 20 })
   })
 
   it('sends photo pixels one transfer at a time and keeps only the latest queued image', async () => {

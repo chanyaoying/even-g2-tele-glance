@@ -272,7 +272,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         chat_id: int,
         message_id: int,
         max_width: int = Query(default=288, ge=20, le=288),
-        max_height: int = Query(default=144, ge=20, le=144),
+        max_height: int = Query(default=120, ge=20, le=144),
         telegram: TelegramService = Depends(get_telegram_service),
     ) -> PhotoResponse:
         try:

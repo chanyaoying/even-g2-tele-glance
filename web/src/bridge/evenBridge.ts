@@ -10,7 +10,7 @@ import {
   waitForEvenAppBridge,
 } from '@evenrealities/even_hub_sdk'
 import type { GlassesBridge } from '../controller/appController'
-import type { AppInput, ScreenModel } from '../controller/model'
+import { INLINE_IMAGE_HEIGHT, INLINE_IMAGE_WIDTH, MESSAGE_ROW_HEIGHT_PX, type AppInput, type ScreenModel } from '../controller/model'
 import { defaultApiBaseUrl, effectiveBackendSharedSecret, type TelegramAuthConfig } from '../api'
 import { encryptedTelegramAuthHeader, encryptJsonPayload } from '../secureAuth'
 import {
@@ -29,7 +29,6 @@ const IMAGE_CONTAINER_ID = 9
 const IMAGE_CONTAINER_NAME = 'panel-image'
 const POPUP_CONTAINER_ID = 10
 const POPUP_CONTAINER_NAME = 'popup'
-const PHOTO_TEXT_WIDTH = 282
 export const APP_BUILD_VERSION: string = (typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0')
 
 type DispatchContextSnapshot = { inputQuiet: boolean; backgroundWorkActive: boolean }
@@ -641,7 +640,7 @@ function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Cont
     xPosition: fullWidth ? 2 : 170,
     yPosition: 38,
     // With a photo the text moves into a narrow left column and the picture takes the right side.
-    width: model.panelImage ? PHOTO_TEXT_WIDTH : fullWidth ? 572 : 404,
+    width: fullWidth ? 572 : 404,
     height: fullWidth ? 188 : 206,
     borderWidth: 0,
     borderColor: 8,
@@ -683,10 +682,11 @@ function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Cont
     ? new ImageContainerProperty({
         containerID: IMAGE_CONTAINER_ID,
         containerName: IMAGE_CONTAINER_NAME,
-        xPosition: 286,
-        yPosition: 40,
-        width: 288,
-        height: 144,
+        xPosition: 8,
+        // Sits over the blank rows the message text leaves for it (body top 38 + padding 4 + rows above).
+        yPosition: Math.min(226 - INLINE_IMAGE_HEIGHT, 38 + 4 + model.panelImage.topLine * MESSAGE_ROW_HEIGHT_PX + 3),
+        width: INLINE_IMAGE_WIDTH,
+        height: INLINE_IMAGE_HEIGHT,
         ...z(8),
       })
     : new ImageContainerProperty({

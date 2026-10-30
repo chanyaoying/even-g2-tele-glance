@@ -415,14 +415,14 @@ describe('screenModel', () => {
     expect(body(oneUp)).toContain('msg11')
     expect(body(newest)).toContain('msg11') // the windows overlap: nothing jumps off screen
   })
-  it('shows a sticker like a photo: its own page with the picture beside a short text column', () => {
+  it('shows a sticker inline like a photo', () => {
     const model = screenModel({
       screen: 'sidebar', focus: 'messages',
       chats: [], selectedChatIndex: 0,
       chat: { id: '7', title: 'Project', kind: 'group' },
       messages: [{ id: '41', sender: 'Alice', text: '[sticker]', media: 'sticker' }],
     })
-    expect(model.kind === 'sidebar' && model.panelImage).toEqual({ chatId: '7', messageId: '41' })
+    expect(model.kind === 'sidebar' && model.panelImage).toEqual({ chatId: '7', messageId: '41', topLine: 1 })
     expect(model.kind === 'sidebar' && model.panelBody).toContain('[sticker]')
   })
 
@@ -941,7 +941,7 @@ describe('photo messages', () => {
     return model
   }
 
-  it('gives a photo its own page with the picture reference and a narrow text column', () => {
+  it('shows a photo inline between its neighbouring messages, leaving blank rows for the picture', () => {
     const messages: Message[] = [
       { id: '1', sender: 'Bob', text: 'before' },
       photoMessage('2', 'look at this lovely sunset over the bay [photo]'),
@@ -949,13 +949,23 @@ describe('photo messages', () => {
     ]
 
     expect(messageScrollUnitCount(messages)).toBe(3)
-    const photoPage = sidebarAt(messages, 1)
-    expect(photoPage.panelImage).toEqual({ chatId: '1', messageId: '2' })
-    for (const line of photoPage.panelBody.split('\n')) expect(line.length).toBeLessThanOrEqual(20)
-    expect(photoPage.panelBody).toContain('Alice')
-    expect(photoPage.panelBody).toContain('[photo]')
 
-    expect(sidebarAt(messages, 0).panelImage).toBeUndefined()
+    // Newest view: the photo and the message after it share the screen.
+    const newest = sidebarAt(messages, 0)
+    expect(newest.panelImage).toEqual({ chatId: '1', messageId: '2', topLine: 1 })
+    const rows = newest.panelBody.split('\n')
+    expect(rows[0]).toContain('Alice')
+    expect(rows[0]).toContain('[photo]')
+    expect(rows.slice(1, 6).every((row) => row.trim() === '')).toBe(true) // the gap the picture covers
+    expect(rows[6]).toContain('after')
+    expect(rows.length).toBeLessThanOrEqual(7)
+    for (const row of rows) expect(row.length).toBeLessThanOrEqual(44)
+
+    // One step back: the message before sits above the photo and pushes the picture down a row.
+    const older = sidebarAt(messages, 1)
+    expect(older.panelImage).toEqual({ chatId: '1', messageId: '2', topLine: 2 })
+    expect(older.panelBody.split('\n')[0]).toContain('before')
+
     expect(sidebarAt(messages, 2).panelImage).toBeUndefined()
   })
 

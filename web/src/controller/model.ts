@@ -6,7 +6,6 @@ const TEXT_CONTAINER_BYTE_LIMIT = 999
 const MESSAGE_ROW_BYTE_LIMIT = 120
 const MESSAGE_ROW_CHAR_LIMIT = 44
 // A photo page puts the text in a narrow left column (about 282 px) and the picture on the right.
-const PHOTO_TEXT_CHARS = 20
 const MESSAGE_VISIBLE_ROW_LIMIT = 7
 const MESSAGE_BOX_WIDTH = 42
 const MESSAGE_BOX_CONTENT_WIDTH = MESSAGE_BOX_WIDTH - 4
@@ -49,11 +48,22 @@ export type ScreenModel =
       fullWidth?: boolean;
       focus: 'sidebar' | 'panel'; }
 
-/** A photo shown beside the message text; the controller fetches the pixels and sends them to the glasses. */
+/**
+ * A picture shown inline with the messages: the text leaves a blank gap and the picture container sits over it.
+ * The controller fetches the pixels and sends them to the glasses.
+ */
 export type PanelImage = {
   chatId: string
   messageId: string
+  /** Text rows above the gap in the visible page; positions the picture vertically. */
+  topLine: number
 }
+
+/** Blank text rows reserved for a picture, and the picture size that fits them (rows are ~26 px tall). */
+export const INLINE_IMAGE_GAP_ROWS = 5
+export const INLINE_IMAGE_HEIGHT = 120
+export const INLINE_IMAGE_WIDTH = 288
+export const MESSAGE_ROW_HEIGHT_PX = 26
 
 /** A dialog drawn over the page (a bordered container stacked above everything else). */
 export type PopupOverlay = {
@@ -231,7 +241,7 @@ export function screenModel(state: AppState): ScreenModel {
             panelBox: loadingBody ? undefined : msg.box,
             panelImage: loadingBody || !msg.imageMessageId
               ? undefined
-              : { chatId: String(state.chat.id), messageId: msg.imageMessageId },
+              : { chatId: String(state.chat.id), messageId: msg.imageMessageId, topLine: msg.imageTopLine ?? 0 },
             fullWidth: true,
             focus: 'panel',
           }
@@ -507,7 +517,7 @@ function messageDisplayPages(messages: Message[]): MessageDisplayPage[] {
 
     for (let index = endExclusive - 1; index >= 0; index -= 1) {
       const block = blocks[index]
-      if (block.box || block.imageMessageId) {
+      if (block.box) {
         if (selected.length === 0) selected.unshift(block)
         break
       }
@@ -533,6 +543,8 @@ function messageDisplayPages(messages: Message[]): MessageDisplayPage[] {
 type MessageDisplayPage = {
   body: string
   imageMessageId?: string
+  /** Text rows above the picture gap within this page's body. */
+  imageTopLine?: number
   box?: BoxedText
   boxGroupId?: string
   boxPartIndex?: number
@@ -589,6 +601,8 @@ export function offsetForAnchorMessage(messages: Message[], messageId: string): 
 type MessageDisplayBlock = {
   text: string
   messageId?: string
+  /** Index of the first picture-gap row inside this block's text. */
+  imageGapLine?: number
   imageMessageId?: string
   box?: BoxedText
   boxGroupId?: string
@@ -608,11 +622,11 @@ function formatMessageBlocks(message: Message, dayLabel = ''): MessageDisplayBlo
   }
 
   if (message.media === 'photo' || message.media === 'sticker') {
-    // A photo gets a page of its own: a narrow text column on the left, the picture on the right.
-    const heading = (time ? `${time} ${sender}` : sender).slice(0, PHOTO_TEXT_CHARS)
-    const photoRows = [heading, ...splitDisplayWordRows(text, PHOTO_TEXT_CHARS, MESSAGE_ROW_BYTE_LIMIT)]
-    if (dayLabel) photoRows.unshift(`-- ${dayLabel} --`)
-    return [{ text: photoRows.join('\n'), imageMessageId: String(message.id) }]
+    // The picture flows with the conversation: one heading row, then blank rows the picture container covers.
+    const heading = inlineImageHeading(`${time ? `${time} ` : ''}${sender}: `, text)
+    const rows = [heading, ...Array.from({ length: INLINE_IMAGE_GAP_ROWS }, () => ' ')]
+    if (dayLabel) rows.unshift(`----- ${dayLabel} -----`)
+    return [{ text: rows.join('\n'), imageMessageId: String(message.id), imageGapLine: rows.length - INLINE_IMAGE_GAP_ROWS }]
   }
 
   const rows = formatCompactMessageRows(time ? `${time} ${sender}` : sender, text)
@@ -653,6 +667,16 @@ export function formatDayLabel(sentAt: string | null | undefined, now: Date = ne
   if (days === 1) return 'Yesterday'
   const label = `${WEEKDAYS[date.getDay()]} ${date.getDate()} ${MONTHS[date.getMonth()]}`
   return date.getFullYear() === now.getFullYear() ? label : `${label} ${date.getFullYear()}`
+}
+
+/** One row: "14:32 Alice: caption [photo]", shortening the caption (never the [photo]/[sticker] tag) to fit. */
+function inlineImageHeading(prefix: string, text: string): string {
+  const match = text.match(/^([\s\S]*?)\s*(\[(?:photo|sticker)\])$/)
+  const caption = (match ? match[1] : text).trim()
+  const tag = match ? match[2] : ''
+  const room = MESSAGE_ROW_CHAR_LIMIT - prefix.length - (tag ? tag.length + 1 : 0)
+  const shown = caption.length <= room ? caption : room > 2 ? `${caption.slice(0, room - 2)}..` : ''
+  return [`${prefix}${shown}`.trimEnd(), tag].filter(Boolean).join(' ').slice(0, MESSAGE_ROW_CHAR_LIMIT)
 }
 
 function formatCompactMessageRows(sender: string, text: string) {
@@ -779,9 +803,20 @@ function formatPage(blocks: MessageDisplayBlock[]): MessageDisplayPage {
     if (!block.gap) return true
     return i > 0 && i < blocks.length - 1
   })
+  let imageMessageId: string | undefined
+  let imageTopLine: number | undefined
+  let linesBefore = 0
+  for (const block of content) {
+    if (block.imageMessageId !== undefined && imageMessageId === undefined) {
+      imageMessageId = block.imageMessageId
+      imageTopLine = linesBefore + (block.imageGapLine ?? 0)
+    }
+    linesBefore += block.text.split('\n').length
+  }
   return {
     body: content.map((block) => block.text).join('\n'),
-    imageMessageId: content.length === 1 ? content[0].imageMessageId : undefined,
+    imageMessageId,
+    imageTopLine,
     box: content.length === 1 ? content[0].box : undefined,
     boxGroupId: content.length === 1 ? content[0].boxGroupId : undefined,
     boxPartIndex: content.length === 1 ? content[0].boxPartIndex : undefined,

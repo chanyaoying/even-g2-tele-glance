@@ -104,7 +104,7 @@ class TelegramService(Protocol):
         message_id: int,
         *,
         max_width: int = 288,
-        max_height: int = 144,
+        max_height: int = 120,
     ) -> PhotoResponse:
         ...
 
@@ -942,7 +942,7 @@ class TelethonTelegramService:
         message_id: int,
         *,
         max_width: int = 288,
-        max_height: int = 144,
+        max_height: int = 120,
     ) -> PhotoResponse:
         key = (int(chat_id), int(message_id), int(max_width), int(max_height))
         cached = self._photo_cache.get(key)

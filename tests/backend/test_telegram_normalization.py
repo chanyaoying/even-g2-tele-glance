@@ -409,9 +409,9 @@ def test_get_photo_downloads_converts_and_caches():
     first = asyncio.run(service.get_photo(1, 40))
     second = asyncio.run(service.get_photo(1, 40))
 
-    assert (first.width, first.height) == (288, 144)
+    assert (first.width, first.height) == (288, 120)
     image = pil.open(io.BytesIO(base64.b64decode(first.data)))
-    assert image.mode == "L" and image.size == (288, 144)
+    assert image.mode == "L" and image.size == (288, 120)
     assert second is first
     assert client.downloads == 1
 
@@ -470,8 +470,8 @@ def test_a_static_sticker_downloads_the_real_file_on_a_black_background():
 
     assert client.thumb is None  # the sticker file itself, not a thumbnail
     image = pil.open(io.BytesIO(base64.b64decode(photo.data)))
-    assert image.size == (288, 144)
-    assert image.getpixel((144, 72)) > 200  # the white square
+    assert image.size == (288, 120)
+    assert image.getpixel((144, 60)) > 200  # the white square
     assert image.getpixel((144, 4)) == 0  # transparent area is black, not whatever colour hides under it
 
 

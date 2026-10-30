@@ -215,6 +215,8 @@ Requirements:
 
 - Page rejection fallback: the host answers `false` (rebuild) or a non-zero code (startup) when it refuses a page, and ignoring that leaves the glasses on the previous screen while the phone moves on (seen as being stuck on "Checking Telegram session..."). The bridge now checks the result and steps the sidebar layout down: tier 0 (stacking order + popup container) -> tier 1 (no stacking order) -> tier 2 (original layout, popup folded into body text), staying on the tier the host accepted. Debug events show which screen the glasses are on: container name `body` = text page, `event-overlay` = sidebar/list page.
 
+- Inline pictures: photos and stickers flow with the conversation. A picture message is a heading row (`HH:MM Sender: caption [photo]`) plus 5 blank rows; the image container (288x120, id 9) is placed over those rows at `38 + 4 + topLine * 26 + 3` px, where `topLine` is the number of text rows above the gap in the visible window (`PanelImage.topLine`, part of the layout key so scrolling rebuilds the page and resends the pixels). The 26 px row height is an estimate, not measured on the glasses. The backend letterboxes pictures onto 288x120.
+
 ## Observed Issues and Learnings
 
 - Even Hub text/list container limits are strict on device and simulator. Message display must be byte-bounded, not character-bounded, because content over 999 UTF-8 bytes can fail rendering or leave the glasses on a stale screen.
