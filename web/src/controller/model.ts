@@ -463,19 +463,16 @@ function messageDisplayPages(messages: Message[]): MessageDisplayPage[] {
 
   const blocks = messageDisplayBlocks(messages)
   const pages: MessageDisplayPage[] = []
-  let endExclusive = blocks.length
 
-  while (endExclusive > 0) {
+  // Continuous scrolling: one page per block, each a window of blocks that ends at that block. A swipe
+  // therefore moves the view by a single message instead of jumping a whole screenful.
+  for (let endExclusive = 1; endExclusive <= blocks.length; endExclusive += 1) {
     const selected: MessageDisplayBlock[] = []
-    let start = endExclusive
 
     for (let index = endExclusive - 1; index >= 0; index -= 1) {
       const block = blocks[index]
       if (block.box || block.imageMessageId) {
-        if (selected.length === 0) {
-          selected.unshift(block)
-          start = index
-        }
+        if (selected.length === 0) selected.unshift(block)
         break
       }
 
@@ -484,16 +481,13 @@ function messageDisplayPages(messages: Message[]): MessageDisplayPage[] {
       if (utf8ByteLength(candidate.map((item) => item.text).join('\n')) > TEXT_CONTAINER_BYTE_LIMIT) break
 
       selected.unshift(block)
-      start = index
     }
 
     if (selected.length === 0) {
       selected.unshift({ text: trimUtf8Bytes(blocks[endExclusive - 1].text, TEXT_CONTAINER_BYTE_LIMIT) })
-      start = endExclusive - 1
     }
 
-    pages.unshift(formatPage(selected))
-    endExclusive = start
+    pages.push(formatPage(selected))
   }
 
   messagePageCache.set(messages, pages)

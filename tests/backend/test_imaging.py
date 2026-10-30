@@ -13,11 +13,22 @@ def jpeg(size, color=(120, 160, 200)):
     return buffer.getvalue()
 
 
-def test_large_photo_is_fitted_inside_the_glasses_limit_keeping_aspect_ratio():
-    png, width, height = prepare_glasses_image(jpeg((1600, 1600)))
+def test_every_photo_is_letterboxed_onto_the_full_container_so_the_host_never_scales_it():
+    for size in [(1600, 1600), (1600, 900), (900, 1600), (8, 8)]:
+        png, width, height = prepare_glasses_image(jpeg(size))
+        assert (width, height) == (288, 144)
+        decoded = Image.open(io.BytesIO(png))
+        assert decoded.size == (288, 144) and decoded.mode == "L"
 
-    assert (width, height) == (144, 144)
-    assert Image.open(io.BytesIO(png)).mode == "L"
+
+def test_picture_is_whole_not_cropped_and_keeps_its_aspect_ratio():
+    # A white square on black: the visible part must stay square and centred (144x144), with black bars either side.
+    buffer = io.BytesIO()
+    Image.new("L", (1000, 1000), 255).save(buffer, format="PNG")
+    png, _, _ = prepare_glasses_image(buffer.getvalue())
+    decoded = Image.open(io.BytesIO(png))
+    assert decoded.getpixel((144, 72)) > 200
+    assert decoded.getpixel((2, 72)) == 0 and decoded.getpixel((285, 72)) == 0
 
 
 def test_greyscale_is_snapped_to_sixteen_levels():
@@ -29,12 +40,6 @@ def test_greyscale_is_snapped_to_sixteen_levels():
 
     levels = {value for _, value in Image.open(io.BytesIO(png)).getcolors(maxcolors=256)}
     assert len(levels) <= 16
-
-
-def test_tiny_images_are_padded_to_the_minimum_container_size():
-    _, width, height = prepare_glasses_image(jpeg((8, 8)))
-
-    assert width >= 20 and height >= 20
 
 
 def test_bad_input_raises_a_clean_error():

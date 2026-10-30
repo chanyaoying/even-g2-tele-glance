@@ -384,7 +384,7 @@ describe('screenModel', () => {
     }
   })
 
-  it('scrolls compact messages by full visible pages instead of dropping one message at a time', () => {
+  it('scrolls compact messages continuously, one message per step', () => {
     const state: AppState = {
       screen: 'sidebar', focus: 'messages',
       chats: [], selectedChatIndex: 0,
@@ -405,9 +405,15 @@ describe('screenModel', () => {
       ],
     }
 
-    const pageCount = messageScrollUnitCount(state.messages)
-    expect(pageCount).toBeGreaterThan(1)
-    expect(pageCount).toBeLessThan(12)
+    // One scroll position per message, so a swipe moves the view by a single message.
+    expect(messageScrollUnitCount(state.messages)).toBe(12)
+    const newest = screenModel(state)
+    const oneUp = screenModel({ ...state, scrollOffset: 1 })
+    const body = (m: ReturnType<typeof screenModel>) => (m.kind === 'sidebar' ? m.panelBody : '')
+    expect(body(newest)).toContain('msg12')
+    expect(body(oneUp)).not.toContain('msg12')
+    expect(body(oneUp)).toContain('msg11')
+    expect(body(newest)).toContain('msg11') // the windows overlap: nothing jumps off screen
   })
   it('keeps short messages compact and boxes messages over twenty-five words', () => {
     const shortState: AppState = {

@@ -1261,7 +1261,7 @@ describe('TelegramAppController', () => {
       focus: 'messages',
       messages: [...olderMessages, ...messages],
       cursor: 80,
-      scrollOffset: 0,
+      scrollOffset: 1, // scrolling moves one message at a time: the freshly loaded older message is now in view
     })
   })
 
@@ -1371,7 +1371,7 @@ describe('TelegramAppController', () => {
       focus: 'messages',
       messages: [...olderMessages, ...[...reversedMessages].reverse()],
       cursor: 80,
-      scrollOffset: 0,
+      scrollOffset: 2, // 1 (after load) -> 2 -> 3, then one step back down
       isNewestPage: false,
     })
   })

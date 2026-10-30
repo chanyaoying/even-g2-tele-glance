@@ -37,7 +37,7 @@ const OLDER_PAGE_LIMIT = 24
 // Optimistic folder loading: once the chat list is up and the user is idle, fetch each folder's first page
 // so switching folders later is instant.
 const FOLDER_WARM_DELAY_MS = 2500
-const OLDER_PREFETCH_LOW_WATER = 8
+const OLDER_PREFETCH_LOW_WATER = 14
 const PHOTO_CACHE_LIMIT = 16
 const PHOTO_PREFETCH_COUNT = 2
 const CHAT_LIST_LIMIT = 20
