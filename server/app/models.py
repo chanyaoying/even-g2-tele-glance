@@ -71,7 +71,7 @@ class MessageSummary(ApiModel):
     text: str
     sent_at: Optional[datetime] = None
     outgoing: bool = False
-    media: Optional[str] = None  # "photo" when the message carries a photo the glasses can show
+    media: Optional[str] = None  # "photo" or "sticker" when the message carries a picture the glasses can show
 
 
 class PhotoResponse(ApiModel):

@@ -47,7 +47,7 @@ export type Message = {
   text: string
   sentAt?: string | null
   outgoing?: boolean
-  /** "photo" when the message carries a photo the glasses can show inline. */
+  /** "photo" or "sticker" when the message carries a picture the glasses can show inline. */
   media?: string | null
   /** Set locally on the oldest unread message when a thread is opened; drives the "last read" divider. */
   firstUnread?: boolean

@@ -415,6 +415,17 @@ describe('screenModel', () => {
     expect(body(oneUp)).toContain('msg11')
     expect(body(newest)).toContain('msg11') // the windows overlap: nothing jumps off screen
   })
+  it('shows a sticker like a photo: its own page with the picture beside a short text column', () => {
+    const model = screenModel({
+      screen: 'sidebar', focus: 'messages',
+      chats: [], selectedChatIndex: 0,
+      chat: { id: '7', title: 'Project', kind: 'group' },
+      messages: [{ id: '41', sender: 'Alice', text: '[sticker]', media: 'sticker' }],
+    })
+    expect(model.kind === 'sidebar' && model.panelImage).toEqual({ chatId: '7', messageId: '41' })
+    expect(model.kind === 'sidebar' && model.panelBody).toContain('[sticker]')
+  })
+
   it('keeps short messages compact and boxes messages over twenty-five words', () => {
     const shortState: AppState = {
       screen: 'sidebar', focus: 'messages',

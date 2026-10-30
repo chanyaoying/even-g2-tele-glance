@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
@@ -54,6 +55,7 @@ class RichMessage:
     raw_text: str
     date: datetime
     media: object = None
+    sticker: object = None
     action: object = None
     out: bool = False
     sender: Optional[Entity] = None
@@ -423,3 +425,58 @@ def test_get_photo_rejects_a_message_without_a_photo():
 
     with pytest.raises(TelegramServiceError, match="no photo"):
         asyncio.run(service.get_photo(1, 41))
+
+
+def _sticker_message(message_id, mime):
+    document = SimpleNamespace(mime_type=mime)
+    return RichMessage(id=message_id, message="", raw_text="", media=None, sticker=document, date=datetime(2026, 1, 1, tzinfo=timezone.utc))
+
+
+def test_stickers_are_flagged_as_pictures_with_a_text_fallback():
+    normalized = normalize_message(_sticker_message(50, "image/webp"))
+
+    assert normalized.media == "sticker"
+    assert normalized.text == "[sticker]"
+
+
+class _StickerClient(_PhotoClient):
+    """Records whether the full file or only the preview thumbnail was requested."""
+
+    async def download_media(self, message, file=None, thumb=None):
+        self.downloads += 1
+        self.thumb = thumb
+        return self.payload
+
+
+def _transparent_webp():
+    pil = __import__("pytest").importorskip("PIL.Image")
+    import io
+
+    buffer = io.BytesIO()
+    image = pil.new("RGBA", (512, 512), (0, 0, 0, 0))
+    for x in range(128, 384):
+        for y in range(128, 384):
+            image.putpixel((x, y), (255, 255, 255, 255))
+    image.save(buffer, format="WEBP")
+    return buffer.getvalue()
+
+
+def test_a_static_sticker_downloads_the_real_file_on_a_black_background():
+    pil = __import__("pytest").importorskip("PIL.Image")
+    import base64, io
+
+    client = _StickerClient(_sticker_message(51, "image/webp"), _transparent_webp())
+    photo = asyncio.run(_photo_service(client).get_photo(1, 51))
+
+    assert client.thumb is None  # the sticker file itself, not a thumbnail
+    image = pil.open(io.BytesIO(base64.b64decode(photo.data)))
+    assert image.size == (288, 144)
+    assert image.getpixel((144, 72)) > 200  # the white square
+    assert image.getpixel((144, 4)) == 0  # transparent area is black, not whatever colour hides under it
+
+
+def test_an_animated_sticker_uses_its_preview_thumbnail():
+    client = _StickerClient(_sticker_message(52, "application/x-tgsticker"), _transparent_webp())
+    asyncio.run(_photo_service(client).get_photo(1, 52))
+
+    assert client.thumb == -1

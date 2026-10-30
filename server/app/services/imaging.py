@@ -22,7 +22,15 @@ def prepare_glasses_image(raw: bytes, max_width: int = 288, max_height: int = 14
 
     try:
         with Image.open(io.BytesIO(raw)) as source:
-            image = ImageOps.exif_transpose(source).convert("L")
+            oriented = ImageOps.exif_transpose(source)
+            if oriented.mode in ("RGBA", "LA", "PA") or "transparency" in oriented.info:
+                # Stickers are cut-outs: put them on black (the display's "off") instead of letting the
+                # colour hidden under transparent pixels decide the background.
+                rgba = oriented.convert("RGBA")
+                backdrop = Image.new("RGBA", rgba.size, (0, 0, 0, 255))
+                image = Image.alpha_composite(backdrop, rgba).convert("L")
+            else:
+                image = oriented.convert("L")
     except Exception as exc:  # Pillow raises many unrelated types for bad input
         raise ImagingError(f"image could not be decoded: {exc}") from exc
 

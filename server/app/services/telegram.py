@@ -257,8 +257,8 @@ def normalize_message(message: Any, entities_by_peer: Optional[dict[int, Any]] =
     if sender is None and entities_by_peer:
         sender = entities_by_peer.get(_message_peer_key(message))
     sender_name = _display_name(sender) if sender is not None else None
-    media = "photo" if _is_photo_message(message) else None
-    text = _photo_text(message) if media else _message_readable_text(message)
+    media = "photo" if _is_photo_message(message) else "sticker" if _is_sticker_message(message) else None
+    text = _photo_text(message) if media == "photo" else "[sticker]" if media == "sticker" else _message_readable_text(message)
     return MessageSummary(
         id=int(getattr(message, "id")),
         sender=sender_name,
@@ -272,6 +272,17 @@ def normalize_message(message: Any, entities_by_peer: Optional[dict[int, Any]] =
 def _is_photo_message(message: Any) -> bool:
     # Only real photos: link previews also expose `.photo` but are not worth an image download.
     return type(getattr(message, "media", None)).__name__ == "MessageMediaPhoto"
+
+
+def _is_sticker_message(message: Any) -> bool:
+    # Telethon exposes the document as `.sticker` only when it carries the sticker attribute.
+    return getattr(message, "sticker", None) is not None
+
+
+def _sticker_is_static(message: Any) -> bool:
+    # Static stickers are WebP files; animated (.tgs) and video (.webm) ones only offer a still preview thumbnail.
+    document = getattr(message, "sticker", None)
+    return str(getattr(document, "mime_type", "") or "").lower() == "image/webp"
 
 
 def _photo_text(message: Any) -> str:
@@ -942,10 +953,14 @@ class TelethonTelegramService:
         try:
             entity = await self._get_entity(chat_id)
             message = await asyncio.wait_for(client.get_messages(entity, ids=int(message_id)), timeout=20)
-            if message is None or not _is_photo_message(message):
+            if message is None or not (_is_photo_message(message) or _is_sticker_message(message)):
                 raise TelegramServiceError("Telegram message has no photo")
-            # thumb=-1 is the largest size Telegram offers for the photo: plenty for a 288x144 screen.
-            raw = await asyncio.wait_for(client.download_media(message, file=bytes, thumb=-1), timeout=40)
+            if _is_sticker_message(message) and _sticker_is_static(message):
+                # A static sticker is itself a small WebP picture: use the real file.
+                raw = await asyncio.wait_for(client.download_media(message, file=bytes), timeout=40)
+            else:
+                # thumb=-1 is the largest size Telegram offers (photo, or the still preview of an animated sticker).
+                raw = await asyncio.wait_for(client.download_media(message, file=bytes, thumb=-1), timeout=40)
             png, width, height = await asyncio.to_thread(prepare_glasses_image, raw or b"", max_width, max_height)
         except ImagingError as exc:
             raise TelegramServiceError(str(exc)) from exc

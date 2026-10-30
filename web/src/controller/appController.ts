@@ -1228,7 +1228,7 @@ export class TelegramAppController {
   /** Warm the newest photos of an opened thread so they are ready when scrolled to. */
   private prefetchPhotos(chat: Chat, messages: Message[]) {
     if (!this.bridge.updateImage) return
-    const photos = messages.filter((message) => message.media === 'photo').slice(-PHOTO_PREFETCH_COUNT)
+    const photos = messages.filter((message) => message.media === 'photo' || message.media === 'sticker').slice(-PHOTO_PREFETCH_COUNT)
     for (const message of photos) {
       void this.loadPhoto(String(chat.id), String(message.id)).catch(() => undefined)
     }

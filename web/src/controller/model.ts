@@ -607,7 +607,7 @@ function formatMessageBlocks(message: Message, dayLabel = ''): MessageDisplayBlo
     return formatMessageBox(String(message.id), [dayLabel, time, sender].filter(Boolean).join(' '), text)
   }
 
-  if (message.media === 'photo') {
+  if (message.media === 'photo' || message.media === 'sticker') {
     // A photo gets a page of its own: a narrow text column on the left, the picture on the right.
     const heading = (time ? `${time} ${sender}` : sender).slice(0, PHOTO_TEXT_CHARS)
     const photoRows = [heading, ...splitDisplayWordRows(text, PHOTO_TEXT_CHARS, MESSAGE_ROW_BYTE_LIMIT)]
