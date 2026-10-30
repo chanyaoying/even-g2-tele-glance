@@ -67,6 +67,8 @@ export class EvenHubGlassesBridge implements GlassesBridge {
   private pendingImage: Uint8Array | undefined
   private imageSending: Promise<boolean> | undefined
   private audioOn = false
+  /** 0 = full sidebar layout; raised when the host rejects a page, until pages are accepted again. */
+  private layoutTier: LayoutTier = 0
   private audioChain: Promise<void> = Promise.resolve()
   private pageGeneration = 0
   private renderSequence = 0
@@ -194,7 +196,7 @@ export class EvenHubGlassesBridge implements GlassesBridge {
       await this.audioChain
 
       if (this.hasRendered) {
-        const container = buildPage(model, RebuildPageContainer)
+        const container = buildPage(model, RebuildPageContainer, this.layoutTier)
         logTeleGlanceTest('bridge', { method: 'rebuildPageContainer', args: { sequence, generation, hasPanelBox: model.kind === 'sidebar' ? Boolean(model.panelBox) : false } })
         // Log the render event BEFORE the SDK call. The simulator's
         // `rebuildPageContainer` can hang for several seconds on some
@@ -219,7 +221,13 @@ export class EvenHubGlassesBridge implements GlassesBridge {
         // immediately, and any in-flight SDK call from a previous
         // render is abandoned cleanly.
         this.sdk.rebuildPageContainer(container).then(
-          () => {
+          (accepted) => {
+            // The host answers `false` when it refuses a page. Ignoring that left the glasses on the previous
+            // screen while the phone moved on, so fall back to a simpler layout and try again.
+            if (accepted === false) {
+              this.handleRejectedPage(model, generation, 'rebuildPageContainer', false)
+              return
+            }
             this.lastSidebarModel = model.kind === 'sidebar' ? model : undefined
             logTeleGlanceTest('render', { sequence, generation, model: summarizeScreenModel(model) })
           },
@@ -233,11 +241,15 @@ export class EvenHubGlassesBridge implements GlassesBridge {
           },
         )
       } else {
-        const container = buildPage(model, CreateStartUpPageContainer)
+        const container = buildPage(model, CreateStartUpPageContainer, this.layoutTier)
         logTeleGlanceTest('bridge', { method: 'createStartUpPageContainer', args: { sequence, generation, hasPanelBox: model.kind === 'sidebar' ? Boolean(model.panelBox) : false } })
         logTeleGlanceTest('render', { sequence, generation, model: summarizeScreenModel(model), attempted: true })
         this.sdk.createStartUpPageContainer(container).then(
-          () => {
+          (result) => {
+            if (typeof result === 'number' && result !== 0) {
+              this.handleRejectedPage(model, generation, 'createStartUpPageContainer', result)
+              return
+            }
             this.hasRendered = true
             this.lastSidebarModel = model.kind === 'sidebar' ? model : undefined
             logTeleGlanceTest('render', { sequence, generation, model: summarizeScreenModel(model) })
@@ -251,6 +263,18 @@ export class EvenHubGlassesBridge implements GlassesBridge {
       this.fullRenderInFlight = false
       this.emitQueueDepth('full-render-end')
     }
+  }
+
+  /**
+   * The host refused a page. Log it, step down to a simpler sidebar layout and render the same screen again, unless a
+   * newer render has already replaced it. After the simplest layout there is nothing left to try.
+   */
+  private handleRejectedPage(model: ScreenModel, generation: number, method: string, result: unknown) {
+    logTeleGlanceTest('render.rejected', { generation, method, result: String(result), tier: this.layoutTier })
+    if (model.kind !== 'sidebar' || this.layoutTier >= 2) return
+    if (generation !== this.pageGeneration) return
+    this.layoutTier = (this.layoutTier + 1) as LayoutTier
+    void this.render(model).catch(() => undefined)
   }
 
   /**
@@ -536,15 +560,23 @@ export class EvenHubGlassesBridge implements GlassesBridge {
 }
 
 type PageContainerClass = typeof CreateStartUpPageContainer | typeof RebuildPageContainer
+type LayoutTier = 0 | 1 | 2
 
 
-function buildPage(model: ScreenModel, Container: PageContainerClass) {
-  if (model.kind === 'sidebar') return buildSidebarPage(model, Container)
+function buildPage(model: ScreenModel, Container: PageContainerClass, tier: LayoutTier = 0) {
+  if (model.kind === 'sidebar') return buildSidebarPage(model, Container, tier)
   if (model.kind === 'list') return buildListPage(model, Container)
   return buildTextPage(model, Container)
 }
 
-function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Container: PageContainerClass) {
+function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Container: PageContainerClass, tier: LayoutTier = 0) {
+  // Tier 0: stacking order + popup container. Tier 1: no stacking order. Tier 2: the original layout (no popup
+  // container; a popup is folded into the body text). Lower tiers exist because a host that rejects the richer page
+  // leaves the glasses stuck on the previous screen.
+  const z = (index: number) => (tier === 0 ? { zOrderIndex: index } : {})
+  if (tier >= 2 && model.popup) {
+    model = { ...model, panelBody: `${model.popup.title}\n\n${model.popup.body}`, popup: undefined }
+  }
   const fullWidth = model.fullWidth === true
 
   const outerBorder = new TextContainerProperty({
@@ -559,7 +591,7 @@ function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Cont
     borderColor: 8,
     paddingLength: 0,
     isEventCapture: 0,
-    zOrderIndex: 1,
+    ...z(1),
   })
   const title = new TextContainerProperty({
     containerID: 1,
@@ -573,7 +605,7 @@ function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Cont
     borderColor: 8,
     paddingLength: 4,
     isEventCapture: 0,
-    zOrderIndex: 2,
+    ...z(2),
   })
   const overlay = new TextContainerProperty({
     containerID: 2,
@@ -587,7 +619,7 @@ function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Cont
     borderColor: 8,
     paddingLength: 0,
     isEventCapture: 1,
-    zOrderIndex: 3,
+    ...z(3),
   })
   const sidebarSeparator = new TextContainerProperty({
     containerID: 3,
@@ -601,7 +633,7 @@ function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Cont
     borderColor: 8,
     paddingLength: 0,
     isEventCapture: 0,
-    zOrderIndex: 4,
+    ...z(4),
   })
   const panelBody = new TextContainerProperty({
     containerID: 6,
@@ -615,7 +647,7 @@ function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Cont
     borderColor: 8,
     paddingLength: 4,
     isEventCapture: 0,
-    zOrderIndex: 6,
+    ...z(6),
   })
   const panelBox = model.panelBox
     ? new TextContainerProperty({
@@ -630,7 +662,7 @@ function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Cont
         borderColor: 8,
         paddingLength: 8,
         isEventCapture: 0,
-        zOrderIndex: 7,
+        ...z(7),
       })
     : new TextContainerProperty({
         containerID: 7,
@@ -644,7 +676,7 @@ function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Cont
         borderColor: 8,
         paddingLength: 0,
         isEventCapture: 0,
-        zOrderIndex: 7,
+        ...z(7),
       })
   // Always present (stable container ids). Without a photo it is a 20x20 blank in the gap above the footer.
   const panelImage = model.panelImage
@@ -655,7 +687,7 @@ function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Cont
         yPosition: 40,
         width: 288,
         height: 144,
-        zOrderIndex: 8,
+        ...z(8),
       })
     : new ImageContainerProperty({
         containerID: IMAGE_CONTAINER_ID,
@@ -664,7 +696,7 @@ function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Cont
         yPosition: 226,
         width: 20,
         height: 20,
-        zOrderIndex: 8,
+        ...z(8),
       })
   const footer = new TextContainerProperty({
     containerID: 4,
@@ -678,7 +710,7 @@ function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Cont
     borderColor: 8,
     paddingLength: 4,
     isEventCapture: 0,
-    zOrderIndex: 9,
+    ...z(9),
   })
   const sidebar = new TextContainerProperty({
     containerID: 5,
@@ -692,7 +724,7 @@ function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Cont
     borderColor: 8,
     paddingLength: 4,
     isEventCapture: 0,
-    zOrderIndex: 5,
+    ...z(5),
   })
   // Dialog drawn above everything else. Always present (stable ids): a 1x1 blank when there is no popup.
   const popup = model.popup
@@ -708,7 +740,7 @@ function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Cont
         borderColor: 8,
         paddingLength: 10,
         isEventCapture: 0,
-        zOrderIndex: 10,
+        ...z(10),
       })
     : new TextContainerProperty({
         containerID: POPUP_CONTAINER_ID,
@@ -722,13 +754,15 @@ function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Cont
         borderColor: 8,
         paddingLength: 0,
         isEventCapture: 0,
-        zOrderIndex: 10,
+        ...z(10),
       })
   // The SDK native list moves its highlight without reporting each movement to
   // the app, so it cannot keep the right-side preview in sync. Use one event
   // overlay plus an app-rendered sidebar marker instead.
-  const list = hiddenListContainer(0)
-  const textObjects = [outerBorder, title, overlay, sidebarSeparator, sidebar, panelBody, panelBox, footer, popup]
+  const list = hiddenListContainer(tier === 0 ? 0 : undefined)
+  const textObjects = tier >= 2
+    ? [outerBorder, title, overlay, sidebarSeparator, sidebar, panelBody, panelBox, footer]
+    : [outerBorder, title, overlay, sidebarSeparator, sidebar, panelBody, panelBox, footer, popup]
   return new Container({
     containerTotalNum: textObjects.length + 2,
     textObject: textObjects,

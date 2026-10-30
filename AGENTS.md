@@ -213,6 +213,8 @@ Requirements:
 
 - Unread-aware opening: a thread with unread messages opens at its last read point, not the newest message. The Nth newest incoming message (N = the thread's unread count) is flagged `firstUnread` and a `----- last read -----` divider is drawn before it; the view opens a couple of blocks past it. Nothing is acknowledged as read until the user scrolls down to the newest message, and refreshes keep the same message in view (`keepPlace`). If more messages are unread than are loaded, it opens at the newest message as before.
 
+- Page rejection fallback: the host answers `false` (rebuild) or a non-zero code (startup) when it refuses a page, and ignoring that leaves the glasses on the previous screen while the phone moves on (seen as being stuck on "Checking Telegram session..."). The bridge now checks the result and steps the sidebar layout down: tier 0 (stacking order + popup container) -> tier 1 (no stacking order) -> tier 2 (original layout, popup folded into body text), staying on the tier the host accepted. Debug events show which screen the glasses are on: container name `body` = text page, `event-overlay` = sidebar/list page.
+
 ## Observed Issues and Learnings
 
 - Even Hub text/list container limits are strict on device and simulator. Message display must be byte-bounded, not character-bounded, because content over 999 UTF-8 bytes can fail rendering or leave the glasses on a stale screen.

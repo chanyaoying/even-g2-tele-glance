@@ -600,4 +600,83 @@ describe('EvenHubGlassesBridge photos', () => {
     expect(shown.textObject.find((item) => item.containerID === 10)?.content).toContain('> Send')
     expect(hidden.textObject.find((item) => item.containerID === 10)).toMatchObject({ content: '', width: 1 })
   })
+
+  describe('when the host rejects a sidebar page', () => {
+    const base = {
+      kind: 'sidebar' as const,
+      title: 'Project',
+      sidebarTitle: 'Chats',
+      sidebarItems: [],
+      sidebarSelected: 0,
+      panelTitle: '',
+      panelBody: 'hello',
+      panelFooter: 'footer',
+      fullWidth: true,
+      focus: 'panel' as const,
+    }
+    type Page = { textObject: Array<{ containerID: number; zOrderIndex?: number; content?: string }>; containerTotalNum: number }
+
+    function bridgeThatAccepts(accept: (page: Page) => boolean) {
+      const pages: Page[] = []
+      const bridge = new EvenHubGlassesBridge({
+        async createStartUpPageContainer(container: unknown) {
+          pages.push(container as Page)
+          return 0
+        },
+        async rebuildPageContainer(container: unknown) {
+          pages.push(container as Page)
+          return accept(container as Page)
+        },
+        async audioControl() {
+          return undefined
+        },
+        onEvenHubEvent() {
+          return undefined
+        },
+      })
+      return { bridge, pages }
+    }
+
+    it('retries without the stacking order, then in the original layout, until a page is accepted', async () => {
+      const hasZ = (page: Page) => page.textObject.some((item) => item.zOrderIndex !== undefined)
+      const hasPopup = (page: Page) => page.textObject.some((item) => item.containerID === 10)
+      // Accept only the original layout: no stacking order and no popup container.
+      const { bridge, pages } = bridgeThatAccepts((page) => !hasZ(page) && !hasPopup(page))
+
+      await bridge.render({ kind: 'text', title: 'Loading', body: 'Checking Telegram session...' }) // startup page
+      await bridge.render(base)
+      await flushAsync(20)
+
+      const sidebarPages = pages.slice(1)
+      expect(sidebarPages.length).toBe(3)
+      expect(hasZ(sidebarPages[0])).toBe(true)
+      expect(hasZ(sidebarPages[1])).toBe(false)
+      expect(hasPopup(sidebarPages[1])).toBe(true)
+      expect(hasZ(sidebarPages[2]) || hasPopup(sidebarPages[2])).toBe(false)
+
+      // Later renders keep using the layout the host accepted instead of failing again first.
+      await bridge.render({ ...base, panelBody: 'next' })
+      await flushAsync(20)
+      expect(pages.length).toBe(5)
+      expect(hasZ(pages[4]) || hasPopup(pages[4])).toBe(false)
+    })
+
+    it('shows a popup as body text in the original layout', async () => {
+      const { bridge, pages } = bridgeThatAccepts((page) => !page.textObject.some((item) => item.zOrderIndex !== undefined || item.containerID === 10))
+      await bridge.render({ kind: 'text', title: 'Loading', body: 'x' })
+      await bridge.render({ ...base, popup: { title: 'Confirm reply', body: 'hi\n\n> Send\n  Cancel' } })
+      await flushAsync(20)
+
+      const accepted = pages[pages.length - 1]
+      expect(accepted.textObject.find((item) => item.containerID === 6)?.content).toContain('> Send')
+    })
+
+    it('does not retry forever when every layout is refused', async () => {
+      const { bridge, pages } = bridgeThatAccepts(() => false)
+      await bridge.render({ kind: 'text', title: 'Loading', body: 'x' })
+      await bridge.render(base)
+      await flushAsync(30)
+      expect(pages.length).toBe(4) // startup + three sidebar attempts
+    })
+  })
 })
