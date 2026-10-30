@@ -15,7 +15,7 @@
     "Fixture Topic Six"
   ],
   "panelBody": "",
-  "panelFooter": "Older messages | Swipe scroll | Click record | Double click back",
+  "panelFooter": "Older messages | Swipe scroll | Hold to record | Double click back",
   "panelBox": {
     "heading": "Topic Three 1/5",
     "contentLength": 106,

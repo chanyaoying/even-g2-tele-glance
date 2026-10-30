@@ -62,7 +62,7 @@ describe('screenModel', () => {
       // accepts, otherwise the user has no way to discover
       // swipe-scrolling. Keep the assertion in sync with the
       // `model.ts` sidebar.messages footer.
-      expect(model.panelFooter).toBe('Swipe scroll | Click record | Double click back')
+      expect(model.panelFooter).toBe('Swipe scroll | Hold to record | Double click back')
     }
   })
 

@@ -440,7 +440,7 @@ sidebarTitle: 'Topics'                       sidebarTitle: l.titleTopics
 // Before                                    // After
 state.topic ? 'Topics' : 'Chats'             state.topic ? l.titleTopics : l.titleChats
 footerText(state.status,                     footerText(state.status,
-  'Swipe scroll | Click record |              l.footerSwipeScroll)
+  'Swipe scroll | Hold to record |              l.footerSwipeScroll)
   Double click back')
 ```
 
@@ -488,8 +488,8 @@ title: 'Sending reply'                       title: l.titleSendingReply
 title: 'Reply sent'                          title: l.titleReplySent
 'Converting voice...'                        l.bodyConvertingVoice
 'Topics' : 'Chats'                           l.titleTopics : l.titleChats
-'Click stop | Double click cancel'           l.footerClickStop
-'Swipe scroll | Click record |               l.footerSwipeScroll
+'Release to stop | Double click cancel'           l.footerClickStop
+'Swipe scroll | Hold to record |               l.footerSwipeScroll
   Double click back'
 ```
 

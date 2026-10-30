@@ -40,7 +40,7 @@ describe('EvenHubGlassesBridge', () => {
       kind: 'text',
       title: 'Messages',
       body: markerBody,
-      footer: 'Click record | Double click back',
+      footer: 'Hold to record | Double click back',
       box: {
         heading: 'Ada 1/2',
         content: 'there are 230 commits behind available',
@@ -82,7 +82,7 @@ describe('EvenHubGlassesBridge', () => {
       sidebarSelected: 0,
       panelTitle: '',
       panelBody: '',
-      panelFooter: 'Click record',
+      panelFooter: 'Hold to record',
       panelBox: { heading: 'Ada', content: 'Long message' },
       focus: 'panel',
     })
@@ -94,7 +94,7 @@ describe('EvenHubGlassesBridge', () => {
       sidebarSelected: 0,
       panelTitle: '',
       panelBody: 'Short message',
-      panelFooter: 'Click record',
+      panelFooter: 'Hold to record',
       focus: 'panel',
     })
 
@@ -129,7 +129,7 @@ describe('EvenHubGlassesBridge', () => {
       sidebarSelected: 0,
       panelTitle: '',
       panelBody: Array.from({ length: 7 }, (_, index) => `line ${index + 1}`).join('\n'),
-      panelFooter: 'Swipe scroll | Click record | Double click back',
+      panelFooter: 'Swipe scroll | Hold to record | Double click back',
       fullWidth: true,
       focus: 'panel',
     })
@@ -203,7 +203,7 @@ describe('EvenHubGlassesBridge', () => {
       sidebarSelected: 1,
       panelTitle: '',
       panelBody: 'Message',
-      panelFooter: 'Click record',
+      panelFooter: 'Hold to record',
       focus: 'panel',
     })
 

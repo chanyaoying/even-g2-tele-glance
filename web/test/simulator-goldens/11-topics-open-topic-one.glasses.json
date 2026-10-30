@@ -15,6 +15,6 @@
     "Fixture Topic Six"
   ],
   "panelBody": "Topic One: Fixture topic one message body\n  includes fixture-topic-one-body.\n\nReviewer: Topic one second message validates\n  scrolling without reset.",
-  "panelFooter": "Swipe scroll | Click record | Double click back",
+  "panelFooter": "Swipe scroll | Hold to record | Double click back",
   "panelBox": null
 }

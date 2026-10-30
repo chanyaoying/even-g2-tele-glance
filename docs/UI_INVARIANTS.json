@@ -337,7 +337,7 @@
         "panelBodyContains": {
           "fromState": "messages[*].text"
         },
-        "panelFooterDefault": "Swipe scroll | Click record | Double click back"
+        "panelFooterDefault": "Swipe scroll | Hold to record | Double click back"
       },
       "transitions": {
         "press": "sidebarRecording",
@@ -369,7 +369,7 @@
         "panelBodyContains": {
           "fromState": "messages[*].text"
         },
-        "panelFooterDefault": "Swipe scroll | Click record | Double click back"
+        "panelFooterDefault": "Swipe scroll | Hold to record | Double click back"
       },
       "transitions": {
         "press": "sidebarRecording",
@@ -452,7 +452,7 @@
       },
       "right": {
         "panelTitle": "Recording",
-        "panelFooterDefault": "Click stop | Double click cancel"
+        "panelFooterDefault": "Release to stop | Double click cancel"
       },
       "transitions": {
         "press": "sidebarTranscribing",
@@ -577,7 +577,7 @@
         "sidebarTitle": "Chats"
       },
       "right": {
-        "panelFooterDefault": "Swipe scroll | Click record | Double click back"
+        "panelFooterDefault": "Swipe scroll | Hold to record | Double click back"
       },
       "transitions": {
         "press": "sidebarRecording",
@@ -1164,7 +1164,7 @@
         ],
         "renderBodyNotContains": [
           "Swipe scroll",
-          "Click record",
+          "Hold to record",
           "Double click back"
         ]
       },
@@ -1181,7 +1181,7 @@
         },
         "renderBodyContains": [
           "Swipe scroll",
-          "Click record",
+          "Hold to record",
           "Double click back"
         ]
       },

@@ -13,6 +13,6 @@
     "Fixture Archive"
   ],
   "panelBody": "Me: Alpha outgoing marker for visual\n  validation.\n\nMe: Fixture transcript",
-  "panelFooter": "Sent | Swipe scroll | Click record | Double click back",
+  "panelFooter": "Sent | Swipe scroll | Hold to record | Double click back",
   "panelBox": null
 }

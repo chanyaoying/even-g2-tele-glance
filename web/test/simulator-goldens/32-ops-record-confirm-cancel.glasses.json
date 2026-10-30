@@ -13,6 +13,6 @@
     "Fixture Archive"
   ],
   "panelBody": "Fixture Ops: Ops message page contains\n  fixture-ops-body for chat index\n  two.\n\nSRE: Ops latency sample message should\n  remain readable.",
-  "panelFooter": "Swipe scroll | Click record | Double click back",
+  "panelFooter": "Swipe scroll | Hold to record | Double click back",
   "panelBox": null
 }

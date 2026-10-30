@@ -15,6 +15,6 @@
     "Fixture Topic Six"
   ],
   "panelBody": "Older Fixture: Older fixture page before\n  110.\n\nOlder Fixture: Older fixture content\n  validates up-scroll loading.",
-  "panelFooter": "Older messages | Swipe scroll | Click record | Double click back",
+  "panelFooter": "Older messages | Swipe scroll | Hold to record | Double click back",
   "panelBox": null
 }

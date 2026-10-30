@@ -13,6 +13,6 @@
     "Fixture Archive"
   ],
   "panelBody": "Fixture Long: Short follow-up so pagination\n  logic can detect an older page\n  boundary below.",
-  "panelFooter": "Swipe scroll | Click record | Double click back",
+  "panelFooter": "Swipe scroll | Hold to record | Double click back",
   "panelBox": null
 }

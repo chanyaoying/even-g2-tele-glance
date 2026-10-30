@@ -379,7 +379,7 @@ export class TelegramAppController {
       const inMessages = here.screen === 'sidebar' && here.focus === 'messages'
       if (!inMessages && here.screen !== 'sidebarRecording') return // hold gestures only mean something here
       this.lastHoldEventAt = Date.now()
-    } else if (input.type === 'press' && Date.now() - this.lastHoldEventAt < HOLD_PRESS_GUARD_MS) {
+    } else if (input.type === 'press' && Date.now() - this.lastHoldEventAt < HOLD_PRESS_GUARD_MS && (this.state.screen === 'sidebarRecording' || (this.state.screen === 'sidebar' && this.state.focus === 'messages'))) {
       return // some firmware also reports a click around a hold; never let it start/stop a recording
     }
 
@@ -797,7 +797,8 @@ export class TelegramAppController {
       await this.startRecordingFromMessages(state, sidebarContext(state))
       return
     }
-    if (input.type !== 'press') return
+    // Recording is hold-to-record only. The simulator fixture harness cannot hold, so it keeps tap-to-record.
+    if (input.type !== 'press' || !isTeleGlanceFixtureMode()) return
 
     await this.scheduleMessagePress(state)
   }
@@ -970,6 +971,7 @@ export class TelegramAppController {
       return
     }
     if (input.type === 'longPressRelease' && !this.holdRecording) return
+    if (input.type === 'press' && !isTeleGlanceFixtureMode()) return // stop is by releasing the hold
     if (input.type !== 'press' && input.type !== 'longPressRelease') return
     this.holdRecording = false
     await this.setState({

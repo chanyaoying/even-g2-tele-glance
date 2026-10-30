@@ -13,6 +13,6 @@
     "Fixture Archive"
   ],
   "panelBody": "Fixture Alpha: Alpha message page contains\n  fixture-alpha-body for\n  startup testing.\n\nMe: Alpha outgoing marker for visual\n  validation.",
-  "panelFooter": "Click stop | Double click cancel",
+  "panelFooter": "Release to stop | Double click cancel",
   "panelBox": null
 }

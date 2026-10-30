@@ -15,6 +15,6 @@
     "Fixture Topic Six"
   ],
   "panelBody": "Forum Bot: Topic zero warmup body appears\n  before indexed topic validation.",
-  "panelFooter": "Swipe scroll | Click record | Double click back",
+  "panelFooter": "Swipe scroll | Hold to record | Double click back",
   "panelBox": null
 }

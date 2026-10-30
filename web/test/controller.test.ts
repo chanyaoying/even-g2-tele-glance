@@ -1541,39 +1541,32 @@ describe('TelegramAppController', () => {
     expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'chats' })
   })
 
-  it('transitions from sidebar.messages to sidebarRecording after the press debounce elapses', async () => {
-    // The user complained that "click record nothing happens" on the
-    // real glasses; the actual behavior is that a single press on the
-    // message thread schedules a 260ms debounce before it starts
-    // recording, so the user sees no immediate feedback. This test
-    // pins the actual flow so future refactors cannot silently drop
-    // the debounce (which would break the tap-cancel pattern that
-    // the existing harness relies on) or extend it without a
-    // corresponding docs/UI_INVARIANTS update.
+  it('a single press in the message view no longer starts recording (hold only)', async () => {
     const api = fakeApi({ authorized: true })
     const bridge = fakeBridge()
-    // Use a small but non-zero debounce so the test exercises the
-    // timer path, not the zero-delay short-circuit.
-    const controller = new TelegramAppController(api, bridge, { messagePressDelayMs: 50 })
+    const controller = new TelegramAppController(api, bridge, { messagePressDelayMs: 20 })
 
     await controller.init()
-    // Open the first chat so the controller sits on sidebar.messages.
     await controller.dispatch({ type: 'press' })
     await flushAsync()
     expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'messages' })
 
-    // Single press: still on sidebar.messages immediately afterwards.
     await controller.dispatch({ type: 'press' })
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    await flushAsync()
     expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'messages' })
-    // Audio is not enabled yet — the debounce hasn't fired.
     expect(vi.mocked(bridge.setAudioEnabled)).not.toHaveBeenCalledWith(true)
+  })
 
-    // After the debounce elapses, the controller transitions to the
-    // recording screen and enables the microphone.
-    await new Promise((resolve) => setTimeout(resolve, 80))
-    await flushAsync()
+  it('a tap does not stop a held recording', async () => {
+    const api = fakeApi({ authorized: true })
+    const controller = new TelegramAppController(api, fakeBridge(), 0)
+    await controller.init()
+    await controller.dispatch({ type: 'press' })
+    await controller.dispatch({ type: 'longPress' })
+    await new Promise((resolve) => setTimeout(resolve, 400)) // past the duplicate-click guard
+    await controller.dispatch({ type: 'press' })
     expect(controller.snapshot.screen).toBe('sidebarRecording')
-    expect(vi.mocked(bridge.setAudioEnabled)).toHaveBeenCalledWith(true)
   })
 
   it('hold to record: long press starts recording at once and releasing stops and transcribes', async () => {
@@ -1630,9 +1623,9 @@ describe('TelegramAppController', () => {
 
     await controller.init()
     await controller.dispatch({ type: 'press' })
-    await controller.dispatch({ type: 'press' })
+    await controller.dispatch({ type: 'longPress' })
     await controller.dispatch({ type: 'audioChunk', pcm: speechLikePcm() })
-    await controller.dispatch({ type: 'press' })
+    await controller.dispatch({ type: 'longPressRelease' })
 
     expect(bridge.setAudioEnabled).toHaveBeenNthCalledWith(1, true)
     expect(bridge.setAudioEnabled).toHaveBeenNthCalledWith(2, false)
@@ -1681,9 +1674,9 @@ describe('TelegramAppController', () => {
 
     await controller.init()
     await controller.dispatch({ type: 'press' })
-    await controller.dispatch({ type: 'press' })
+    await controller.dispatch({ type: 'longPress' })
     await controller.dispatch({ type: 'audioChunk', pcm: speechLikePcm() })
-    await controller.dispatch({ type: 'press' })
+    await controller.dispatch({ type: 'longPressRelease' })
     await controller.dispatch({ type: 'swipeDown' })
     await controller.dispatch({ type: 'press' })
 
@@ -1700,9 +1693,9 @@ describe('TelegramAppController', () => {
 
     await controller.init()
     await controller.dispatch({ type: 'press' })
-    await controller.dispatch({ type: 'press' })
+    await controller.dispatch({ type: 'longPress' })
     await controller.dispatch({ type: 'audioChunk', pcm: speechLikePcm() })
-    await controller.dispatch({ type: 'press' })
+    await controller.dispatch({ type: 'longPressRelease' })
 
     expect(api.transcribe).toHaveBeenCalledOnce()
     expect(api.sendMessage).not.toHaveBeenCalled()
@@ -1720,9 +1713,9 @@ describe('TelegramAppController', () => {
     await flushAsync()
     expect(controller.snapshot).toMatchObject({ screen: 'sidebar', topic: topics[0] })
 
-    await controller.dispatch({ type: 'press' })
+    await controller.dispatch({ type: 'longPress' })
     await controller.dispatch({ type: 'audioChunk', pcm: speechLikePcm() })
-    await controller.dispatch({ type: 'press' })
+    await controller.dispatch({ type: 'longPressRelease' })
 
     expect(api.transcribe).toHaveBeenCalledOnce()
     expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'messages', topic: topics[0] })
@@ -1734,7 +1727,7 @@ describe('TelegramAppController', () => {
 
     await controller.init()
     await controller.dispatch({ type: 'press' })
-    await controller.dispatch({ type: 'press' })
+    await controller.dispatch({ type: 'longPress' })
     const chunk = new Uint8Array(MAX_RECORDING_BYTES / 2)
     await controller.dispatch({ type: 'audioChunk', pcm: chunk })
     await controller.dispatch({ type: 'audioChunk', pcm: chunk })
@@ -1752,9 +1745,9 @@ describe('TelegramAppController', () => {
 
     await controller.init()
     await controller.dispatch({ type: 'press' })
-    await controller.dispatch({ type: 'press' })
+    await controller.dispatch({ type: 'longPress' })
     // No audio chunks — empty array, no recordable audio.
-    await controller.dispatch({ type: 'press' })
+    await controller.dispatch({ type: 'longPressRelease' })
 
     expect(api.transcribe).not.toHaveBeenCalled()
     expect(api.sendMessage).not.toHaveBeenCalled()
@@ -1768,7 +1761,7 @@ describe('TelegramAppController', () => {
 
     await controller.init()
     await controller.dispatch({ type: 'press' })
-    await controller.dispatch({ type: 'press' })
+    await controller.dispatch({ type: 'longPress' })
 
     // In recording state now: double press cancels.
     await controller.dispatch({ type: 'doublePress' })
@@ -1789,9 +1782,9 @@ describe('TelegramAppController', () => {
 
     await controller.init()
     await controller.dispatch({ type: 'press' })
-    await controller.dispatch({ type: 'press' })
+    await controller.dispatch({ type: 'longPress' })
     await controller.dispatch({ type: 'audioChunk', pcm: speechLikePcm() })
-    await controller.dispatch({ type: 'press' })
+    await controller.dispatch({ type: 'longPressRelease' })
 
     // Transcription completes instantly with the mock — we land on confirm.
     expect(controller.snapshot).toMatchObject({ screen: 'sidebarConfirm', transcript: 'Result', selectedIndex: 0 })
@@ -1818,9 +1811,9 @@ describe('TelegramAppController', () => {
 
     await controller.init()
     await controller.dispatch({ type: 'press' })
-    await controller.dispatch({ type: 'press' })
+    await controller.dispatch({ type: 'longPress' })
     await controller.dispatch({ type: 'audioChunk', pcm: speechLikePcm() })
-    await controller.dispatch({ type: 'press' })
+    await controller.dispatch({ type: 'longPressRelease' })
 
     await flushAsync()
     await flushAsync()
@@ -1974,9 +1967,9 @@ describe('TelegramAppController', () => {
 
     await controller.init()
     await controller.dispatch({ type: 'press' })
-    await controller.dispatch({ type: 'press' })
+    await controller.dispatch({ type: 'longPress' })
     await controller.dispatch({ type: 'audioChunk', pcm: speechLikePcm() })
-    await controller.dispatch({ type: 'press' })
+    await controller.dispatch({ type: 'longPressRelease' })
     await controller.dispatch({ type: 'press' })
 
     // Should transition to error screen with the send failure.
@@ -2132,9 +2125,9 @@ describe('TelegramAppController', () => {
     expect((controller.snapshot as Record<string, unknown>).typing).toBeUndefined()
 
     // Record → transcribe → confirm → send
-    await controller.dispatch({ type: 'press' })
+    await controller.dispatch({ type: 'longPress' })
     await controller.dispatch({ type: 'audioChunk', pcm: speechLikePcm() })
-    await controller.dispatch({ type: 'press' })
+    await controller.dispatch({ type: 'longPressRelease' })
     await controller.dispatch({ type: 'press' })
 
     // After send, state should be sidebar/messages

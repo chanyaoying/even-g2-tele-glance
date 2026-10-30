@@ -212,7 +212,7 @@ Per-step latencies are split into `stateMs` (input -> matching state event), `ap
 - **content**:
   - `panelBody.contains`: each visible message's `text`. For `fixture-chat-0`: `'Alpha message page contains fixture-alpha-body for startup testing.'` and `'Alpha outgoing marker for visual validation.'`
   - `panelBody.byteLength`: <= 999
-  - `panelFooter`: `'Swipe scroll | Click record | Double click back'`
+  - `panelFooter`: `'Swipe scroll | Hold to record | Double click back'`
   - `panelBox`: optional for long messages
 - **transitions**:
   - `press` -> `sidebarRecording`
@@ -241,7 +241,7 @@ Per-step latencies are split into `stateMs` (input -> matching state event), `ap
 - **content**:
   - `panelBody`: unchanged from the parent message view
   - `panelFooter`: `'<userName> typing\u2026'` (e.g. `'Alice typing\u2026'`), \u2264 120 bytes
-  - `panelFooter.notContains`: normal controls (`'Swipe scroll'`, `'Click record'`, `'Double click back'`)
+  - `panelFooter.notContains`: normal controls (`'Swipe scroll'`, `'Hold to record'`, `'Double click back'`)
 - **transitions**:
   - auto -> `sidebar.messages.normal` after 5s timeout or on `cancel` update
   - `press` -> `sidebarRecording` (still works; typing cleared on transition)
@@ -272,7 +272,7 @@ Per-step latencies are split into `stateMs` (input -> matching state event), `ap
 - **content**:
   - `panelTitle`: `'Recording'`
   - `panelBody`: empty or last visible message
-  - `panelFooter`: `'Click stop | Double click cancel'`
+  - `panelFooter`: `'Release to stop | Double click cancel'`
 - **transitions**:
   - `press` -> `sidebarTranscribing`; `setAudioEnabled(true)` then `setAudioEnabled(false)` observed
   - `doublePress` -> back to `sidebar.messages` without sending
@@ -313,7 +313,7 @@ Per-step latencies are split into `stateMs` (input -> matching state event), `ap
 - **render**: `{ kind: 'sidebar', title: 'Reply sent', focus: 'panel' }`
 - **right**:
   - `panelBody.contains`: outgoing message text
-  - `panelFooter`: `'Swipe scroll | Click record | Double click back'`
+  - `panelFooter`: `'Swipe scroll | Hold to record | Double click back'`
 - **transitions**:
   - `press` -> `sidebarRecording`
   - `doublePress` -> `back`
