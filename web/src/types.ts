@@ -51,6 +51,22 @@ export type Message = {
   media?: string | null
   /** Set locally on the oldest unread message when a thread is opened; drives the "last read" divider. */
   firstUnread?: boolean
+  /** The message this one replies to (sender and a short preview of it). */
+  replyTo?: { messageId: number | string; sender?: string | null; preview?: string } | null
+  /** Who a forwarded message originally came from. */
+  forwardedFrom?: string | null
+  poll?: MessagePoll | null
+  /** Link-preview card shown under the message text. */
+  link?: { title?: string | null; domain?: string | null; description?: string | null } | null
+}
+
+export type MessagePoll = {
+  question: string
+  options: Array<{ text: string; percent?: number | null; voters?: number | null; chosen?: boolean; correct?: boolean }>
+  totalVoters?: number | null
+  closed?: boolean
+  quiz?: boolean
+  multiple?: boolean
 }
 
 export type Photo = {

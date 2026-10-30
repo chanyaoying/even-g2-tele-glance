@@ -65,6 +65,35 @@ class TopicSummary(ApiModel):
     last_message: Optional[str] = None
 
 
+class ReplyInfo(ApiModel):
+    message_id: int
+    sender: Optional[str] = None
+    preview: str = ""
+
+
+class PollOption(ApiModel):
+    text: str
+    percent: Optional[int] = None
+    voters: Optional[int] = None
+    chosen: bool = False
+    correct: bool = False
+
+
+class PollInfo(ApiModel):
+    question: str
+    options: list[PollOption] = []
+    total_voters: Optional[int] = None
+    closed: bool = False
+    quiz: bool = False
+    multiple: bool = False
+
+
+class LinkInfo(ApiModel):
+    title: Optional[str] = None
+    domain: Optional[str] = None
+    description: Optional[str] = None
+
+
 class MessageSummary(ApiModel):
     id: int
     sender: Optional[str] = None
@@ -72,6 +101,10 @@ class MessageSummary(ApiModel):
     sent_at: Optional[datetime] = None
     outgoing: bool = False
     media: Optional[str] = None  # "photo" or "sticker" when the message carries a picture the glasses can show
+    reply_to: Optional[ReplyInfo] = None
+    forwarded_from: Optional[str] = None
+    poll: Optional[PollInfo] = None
+    link: Optional[LinkInfo] = None
 
 
 class PhotoResponse(ApiModel):

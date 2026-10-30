@@ -10,11 +10,13 @@ from typing import Any, AsyncIterator, Literal, Optional, Protocol, Union
 
 from app.config import Settings
 from app.services.imaging import ImagingError, prepare_glasses_image
+from app.services.message_content import forwarded_from, link_info, media_label, poll_info, reply_preview, reply_target_id
 from app.models import (
     ChatSummary,
     FolderSummary,
     MessageSummary,
     PhotoResponse,
+    ReplyInfo,
     PhoneLoginStart,
     PhoneLoginStatus,
     SendMessageResponse,
@@ -258,7 +260,16 @@ def normalize_message(message: Any, entities_by_peer: Optional[dict[int, Any]] =
         sender = entities_by_peer.get(_message_peer_key(message))
     sender_name = _display_name(sender) if sender is not None else None
     media = "photo" if _is_photo_message(message) else "sticker" if _is_sticker_message(message) else None
-    text = _photo_text(message) if media == "photo" else "[sticker]" if media == "sticker" else _message_readable_text(message)
+    poll = poll_info(message)
+    link = link_info(message)
+    if media == "photo":
+        text = _photo_text(message)
+    elif media == "sticker":
+        text = "[sticker]"
+    elif poll is not None:
+        text = poll.question
+    else:
+        text = _message_readable_text(message)
     return MessageSummary(
         id=int(getattr(message, "id")),
         sender=sender_name,
@@ -266,7 +277,51 @@ def normalize_message(message: Any, entities_by_peer: Optional[dict[int, Any]] =
         sent_at=getattr(message, "date", None),
         outgoing=bool(getattr(message, "out", False)),
         media=media,
+        forwarded_from=forwarded_from(message),
+        poll=poll,
+        link=link,
     )
+
+
+async def attach_replies(
+    client_get_messages: Any,
+    raw_messages: list[Any],
+    summaries: list[MessageSummary],
+    *,
+    topic_id: Optional[int] = None,
+) -> None:
+    """Fill `reply_to` on each summary. Originals already in the batch are reused; the rest cost one lookup."""
+    targets = {}
+    for raw, summary in zip(raw_messages, summaries):
+        target = reply_target_id(raw, topic_id)
+        if target is not None:
+            targets[summary.id] = target
+    if not targets:
+        return
+    known = {int(getattr(raw, "id")): (raw, summary) for raw, summary in zip(raw_messages, summaries)}
+    missing = sorted({target for target in targets.values() if target not in known})
+    fetched: dict[int, Any] = {}
+    if missing:
+        try:
+            for original in await client_get_messages(missing) or []:
+                if original is not None and getattr(original, "id", None) is not None:
+                    fetched[int(original.id)] = original
+        except Exception:  # a failed lookup only costs the quote text
+            logging.getLogger(__name__).debug("reply lookup failed", exc_info=True)
+    for summary in summaries:
+        target = targets.get(summary.id)
+        if target is None:
+            continue
+        if target in known:
+            original, original_summary = known[target]
+            sender = original_summary.sender
+        elif target in fetched:
+            original = fetched[target]
+            sender = _display_name(getattr(original, "sender", None)) if getattr(original, "sender", None) is not None else None
+        else:
+            summary.reply_to = ReplyInfo(message_id=target)
+            continue
+        summary.reply_to = ReplyInfo(message_id=target, sender=sender, preview=reply_preview(original))
 
 
 def _is_photo_message(message: Any) -> bool:
@@ -292,15 +347,12 @@ def _photo_text(message: Any) -> str:
 
 def _message_readable_text(message: Any) -> str:
     text = str(getattr(message, "message", None) or getattr(message, "raw_text", None) or "").strip()
-    if not _message_has_unsupported_content(message):
+    label = media_label(message)
+    if label is None and getattr(message, "action", None) is not None:
+        label = "[service]"
+    if label is None:
         return text
-    if text:
-        return f"{text} [unsupported content]"
-    return "[unsupported content]"
-
-
-def _message_has_unsupported_content(message: Any) -> bool:
-    return bool(getattr(message, "media", None) is not None or getattr(message, "action", None) is not None)
+    return f"{text} {label}" if text else label
 
 
 def normalize_update_message(message: Any, chat_id: Optional[int] = None) -> TelegramUpdate:
@@ -927,12 +979,25 @@ class TelethonTelegramService:
                 messages = getattr(result, "messages", [])
                 for message in messages:
                     self._cache_message_sender(message, entities_by_peer)
-                return [normalize_message(message, entities_by_peer) for message in messages]
+                summaries = [normalize_message(message, entities_by_peer) for message in messages]
+                await attach_replies(
+                    lambda ids: asyncio.wait_for(client.get_messages(entity, ids=ids), timeout=10),
+                    list(messages),
+                    summaries,
+                    topic_id=topic_id,
+                )
+                return summaries
 
             messages = await asyncio.wait_for(client.get_messages(entity, **kwargs), timeout=20)
             for message in messages:
                 self._cache_message_sender(message)
-            return [normalize_message(message) for message in messages]
+            summaries = [normalize_message(message) for message in messages]
+            await attach_replies(
+                lambda ids: asyncio.wait_for(client.get_messages(entity, ids=ids), timeout=10),
+                list(messages),
+                summaries,
+            )
+            return summaries
         except Exception as exc:
             raise wrap_telegram_error(exc) from exc
 

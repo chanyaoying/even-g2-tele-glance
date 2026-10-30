@@ -984,3 +984,76 @@ describe('photo messages', () => {
     expect(model.kind === 'sidebar' ? model.panelImage : 'x').toBeUndefined()
   })
 })
+
+describe('replies, forwards, polls and link cards', () => {
+  const bodyRows = (messages: Message[], offset = 0) => {
+    const model = screenModel(messageState(messages, offset))
+    if (model.kind !== 'sidebar') throw new Error('expected sidebar')
+    return model.panelBody.split('\n')
+  }
+
+  it('quotes the message being replied to on its own row above the reply', () => {
+    const rows = bodyRows([
+      { id: '2', sender: 'Bob', text: 'sure', replyTo: { messageId: 1, sender: 'Alice', preview: 'can you send the file please' } },
+    ])
+    expect(rows[0]).toBe('> Alice: can you send the file please')
+    expect(rows[1]).toContain('Bob: sure')
+  })
+
+  it('clips a long quote to one row and shows a bare marker without a preview', () => {
+    const long = bodyRows([{ id: '2', sender: 'Bob', text: 'ok', replyTo: { messageId: 1, sender: 'Alice', preview: 'x'.repeat(80) } }])
+    expect(long[0].length).toBeLessThanOrEqual(44)
+    expect(long[0].endsWith('..')).toBe(true)
+    expect(bodyRows([{ id: '2', sender: 'Bob', text: 'ok', replyTo: { messageId: 1 } }])[0]).toBe('>')
+  })
+
+  it('shows a forwarded-from header, above the reply quote when both are present', () => {
+    const rows = bodyRows([
+      { id: '2', sender: 'Bob', text: 'look', forwardedFrom: 'News Channel', replyTo: { messageId: 1, sender: 'Alice', preview: 'hm' } },
+    ])
+    expect(rows.slice(0, 2)).toEqual(['Fwd: News Channel', '> Alice: hm'])
+  })
+
+  it('renders a poll as a question, option rows with percentages and a votes footer', () => {
+    const rows = bodyRows([
+      {
+        id: '3', sender: 'Alice', text: 'Lunch?',
+        poll: {
+          question: 'Lunch?', totalVoters: 4,
+          options: [
+            { text: 'Pizza', percent: 75, voters: 3, chosen: true },
+            { text: 'Sushi', percent: 25, voters: 1 },
+          ],
+        },
+      },
+    ])
+    expect(rows).toEqual(['Alice: Poll: Lunch?', '  [x] Pizza 75%', '  [ ] Sushi 25%', '  4 votes'])
+  })
+
+  it('keeps a big poll within one page of seven rows', () => {
+    const options = Array.from({ length: 10 }, (_, index) => ({ text: `Option number ${index + 1} with a fairly long label that must be clipped`, percent: 10 }))
+    const rows = bodyRows([{ id: '3', sender: 'Alice', text: 'Pick one', poll: { question: 'Pick one', totalVoters: 10, closed: true, options } }])
+    expect(rows.length).toBeLessThanOrEqual(7)
+    expect(rows.some((row) => /\+\d+ more/.test(row))).toBe(true)
+    expect(rows[rows.length - 1]).toBe('  10 votes - closed')
+    for (const row of rows) expect(row.length).toBeLessThanOrEqual(44)
+  })
+
+  it('shows a link card with the title and domain - description under the text', () => {
+    const rows = bodyRows([
+      { id: '4', sender: 'Bob', text: 'see https://hub.evenrealities.com', link: { title: 'Even Hub docs', domain: 'hub.evenrealities.com', description: 'Build apps' } },
+    ])
+    expect(rows[1]).toBe('  > Even Hub docs')
+    expect(rows[2]).toBe('    hub.evenrealities.com - Build apps')
+    for (const row of rows) expect(row.length).toBeLessThanOrEqual(44)
+  })
+
+  it('leaves the picture aligned when a forwarded photo has a header row', () => {
+    const model = screenModel(messageState([{ id: '5', sender: 'Alice', text: '[photo]', media: 'photo', forwardedFrom: 'Bob' }]))
+    if (model.kind !== 'sidebar') throw new Error('expected sidebar')
+    const rows = model.panelBody.split('\n')
+    expect(rows[0]).toBe('Fwd: Bob')
+    expect(rows).toHaveLength(7)
+    expect(model.panelImage?.topLine).toBe(2)
+  })
+})

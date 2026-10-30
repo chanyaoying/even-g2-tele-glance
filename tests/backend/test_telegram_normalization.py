@@ -361,7 +361,7 @@ def test_link_previews_and_other_media_are_not_treated_as_photos():
     normalized = normalize_message(preview)
 
     assert normalized.media is None
-    assert normalized.text == "see this [unsupported content]"
+    assert normalized.text == "see this"
 
 
 class _PhotoClient:
@@ -480,3 +480,141 @@ def test_an_animated_sticker_uses_its_preview_thumbnail():
     asyncio.run(_photo_service(client).get_photo(1, 52))
 
     assert client.thumb == -1
+
+
+# --- replies, forwards, polls, link cards and content labels -------------------------------------
+
+
+def _msg(id=1, text="", media=None, **extra):
+    base = dict(id=id, message=text, raw_text=text, date=datetime(2026, 10, 30, 12, 0, tzinfo=timezone.utc), media=media)
+    base.update(extra)
+    return SimpleNamespace(**base)
+
+
+def _make(name, fields):
+    obj = type(name, (), {})()
+    for key, value in fields.items():
+        setattr(obj, key, value)
+    return obj
+
+
+def test_media_labels_replace_the_generic_unsupported_text():
+    voice = _msg(2, media=_make("MessageMediaDocument", {}), voice=object(), file=SimpleNamespace(duration=12.4))
+    assert normalize_message(voice).text == "[voice 0:12]"
+    note = _msg(3, media=_make("MessageMediaDocument", {}), video_note=object(), file=SimpleNamespace(duration=75))
+    assert normalize_message(note).text == "[video note 1:15]"
+    video = _msg(4, "look", media=_make("MessageMediaDocument", {}), video=object(), file=SimpleNamespace(duration=5))
+    assert normalize_message(video).text == "look [video 0:05]"
+    gif = _msg(5, media=_make("MessageMediaDocument", {}), gif=object())
+    assert normalize_message(gif).text == "[GIF]"
+    document = _msg(6, media=_make("MessageMediaDocument", {}), file=SimpleNamespace(name="report.pdf", duration=None))
+    assert normalize_message(document).text == "[file report.pdf]"
+    assert normalize_message(_msg(7, media=_make("MessageMediaGeo", {}))).text == "[location]"
+    assert normalize_message(_msg(8, media=_make("MessageMediaContact", {"first_name": "Ann", "last_name": "Lee"}))).text == "[contact Ann Lee]"
+    assert normalize_message(_msg(9, media=_make("MessageMediaUnknownThing", {}))).text == "[unsupported content]"
+
+
+def test_a_link_preview_keeps_the_text_and_adds_a_card():
+    page = _make("WebPage", {"title": "Even Hub docs", "description": "Build  apps\nfor G2", "display_url": "www.hub.evenrealities.com/docs", "url": "https://x"})
+    message = normalize_message(_msg(10, "see https://hub.evenrealities.com/docs", media=_make("MessageMediaWebPage", {"webpage": page})))
+    assert message.text == "see https://hub.evenrealities.com/docs"
+    assert message.link.title == "Even Hub docs"
+    assert message.link.domain == "hub.evenrealities.com"
+    assert message.link.description == "Build apps for G2"
+    empty = _make("WebPageEmpty", {})
+    assert normalize_message(_msg(11, "x", media=_make("MessageMediaWebPage", {"webpage": empty}))).link is None
+
+
+def test_a_poll_is_summarised_with_percentages_and_my_vote():
+    answers = [
+        SimpleNamespace(text=SimpleNamespace(text="Pizza"), option=b"1"),
+        SimpleNamespace(text="Sushi", option=b"2"),
+    ]
+    results = SimpleNamespace(
+        total_voters=4,
+        results=[
+            SimpleNamespace(option=b"1", voters=3, chosen=True, correct=False),
+            SimpleNamespace(option=b"2", voters=1, chosen=False, correct=False),
+        ],
+    )
+    poll = SimpleNamespace(question=SimpleNamespace(text="Lunch?"), answers=answers, closed=False, quiz=False, multiple_choice=False)
+    message = normalize_message(_msg(12, media=_make("MessageMediaPoll", {"poll": poll, "results": results})))
+    assert message.text == "Lunch?"
+    assert message.poll.total_voters == 4
+    assert [(o.text, o.percent, o.chosen) for o in message.poll.options] == [("Pizza", 75, True), ("Sushi", 25, False)]
+
+
+def test_a_poll_without_results_has_no_percentages():
+    poll = SimpleNamespace(question="Q?", answers=[SimpleNamespace(text="A", option=b"1")], closed=True, quiz=False, multiple_choice=False)
+    message = normalize_message(_msg(13, media=_make("MessageMediaPoll", {"poll": poll, "results": None})))
+    assert message.poll.closed is True
+    assert message.poll.options[0].percent is None
+
+
+def test_forwarded_from_uses_the_header_name_or_the_resolved_source():
+    named = _msg(14, "hi", fwd_from=SimpleNamespace(from_name="Hidden Bob"))
+    assert normalize_message(named).forwarded_from == "Hidden Bob"
+    channel = _msg(15, "hi", fwd_from=SimpleNamespace(from_name=None), forward=SimpleNamespace(chat=Entity(id=1, title="News"), sender=None))
+    assert normalize_message(channel).forwarded_from == "News"
+    unknown = _msg(16, "hi", fwd_from=SimpleNamespace(from_name=None), forward=None)
+    assert normalize_message(unknown).forwarded_from == "unknown"
+    assert normalize_message(_msg(17, "hi")).forwarded_from is None
+
+
+def _reply_header(target, top=None, forum_topic=False):
+    return SimpleNamespace(reply_to_msg_id=target, reply_to_top_id=top, forum_topic=forum_topic)
+
+
+def test_replies_resolve_from_the_batch_and_by_lookup():
+    from app.services.telegram import attach_replies
+
+    alice = Entity(id=1, first_name="Alice")
+    original = _msg(20, "can you send the file over when you get a chance please", sender=alice)
+    in_batch = _msg(21, "sure", reply_to=_reply_header(20))
+    outside = _msg(22, "also", reply_to=_reply_header(5))
+    outside_original = _msg(5, "", media=_make("MessageMediaPhoto", {}), sender=Entity(id=2, first_name="Bo"))
+    raws = [original, in_batch, outside]
+    summaries = [normalize_message(raw) for raw in raws]
+
+    async def lookup(ids):
+        assert ids == [5]
+        return [outside_original]
+
+    asyncio.run(attach_replies(lookup, raws, summaries))
+    assert summaries[0].reply_to is None
+    assert summaries[1].reply_to.sender == "Alice"
+    assert summaries[1].reply_to.preview == "can you send the file over when you ge.."
+    assert summaries[2].reply_to.sender == "Bo"
+    assert summaries[2].reply_to.preview == "[photo]"
+
+
+def test_forum_topic_root_replies_are_not_quoted_but_real_replies_are():
+    from app.services.telegram import attach_replies
+
+    plain = _msg(31, "hello", reply_to=_reply_header(30, forum_topic=True))
+    by_id = _msg(32, "hello", reply_to=_reply_header(30))
+    real = _msg(33, "re", reply_to=_reply_header(31, top=30, forum_topic=True))
+    raws = [plain, by_id, real]
+    summaries = [normalize_message(raw) for raw in raws]
+
+    async def lookup(ids):
+        return []
+
+    asyncio.run(attach_replies(lookup, raws, summaries, topic_id=30))
+    assert summaries[0].reply_to is None
+    assert summaries[1].reply_to is None
+    assert summaries[2].reply_to.message_id == 31
+
+
+def test_a_failed_reply_lookup_keeps_the_message_with_a_bare_reply_marker():
+    from app.services.telegram import attach_replies
+
+    raws = [_msg(41, "x", reply_to=_reply_header(7))]
+    summaries = [normalize_message(raw) for raw in raws]
+
+    async def lookup(ids):
+        raise RuntimeError("boom")
+
+    asyncio.run(attach_replies(lookup, raws, summaries))
+    assert summaries[0].reply_to.message_id == 7
+    assert summaries[0].reply_to.sender is None

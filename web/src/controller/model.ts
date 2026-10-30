@@ -621,18 +621,76 @@ function formatMessageBlocks(message: Message, dayLabel = ''): MessageDisplayBlo
     return formatMessageBox(String(message.id), [dayLabel, time, sender].filter(Boolean).join(' '), text)
   }
 
+  const before = messageHeaderRows(message)
   if (message.media === 'photo' || message.media === 'sticker') {
     // The picture flows with the conversation: one heading row, then blank rows the picture container covers.
     const heading = inlineImageHeading(`${time ? `${time} ` : ''}${sender}: `, text)
     const rows = [heading, ...Array.from({ length: INLINE_IMAGE_GAP_ROWS }, () => ' ')]
+    // A page holds 7 rows: day divider + heading + gap already fills it, so the extra header row only fits without one.
+    if (!dayLabel && before.length > 0) rows.unshift(before[0])
     if (dayLabel) rows.unshift(`----- ${dayLabel} -----`)
     return [{ text: rows.join('\n'), imageMessageId: String(message.id), imageGapLine: rows.length - INLINE_IMAGE_GAP_ROWS }]
   }
 
-  const rows = formatCompactMessageRows(time ? `${time} ${sender}` : sender, text)
+  const rows = formatCompactMessageRows(time ? `${time} ${sender}` : sender, message.poll ? `Poll: ${text}` : text)
+  if (message.poll) rows.splice(2) // the question never needs more than two rows
+  const used = rows.length + before.length + (dayLabel ? 1 : 0)
+  rows.unshift(...before)
+  if (message.poll) rows.push(...pollRows(message.poll, MESSAGE_VISIBLE_ROW_LIMIT - used))
+  else if (message.link) rows.push(...linkRows(message.link, MESSAGE_VISIBLE_ROW_LIMIT - used))
   // The divider is part of the day's first message block, so it can never be split from that message.
   if (dayLabel) rows.unshift(`----- ${dayLabel} -----`)
   return [{ text: rows.join('\n') }]
+}
+
+function clipRow(value: string, indent = ''): string {
+  const clean = sanitizeGlassesText(value).replace(/\s+/g, ' ').trim()
+  const room = MESSAGE_ROW_CHAR_LIMIT - indent.length
+  return indent + (clean.length <= room ? clean : `${clean.slice(0, Math.max(0, room - 2))}..`)
+}
+
+/** "Fwd: Bob" and "> Alice: quoted text" rows shown above a message (each exactly one row). */
+function messageHeaderRows(message: Message): string[] {
+  const rows: string[] = []
+  if (message.forwardedFrom) rows.push(clipRow(`Fwd: ${message.forwardedFrom}`))
+  if (message.replyTo) {
+    const who = message.replyTo.sender ? `${message.replyTo.sender}: ` : ''
+    rows.push(clipRow(`> ${who}${message.replyTo.preview ?? ''}`))
+  }
+  return rows
+}
+
+/** Title and "domain - description" rows for a link preview, limited to the rows left on the page. */
+function linkRows(link: NonNullable<Message['link']>, room: number): string[] {
+  const rows: string[] = []
+  const title = link.title ?? ''
+  const detail = [link.domain, link.description].filter(Boolean).join(' - ')
+  if (title) rows.push(clipRow(title, '  > '))
+  if (detail) rows.push(clipRow(detail, '    '))
+  return rows.slice(0, Math.max(0, room))
+}
+
+/** Option rows ("  [x] Pizza 75%") plus a votes footer, squeezed into the rows left on the page. */
+function pollRows(poll: NonNullable<Message['poll']>, room: number): string[] {
+  const footerParts = [
+    poll.totalVoters != null ? `${poll.totalVoters} ${poll.totalVoters === 1 ? 'vote' : 'votes'}` : '',
+    poll.quiz ? 'quiz' : '',
+    poll.multiple ? 'multi' : '',
+    poll.closed ? 'closed' : '',
+  ].filter(Boolean)
+  const footer = footerParts.length > 0 ? [clipRow(footerParts.join(' - '), '  ')] : []
+  const optionRoom = Math.max(1, room - footer.length)
+  const shown = poll.options.length > optionRoom ? poll.options.slice(0, optionRoom - 1) : poll.options
+  const rows = shown.map((option) => {
+    const mark = option.chosen ? '[x]' : option.correct ? '[+]' : '[ ]'
+    const suffix = option.percent != null ? ` ${option.percent}%` : ''
+    const room = MESSAGE_ROW_CHAR_LIMIT - 2 - mark.length - 1 - suffix.length
+    const label = sanitizeGlassesText(option.text).replace(/\s+/g, ' ').trim()
+    const clipped = label.length <= room ? label : `${label.slice(0, Math.max(0, room - 2))}..`
+    return `  ${mark} ${clipped}${suffix}`
+  })
+  if (shown.length < poll.options.length) rows.push(`  +${poll.options.length - shown.length} more`)
+  return [...rows, ...footer]
 }
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
