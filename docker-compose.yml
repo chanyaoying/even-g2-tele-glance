@@ -16,17 +16,6 @@ services:
     volumes:
       - whisper-models:/models
 
-  # Static frontend, used for Even Hub dev-server sideloading (`evenhub qr`).
-  web:
-    build:
-      context: .
-      dockerfile: Dockerfile.web
-    image: teleglance-web:local
-    container_name: teleglance-web
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:5173:80"
-
 networks:
   # The network Caddy lives on (homelab compose project).
   homelab:
