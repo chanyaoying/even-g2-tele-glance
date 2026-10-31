@@ -7,10 +7,12 @@ services:
     env_file: .env
     environment:
       HF_HOME: /models
+    networks:
+      - homelab
     ports:
-      # Bind only to the Tailscale address so the backend is never exposed on the LAN
-      # or internet. Set TAILSCALE_IP in .env (output of `tailscale ip -4`).
-      - "${TAILSCALE_IP:?set TAILSCALE_IP in .env}:${BACKEND_PORT:-8788}:8787"
+      # Loopback only (debugging). Clients reach the backend through Caddy, which proxies
+      # teleglance.homelab.chanyaoying.com to teleglance:8787 over the shared Docker network.
+      - "127.0.0.1:${BACKEND_PORT:-8788}:8787"
     volumes:
       - whisper-models:/models
 
@@ -23,7 +25,13 @@ services:
     container_name: teleglance-web
     restart: unless-stopped
     ports:
-      - "${TAILSCALE_IP:?set TAILSCALE_IP in .env}:5173:80"
+      - "127.0.0.1:5173:80"
+
+networks:
+  # The network Caddy lives on (homelab compose project).
+  homelab:
+    name: homelab_app-network
+    external: true
 
 volumes:
   whisper-models:

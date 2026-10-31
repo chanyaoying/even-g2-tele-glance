@@ -67,7 +67,17 @@ cd ..
 scripts/start-backend.sh --reload
 ```
 
-The backend listens on `0.0.0.0:8787`, so it can be reached from another device if your network allows it. Do not use `localhost` in TeleGlance Settings on the phone/glasses; use a Tailscale IP or LAN IP.
+### Docker behind Caddy (homelab setup)
+
+`docker-compose.yml` joins the external `homelab_app-network` and publishes nothing on the Tailscale address; the backend is bound to `127.0.0.1:8788` for debugging only. Caddy proxies `https://teleglance.homelab.chanyaoying.com` to `teleglance:8787` (`homelab/caddy/conf.d/teleglance.caddy`, with `flush_interval -1` for the update stream). Set Backend URL in TeleGlance Settings to that https origin and package with:
+
+```sh
+BACKEND_ORIGIN=https://teleglance.homelab.chanyaoying.com npm run configure:tailscale --prefix web
+```
+
+Note: Caddy's single-file `Caddyfile` mount keeps the old inode when an editor replaces the file, so `docker restart caddy` (not just a reload) is needed after editing the `Caddyfile` itself. Files in `conf.d/` are a mounted directory and are picked up by a reload.
+
+The backend listens on `0.0.0.0:8787` when started with `scripts/start-backend.sh`, so it can be reached from another device if your network allows it. Do not use `localhost` in TeleGlance Settings on the phone/glasses; use a Tailscale IP or LAN IP.
 
 Tailscale is enabled by default for CORS. If Tailscale is installed and logged in, get the backend URL with:
 

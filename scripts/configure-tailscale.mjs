@@ -31,6 +31,7 @@ function detectTailscaleIp() {
 
 function resolveBackendAndFrontendOrigins() {
   const explicit = process.env.BACKEND_ORIGIN?.trim()
+  if (explicit) return { backendOrigin: normalizeBackendOrigin(explicit), frontendOrigin: '(not used with BACKEND_ORIGIN)' }
   const ip = process.env.TAILSCALE_IP ?? detectTailscaleIp()
   const frontendOrigin = `http://${ip}:${vitePort}`
   const backendOrigin = explicit ? normalizeBackendOrigin(explicit) : normalizeBackendOrigin(`http://${ip}:${backendPort}`)
