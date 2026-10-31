@@ -182,8 +182,19 @@ const ja: LocaleStrings = {
   settingsSave: '設定を保存',
   settingsSaved: '保存されました',
   settingsReset: 'リセット',
-  settingsClearCache: 'Clear cache',
-  settingsCacheCleared: 'Cache cleared',
+  settingsClearCache: 'キャッシュを消去',
+  settingsCacheCleared: 'キャッシュを消去しました',
+  settingsTestConnection: '接続をテスト',
+  settingsTesting: 'テスト中...',
+  settingsTestHealthOk: 'バックエンドに接続できました',
+  settingsTestHealthFail: 'バックエンドに接続できません',
+  settingsTestSessionOk: 'シークレット承認済み、Telegramにログイン済み',
+  settingsTestSessionNotLoggedIn: 'シークレット承認済み、Telegramは未ログイン',
+  settingsTestSessionFail: 'バックエンドがリクエストを拒否しました',
+  settingsTestSessionSkipped: 'スキップ(バックエンドに接続できません)',
+  phoneForwardedFrom: '転送元:',
+  phonePhoto: '写真',
+  phoneSticker: 'ステッカー',
 }
 
 export default ja

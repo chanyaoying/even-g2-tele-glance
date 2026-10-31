@@ -33,6 +33,12 @@ export interface TelegramApi {
   markRead(chatId: Id, request: MarkReadRequest): Promise<void>
   transcribe(wav: Blob, language?: string): Promise<TranscriptionResult>
   subscribeUpdates(onUpdate: (update: TelegramUpdate | TelegramTypingUpdate) => void, onError?: (error: Event | Error) => void, onReconnect?: () => void): () => void
+  testConnection(): Promise<ConnectionTestResult>
+}
+
+export type ConnectionTestResult = {
+  health: { ok: boolean; error?: string }
+  session: { ok: boolean; authorized?: boolean; error?: string } | null
 }
 
 export type TelegramAuthConfig = {
@@ -452,6 +458,25 @@ export class HttpTelegramApi implements TelegramApi {
     const sharedSecret = this.getEffectiveSharedSecret()
     if (!sharedSecret) throw new Error('Backend shared secret is required to decrypt update stream.')
     return decryptJsonPayload(payload.encryptedPayload, sharedSecret)
+  }
+
+  /** Settings "Test connection": plain GET /health, then the authenticated session status. */
+  async testConnection(): Promise<ConnectionTestResult> {
+    const result: ConnectionTestResult = { health: { ok: false }, session: null }
+    try {
+      const response = await fetch(`${this.baseUrl}/health`)
+      result.health = response.ok ? { ok: true } : { ok: false, error: `HTTP ${response.status}` }
+    } catch (error) {
+      result.health = { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+    if (!result.health.ok) return result
+    try {
+      const status = await this.authStatus()
+      result.session = { ok: true, authorized: Boolean(status.authorized) }
+    } catch (error) {
+      result.session = { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+    return result
   }
 
   private sttBaseUrl() {

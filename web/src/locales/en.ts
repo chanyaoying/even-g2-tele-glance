@@ -189,6 +189,17 @@ const en = {
   settingsReset: 'Reset',
   settingsClearCache: 'Clear cache',
   settingsCacheCleared: 'Cache cleared',
+  settingsTestConnection: 'Test connection',
+  settingsTesting: 'Testing...',
+  settingsTestHealthOk: 'Backend reachable',
+  settingsTestHealthFail: 'Backend not reachable',
+  settingsTestSessionOk: 'Secret accepted, Telegram logged in',
+  settingsTestSessionNotLoggedIn: 'Secret accepted, Telegram not logged in yet',
+  settingsTestSessionFail: 'Backend rejected the request',
+  settingsTestSessionSkipped: 'Skipped (backend not reachable)',
+  phoneForwardedFrom: 'Forwarded from',
+  phonePhoto: 'photo',
+  phoneSticker: 'sticker',
 
   // ── Bridge ──
   bridgeEmptyList: 'Empty',

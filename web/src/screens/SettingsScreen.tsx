@@ -5,11 +5,13 @@ import { useApp } from '../contexts/AppContext'
 import type { FrontendConfig } from '../storage'
 
 export function SettingsScreen({ buildVersion }: { buildVersion: string }) {
-  const { state, settings, saveSettings, resetSettings, logoutTelegram, clearCache } = useApp()
+  const { state, settings, saveSettings, resetSettings, logoutTelegram, clearCache, testConnection } = useApp()
   const [draft, setDraft] = useState<FrontendConfig>(settings)
   const [saved, setSaved] = useState(false)
   const [cacheCleared, setCacheCleared] = useState(false)
   const [isLoggingOut, setIsLoggingOut] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [testLines, setTestLines] = useState<string[]>([])
   const [logoutError, setLogoutError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -27,6 +29,27 @@ export function SettingsScreen({ buildVersion }: { buildVersion: string }) {
   const isSharedBackend = isSharedBackendUrl(draft.apiBaseUrl)
   const hasTelegramSession = Boolean(draft.telegramSession.trim())
   const isConnected = state.screen !== 'auth' && state.screen !== 'loading' && state.screen !== 'error'
+
+  async function handleTestConnection() {
+    setTesting(true)
+    setTestLines([])
+    try {
+      const result = await testConnection(draft)
+      const lines = [result.health.ok ? l.settingsTestHealthOk : `${l.settingsTestHealthFail} (${result.health.error ?? ''})`]
+      if (result.session) {
+        lines.push(!result.session.ok
+          ? `${l.settingsTestSessionFail} (${result.session.error ?? ''})`
+          : result.session.authorized ? l.settingsTestSessionOk : l.settingsTestSessionNotLoggedIn)
+      } else {
+        lines.push(l.settingsTestSessionSkipped)
+      }
+      setTestLines(lines)
+    } catch (error) {
+      setTestLines([`${l.settingsTestHealthFail} (${error instanceof Error ? error.message : String(error)})`])
+    } finally {
+      setTesting(false)
+    }
+  }
 
   async function handleLogout() {
     setIsLoggingOut(true)
@@ -103,6 +126,14 @@ scripts/start-backend.sh --reload`}</code></pre>
           <span>{l.settingsBackendSecret}</span>
           <input type="password" value={draft.backendSharedSecret} onChange={(event) => update('backendSharedSecret', event.target.value)} placeholder={isSharedBackend ? l.settingsSharedBackendSecretPlaceholder : l.settingsBackendSecretPlaceholder} />
         </label>
+        <button type="button" className="secondary" disabled={testing} onClick={() => void handleTestConnection()}>
+          {testing ? l.settingsTesting : l.settingsTestConnection}
+        </button>
+        {testLines.length > 0 && (
+          <ul className="test-results" aria-live="polite">
+            {testLines.map((line) => <li key={line}>{line}</li>)}
+          </ul>
+        )}
         {isSharedBackend ? (
           <p className="testing-banner">
             <span className="asterisk">*</span> {l.settingsSharedBackendWarning}

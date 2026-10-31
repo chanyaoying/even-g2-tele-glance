@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { effectiveBackendSharedSecret, HttpTelegramApi, type TelegramApi } from '../api'
+import { effectiveBackendSharedSecret, HttpTelegramApi, type ConnectionTestResult, type TelegramApi } from '../api'
 import { EvenHubGlassesBridge } from '../bridge/evenBridge'
 import { TelegramAppController, type ControllerRuntimeConfig, type GlassesBridge } from '../controller/appController'
 import type { AppInput, AppState, ScreenModel } from '../controller/model'
@@ -32,6 +32,7 @@ type AppContextValue = {
   resetSettings: () => Promise<void>
   logoutTelegram: () => Promise<void>
   clearCache: () => Promise<void>
+  testConnection: (settings: FrontendConfig) => Promise<ConnectionTestResult>
   localeVersion: number
 }
 
@@ -232,6 +233,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
     await controllerRef.current?.clearCache()
   }, [])
 
+  const testConnection = useCallback(async (draft: FrontendConfig) => {
+    const api = isTeleGlanceFixtureMode() && apiRef.current ? apiRef.current : new HttpTelegramApi(draft.apiBaseUrl, () => draft)
+    return api.testConnection()
+  }, [])
+
   const logoutTelegram = useCallback(async () => {
     await controllerRef.current?.clearCache().catch(() => undefined)
     await apiRef.current?.logout()
@@ -254,7 +260,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     resetSettings: handleResetSettings,
     logoutTelegram,
     clearCache,
-  }), [clearCache, dispatch, handleResetSettings, handleSaveSettings, localeVersion, logoutTelegram, sendText, settings, startPhoneLogin, startupError, state, verifyPhoneLogin])
+    testConnection,
+  }), [clearCache, testConnection, dispatch, handleResetSettings, handleSaveSettings, localeVersion, logoutTelegram, sendText, settings, startPhoneLogin, startupError, state, verifyPhoneLogin])
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>
 }

@@ -14,11 +14,15 @@ import type {
   Topic,
   TranscriptionResult,
 } from './types'
-import type { ListChatsOptions, TelegramApi } from './api'
+import type { ConnectionTestResult, ListChatsOptions, TelegramApi } from './api'
 import { isTeleGlanceFixtureMode, logApiEvent, logApiTiming } from './testMode'
 
 export class InstrumentedTelegramApi implements TelegramApi {
   constructor(private readonly inner: TelegramApi) {}
+
+  async testConnection(): Promise<ConnectionTestResult> {
+    return this.inner.testConnection()
+  }
 
   async authStatus(): Promise<AuthStatus> {
     return this.wrap('authStatus', undefined, () => this.inner.authStatus())

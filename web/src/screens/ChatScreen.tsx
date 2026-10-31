@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { useApp } from '../contexts/AppContext'
 import { getLocale } from '../locales'
-import type { Message } from '../types'
+import type { Message, MessagePoll } from '../types'
 
 export function ChatScreen() {
   const { state, sendText, localeVersion } = useApp()
@@ -252,12 +252,51 @@ function PhoneActions() {
   )
 }
 
-function MessageBubble({ message }: { message: Message }) {
+export function MessageBubble({ message }: { message: Message }) {
   const l = getLocale()
+  const time = formatTime(message.sentAt)
+  const who = message.outgoing ? l.senderMe : message.sender || l.senderUnknown
+  const reply = message.replyTo
   return (
     <article className={`message-bubble ${message.outgoing ? 'outgoing' : 'incoming'}`}>
-      <header>{message.outgoing ? l.senderMe : message.sender || l.senderUnknown}</header>
-      <p>{message.text}</p>
+      <header>{who}{time && <time dateTime={message.sentAt ?? undefined}> {time}</time>}</header>
+      {message.forwardedFrom && <p className="bubble-forward">{l.phoneForwardedFrom} {message.forwardedFrom}</p>}
+      {reply && <p className="bubble-reply">{`> ${reply.sender ? `${reply.sender}: ` : ''}${reply.preview ?? ''}`}</p>}
+      {message.media && <p className="bubble-media">[{message.media === 'sticker' ? l.phoneSticker : l.phonePhoto}]</p>}
+      {message.text && <p>{message.text}</p>}
+      {message.poll && <PollView poll={message.poll} />}
+      {message.link && (message.link.title || message.link.domain || message.link.description) && (
+        <div className="bubble-link">
+          {message.link.title && <strong>{message.link.title}</strong>}
+          {message.link.domain && <span>{message.link.domain}</span>}
+          {message.link.description && <p>{message.link.description}</p>}
+        </div>
+      )}
     </article>
   )
+}
+
+function PollView({ poll }: { poll: MessagePoll }) {
+  return (
+    <div className="bubble-poll">
+      <strong>{poll.question}</strong>
+      {poll.options.map((option, index) => {
+        const percent = Math.max(0, Math.min(100, Math.round(option.percent ?? 0)))
+        return (
+          <div key={index} className="poll-option">
+            <span>{option.chosen ? '[x] ' : '[ ] '}{option.text}</span>
+            <span className="poll-bar" aria-hidden="true"><i style={{ width: `${percent}%` }} /></span>
+            <span className="poll-percent">{percent}%</span>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function formatTime(sentAt?: string | null) {
+  if (!sentAt) return ''
+  const date = new Date(sentAt)
+  if (Number.isNaN(date.getTime())) return ''
+  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }

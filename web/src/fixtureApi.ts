@@ -215,6 +215,10 @@ export class FixtureTelegramApi implements TelegramApi {
     for (const subscriber of this.subscribers) Promise.resolve().then(() => subscriber(update))
   }
 
+  async testConnection() {
+    return { health: { ok: true }, session: { ok: true, authorized: this.mode === 'normal' || this.mode === 'slow' } }
+  }
+
   async authStatus() {
     if (this.mode === 'missing') return { configured: false, authorized: false }
     if (this.mode === 'signedOut') return { configured: true, authorized: false }
