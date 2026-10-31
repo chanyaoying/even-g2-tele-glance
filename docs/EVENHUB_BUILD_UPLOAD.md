@@ -3,7 +3,8 @@
 ## Quick start
 
 ```bash
-# Full pipeline: build, pack, upload, publish as private build
+# Full pipeline: build, pack, upload, create the private build, promote it to the beta channel
+# (add --no-beta to stop at the private build)
 node scripts/upload.mjs --publish -m "Description of changes"
 
 # Just upload to draft (won't appear on glasses until published via portal)

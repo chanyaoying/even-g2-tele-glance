@@ -31,7 +31,8 @@ developer portal.
 
 Options:
   --project-id <id>      Override project_id from app.json
-  --publish, --create    After upload, create the version as private build
+  --publish, --create    After upload, create the version as private build and promote it to beta
+  --no-beta              With --publish, stop at the private build (skip beta promotion)
   --changelog, -m <msg>  Changelog message for the version
   --skip-build           Skip the build+pack step
   --dry-run              Show what would be uploaded without doing it
@@ -266,6 +267,7 @@ async function uploadPackage() {
           console.log('✅ Version created as private build!')
           console.log(`   Version ID: ${createData.data?.id}`)
           console.log(`   Status:     ${createData.data?.is_private ? 'Private (Test)' : 'Public'}`)
+          if (!hasFlag('no-beta')) promoteToBeta(pid)
         } else {
           const text = await createResp.text()
           console.error(`❌ Version creation failed (HTTP ${createResp.status}):`, text)
@@ -281,6 +283,23 @@ async function uploadPackage() {
     }
   } catch (err) {
     console.error('❌ Request failed:', err.message)
+    process.exit(1)
+  }
+}
+
+// ── Beta promotion ────────────────────────────────────────
+// A created version is only a private build; testers get it once it is assigned to the beta channel.
+function promoteToBeta(pid) {
+  const version = readAppVersion()
+  console.log(`🧪 Promoting ${version} to beta...`)
+  try {
+    execSync(`npx --yes @evenrealities/evenhub-cli promote ${version} --to beta --package-id ${pid}`, {
+      cwd: repoRoot,
+      stdio: 'inherit',
+    })
+    console.log(`✅ ${version} is on the beta channel.`)
+  } catch {
+    console.error(`❌ Beta promotion failed. Run: npx @evenrealities/evenhub-cli promote ${version} --to beta --package-id ${pid}`)
     process.exit(1)
   }
 }
