@@ -2,6 +2,7 @@ import { MAX_RECORDING_BYTES, pcmChunksToWav } from '../audio/wav'
 import type { TelegramApi } from '../api'
 import type { Chat, Folder, Id, Message, TelegramUpdate, TelegramTypingUpdate, Topic } from '../types'
 import { getLocale } from '../locales'
+import { backToMessages, DIDNT_CATCH_STATUS, UPDATING_STATUS } from './model'
 import type { AppInput, AppState, RecoverableState, ScreenModel } from './model'
 import { anchorMessageId, messageScrollUnitCount, nextMessageScrollOffset, offsetForAnchorMessage, screenModel, unreadScrollOffset } from './model'
 import { isTeleGlanceFixtureMode, logLifecycleEvent, logRecordingEvent, logStateWork, nowMs } from '../testMode'
@@ -104,6 +105,12 @@ export class TelegramAppController {
   private rootRefreshInFlight = false
   /** True while the chat list shown came from the on-phone cache and the real one has not arrived yet. */
   private showingStoredChats = false
+  /** A reply send is running; a second press must not start another one. */
+  private sendInFlight = false
+  /** The last send that failed, so a retry first checks whether it actually went through. */
+  private failedSend: { key: string; startedAt: number } | undefined
+  /** What pressing on the error screen runs again (undefined: go back to the screen before the error). */
+  private errorRetry: (() => Promise<void>) | undefined
   // Telegram chat folders. `activeFolderId === undefined` means "All chats".
   private folders: Folder[] = []
   private activeFolderId: Id | undefined
@@ -250,10 +257,14 @@ export class TelegramAppController {
     if (!trimmed) return
     const ctx = sidebarContext(state)
     await this.run(async () => {
-      const sent = await this.api.sendMessage(thread.chat.id, {
-        text: trimmed,
-        topicId: topicThreadId(thread.topic),
-      })
+      if (this.sendInFlight) return
+      this.sendInFlight = true
+      let sent: Message
+      try {
+        sent = await this.sendWithDuplicateCheck(thread, trimmed)
+      } finally {
+        this.sendInFlight = false
+      }
       const refreshed = await this.refreshLatestMessages(thread).catch(() => [])
       const messages = refreshed.some((message) => String(message.id) === String(sent.id))
         ? refreshed
@@ -284,6 +295,7 @@ export class TelegramAppController {
       return
     }
     const state = this.state
+    if (this.patchChatFromUpdate(update)) return
     if (state.screen === 'sidebar' && state.focus === 'chats' || state.screen === 'asleep' || state.screen === 'newMessage') {
       await this.refreshRootChats()
       return
@@ -368,8 +380,11 @@ export class TelegramAppController {
       const storedChats = await this.cache?.getChats().catch(() => undefined)
       if (storedChats && storedChats.length > 0) {
         this.showingStoredChats = true
-        await this.setState(this.chatsState(storedChats, 0))
+        await this.setState(this.chatsState(storedChats, 0, { status: UPDATING_STATUS }))
       }
+      // Ask for the chat list while the session check is still running; it is dropped if the session is not authorized.
+      const chatsRequest = this.api.listChats(CHAT_LIST_LIMIT)
+      chatsRequest.catch(() => undefined)
       const status = await this.api.authStatus()
       if (!status.authorized) {
         this.showingStoredChats = false
@@ -384,7 +399,7 @@ export class TelegramAppController {
         })
         return
       }
-      await this.loadChats()
+      await this.loadChats(undefined, chatsRequest)
     })
   }
 
@@ -401,7 +416,16 @@ export class TelegramAppController {
         await this.bridge.turnScreenOff?.()
         return
       }
-      await this.init()
+      const screen = this.state.screen
+      if (screen === 'loading' || screen === 'auth' || screen === 'error') {
+        await this.init()
+        return
+      }
+      // The session is already loaded: refresh what is on screen without losing the user's place.
+      const here = this.state
+      if (here.screen === 'sidebar' && here.focus === 'messages') void this.refreshVisibleMessages()
+      else if (here.screen === 'sidebar' && here.focus === 'chats') void this.refreshRootChats()
+      else if (here.screen === 'newMessage') void this.refreshRootChats()
       return
     }
 
@@ -977,113 +1001,56 @@ export class TelegramAppController {
       // The dispatch-level filter in `dispatch` has already dropped
       // any idle system `doublePress`. See `isIdleSystemDoublePress`.
       void this.bridge.setAudioEnabled(false).catch(() => undefined)
-      if (Date.now() - state.startedAt < this.runtimeConfig.recordingMinDurationMs) {
-        await this.setState({
-          screen: 'sidebar', focus: 'messages',
-          chats: state.chats, selectedChatIndex: state.selectedChatIndex,
-          chat: state.chat,
-          topic: state.topic,
-          messages: state.messages,
-          back: state.back,
-          status: state.status,
-          newerPages: state.newerPages,
-          isNewestPage: state.isNewestPage,
-          scrollOffset: state.scrollOffset,
-          typing: state.typing,
-        })
-        return
-      }
-      await this.setState({
-        screen: 'sidebar', focus: 'messages',
-        chats: state.chats, selectedChatIndex: state.selectedChatIndex,
-        chat: state.chat,
-        topic: state.topic,
-        messages: state.messages,
-        back: state.back,
-        status: state.status,
-        newerPages: state.newerPages,
-        isNewestPage: state.isNewestPage,
-        scrollOffset: state.scrollOffset,
-        typing: state.typing,
-      })
+      await this.setState(backToMessages(state))
       return
     }
     if (input.type === 'longPressRelease' && !this.holdRecording) return
     if (input.type === 'press' && !isTeleGlanceFixtureMode()) return // stop is by releasing the hold
     if (input.type !== 'press' && input.type !== 'longPressRelease') return
     this.holdRecording = false
-    await this.setState({
-      screen: 'sidebarTranscribing', focus: 'messages',
-      chats: state.chats, selectedChatIndex: state.selectedChatIndex,
-      chat: state.chat,
-      topic: state.topic,
-      messages: state.messages,
-      back: state.back,
-      status: state.status,
-      newerPages: state.newerPages,
-      isNewestPage: state.isNewestPage,
-      scrollOffset: state.scrollOffset,
-      typing: state.typing,
-    })
+    await this.setState({ ...backToMessages(state), screen: 'sidebarTranscribing' as const })
     if (isTeleGlanceFixtureMode()) {
       const total = state.chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0)
       logRecordingEvent('stop', { totalBytes: total, chunks: state.chunks.length })
       logRecordingEvent('transcribe.start', { chunks: state.chunks.length })
     }
     void this.bridge.setAudioEnabled(false).catch(() => undefined)
-    await this.run(async () => {
-      if (!hasRecordableAudio(state.chunks)) {
-        if (isTeleGlanceFixtureMode()) logRecordingEvent('transcribe.end', { transcript: '', rejected: true })
-        await this.setState({
-          screen: 'sidebar', focus: 'messages',
-          chats: state.chats, selectedChatIndex: state.selectedChatIndex,
-          chat: state.chat,
-          topic: state.topic,
-          messages: state.messages,
-          back: state.back,
-          status: state.status,
-          newerPages: state.newerPages,
-          isNewestPage: state.isNewestPage,
-          scrollOffset: state.scrollOffset,
-          typing: state.typing,
-        })
-        return
+    const didntCatch = () => this.setState(backToMessages(state, { status: DIDNT_CATCH_STATUS }))
+    if (!hasRecordableAudio(state.chunks)) {
+      if (isTeleGlanceFixtureMode()) logRecordingEvent('transcribe.end', { transcript: '', rejected: true })
+      await didntCatch()
+      return
+    }
+    const wav = pcmChunksToWav(state.chunks)
+    const transcribeOnce = async () => {
+      await this.setState({ ...backToMessages(state), screen: 'sidebarTranscribing' as const })
+      let transcript: string
+      try {
+        const result = await this.api.transcribe(wav, this.runtimeConfig.language)
+        transcript = result.text.trim()
+      } catch (error) {
+        // The server rejects near-silent audio: that is "nothing heard", not a failure of the app.
+        if (error instanceof Error && /silent/i.test(error.message)) {
+          if (isTeleGlanceFixtureMode()) logRecordingEvent('transcribe.end', { transcript: '', rejected: true })
+          await didntCatch()
+          return
+        }
+        throw error
       }
-      const result = await this.api.transcribe(pcmChunksToWav(state.chunks), this.runtimeConfig.language)
-      const transcript = result.text.trim()
-      if (isTeleGlanceFixtureMode()) logRecordingEvent('transcribe.end', { transcript: result.text.trim() })
+      if (isTeleGlanceFixtureMode()) logRecordingEvent('transcribe.end', { transcript })
       if (transcript.length === 0) {
-        await this.setState({
-          screen: 'sidebar', focus: 'messages',
-          chats: state.chats, selectedChatIndex: state.selectedChatIndex,
-          chat: state.chat,
-          topic: state.topic,
-          messages: state.messages,
-          back: state.back,
-          status: state.status,
-          newerPages: state.newerPages,
-          isNewestPage: state.isNewestPage,
-          scrollOffset: state.scrollOffset,
-          typing: state.typing,
-        })
+        await didntCatch()
         return
       }
       await this.setState({
-        screen: 'sidebarConfirm', focus: 'messages',
-        chats: state.chats, selectedChatIndex: state.selectedChatIndex,
-        chat: state.chat,
-        topic: state.topic,
-        messages: state.messages,
+        ...backToMessages(state),
+        screen: 'sidebarConfirm' as const,
         transcript,
         selectedIndex: 0,
-        back: state.back,
-        status: state.status,
-        newerPages: state.newerPages,
-        isNewestPage: state.isNewestPage,
-        scrollOffset: state.scrollOffset,
-        typing: state.typing,
       })
-    })
+    }
+    // A transcription failure keeps the recording: pressing on the error screen transcribes it again.
+    await this.run(transcribeOnce, backToMessages(state), transcribeOnce)
   }
 
   private async handleSidebarConfirm(
@@ -1096,71 +1063,95 @@ export class TelegramAppController {
     if (input.type === 'doublePress') {
       // The dispatch-level filter in `dispatch` has already dropped
       // any idle system `doublePress`. See `isIdleSystemDoublePress`.
-      await this.setState({
-        screen: 'sidebar', focus: 'messages',
-        chats: state.chats, selectedChatIndex: state.selectedChatIndex,
-        chat: state.chat, topic: state.topic, messages: state.messages,
-        back: state.back, status: state.status,
-        newerPages: state.newerPages, isNewestPage: state.isNewestPage, scrollOffset: state.scrollOffset,
-        typing: state.typing,
-      })
+      await this.setState(backToMessages(state))
       return
     }
     if (input.type !== 'press') return
 
     if (state.selectedIndex === 1) {
-      await this.setState({
-        screen: 'sidebar', focus: 'messages',
-        chats: state.chats, selectedChatIndex: state.selectedChatIndex,
-        chat: state.chat, topic: state.topic, messages: state.messages,
-        back: state.back, status: state.status,
-        newerPages: state.newerPages, isNewestPage: state.isNewestPage, scrollOffset: state.scrollOffset,
-        typing: state.typing,
-      })
+      await this.setState(backToMessages(state))
       return
     }
 
-    await this.setState({
-      screen: 'sidebarSending', focus: 'messages',
-      chats: state.chats, selectedChatIndex: state.selectedChatIndex,
-      chat: state.chat,
-      topic: state.topic,
-      messages: state.messages,
-      transcript: state.transcript,
-      back: state.back,
-      status: state.status,
-      newerPages: state.newerPages,
-      isNewestPage: state.isNewestPage,
-      scrollOffset: state.scrollOffset,
-      typing: state.typing,
-    })
-    if (isTeleGlanceFixtureMode()) logRecordingEvent('confirm', { selected: 'send', transcript: state.transcript })
-    if (isTeleGlanceFixtureMode()) logRecordingEvent('send.start', { chatId: state.chat.id, topicId: state.topic?.id ?? null, transcript: state.transcript })
-    await this.run(async () => {
-      const sent = await this.api.sendMessage(state.chat.id, {
-        text: state.transcript,
-        topicId: topicThreadId(state.topic),
+    // A second press while the send is in flight must never send the same reply twice.
+    if (this.sendInFlight) return
+    this.sendInFlight = true
+    try {
+      await this.setState({ ...backToMessages(state), screen: 'sidebarSending' as const, transcript: state.transcript })
+      if (isTeleGlanceFixtureMode()) logRecordingEvent('confirm', { selected: 'send', transcript: state.transcript })
+      if (isTeleGlanceFixtureMode()) logRecordingEvent('send.start', { chatId: state.chat.id, topicId: state.topic?.id ?? null, transcript: state.transcript })
+      let sent: Message
+      try {
+        sent = await this.sendWithDuplicateCheck(state, state.transcript)
+      } catch (error) {
+        // Keep the transcript: Send tries again, Cancel returns to the thread.
+        const message = error instanceof Error && error.message ? error.message : 'Send failed'
+        await this.setState({ ...state, sendError: `Send failed: ${message}`.slice(0, 80), selectedIndex: 0 })
+        return
+      }
+      await this.run(async () => {
+        const refreshed = await this.refreshLatestMessages(state).catch(() => [])
+        const messages = refreshed.some((message) => String(message.id) === String(sent.id))
+          ? refreshed
+          : normalizeMessagePage([...refreshed, sent])
+        await this.setState(backToMessages(state, {
+          messages,
+          cursor: oldestMessageId(messages),
+          status: 'Sent',
+          newerPages: [],
+          isNewestPage: true,
+          scrollOffset: 0,
+          typing: state.typing ?? null,
+        }))
+        void this.refreshAfterSend(state, sent)
+      }, state)
+    } finally {
+      this.sendInFlight = false
+    }
+  }
+
+  /**
+   * Send a text reply. After a failed attempt the message may still have reached Telegram (a client-side
+   * timeout does not mean the server gave up), so look for the same text from me in the newest page
+   * before trying again and right after a failure, and reuse that message instead of sending a duplicate.
+   */
+  private async sendWithDuplicateCheck(thread: { chat: Chat; topic?: Topic }, text: string): Promise<Message> {
+    const key = `${messageThreadKey(thread)}\u0000${text}`
+    const failed = this.failedSend?.key === key ? this.failedSend : undefined
+    if (failed) {
+      const landed = await this.findSentCopy(thread, text, failed.startedAt)
+      if (landed) {
+        this.failedSend = undefined
+        return landed
+      }
+    }
+    const startedAt = failed?.startedAt ?? Date.now()
+    try {
+      const sent = await this.api.sendMessage(thread.chat.id, { text, topicId: topicThreadId(thread.topic) })
+      this.failedSend = undefined
+      return sent
+    } catch (error) {
+      this.failedSend = { key, startedAt }
+      const landed = await this.findSentCopy(thread, text, startedAt)
+      if (landed) {
+        this.failedSend = undefined
+        return landed
+      }
+      throw error
+    }
+  }
+
+  private async findSentCopy(thread: { chat: Chat; topic?: Topic }, text: string, since: number): Promise<Message | undefined> {
+    try {
+      const page = await this.refreshLatestMessages(thread)
+      return page.find((message) => {
+        if (!message.outgoing || message.text.trim() !== text.trim()) return false
+        const at = message.sentAt ? Date.parse(message.sentAt) : NaN
+        return Number.isNaN(at) || at >= since - 60_000
       })
-      const refreshed = await this.refreshLatestMessages(state).catch(() => [])
-      const messages = refreshed.some((message) => String(message.id) === String(sent.id))
-        ? refreshed
-        : normalizeMessagePage([...refreshed, sent])
-      await this.setState({
-        screen: 'sidebar', focus: 'messages',
-        chats: state.chats, selectedChatIndex: state.selectedChatIndex,
-        chat: state.chat,
-        topic: state.topic,
-        messages,
-        cursor: oldestMessageId(messages),
-        back: state.back,
-        status: 'Sent',
-        newerPages: [],
-        isNewestPage: true,
-        scrollOffset: 0,
-        typing: state.typing ?? null,
-      })
-      void this.refreshAfterSend(state, sent)
-    }, state)
+    } catch {
+      return undefined
+    }
   }
 
   private async handleSidebarSent(
@@ -1174,14 +1165,10 @@ export class TelegramAppController {
     }
     if (input.type === 'press') {
       const messages = await this.refreshLatestMessages(state)
-      await this.setState({
-        screen: 'sidebar', focus: 'messages',
-        chats: state.chats, selectedChatIndex: state.selectedChatIndex,
-        chat: state.chat, topic: state.topic,
+      await this.setState(backToMessages(state, {
         messages, cursor: oldestMessageId(messages),
-        back: state.back, newerPages: [], isNewestPage: true, scrollOffset: 0,
-        typing: state.typing,
-      })
+        status: undefined, newerPages: [], isNewestPage: true, scrollOffset: 0,
+      }))
     }
   }
 
@@ -1193,19 +1180,22 @@ export class TelegramAppController {
       return
     }
     if (input.type === 'press') {
+      // Retry the action that failed instead of restarting at the chat list.
+      const retry = this.errorRetry
+      this.errorRetry = undefined
       if (state.previous) await this.setState(state.previous)
-      await this.init()
+      if (retry) {
+        await this.run(retry, state.previous, retry)
+      } else if (!state.previous) {
+        await this.init()
+      }
     }
   }
 
-  private async loadChats(previous?: RecoverableState) {
+  private async loadChats(previous?: RecoverableState, request?: Promise<Chat[]>) {
     await this.run(async () => {
-      const [chats, folders] = await Promise.all([
-        this.api.listChats(CHAT_LIST_LIMIT),
-        // Folders are optional: a failure here must never block the chat list.
-        this.api.listFolders().catch(() => [] as Folder[]),
-      ])
-      this.folders = folders
+      const chats = await (request ?? this.api.listChats(CHAT_LIST_LIMIT))
+      this.folders = []
       this.activeFolderId = undefined
       this.chatsHasMore = chats.length >= CHAT_LIST_LIMIT
       this.loadingMoreChats = false
@@ -1221,9 +1211,40 @@ export class TelegramAppController {
       this.showingStoredChats = false
       const keptIndex = keptChatId === undefined ? -1 : chats.findIndex((chat) => String(chat.id) === keptChatId)
       await this.setState(this.chatsState(chats, keptIndex >= 0 ? keptIndex : 0))
-      this.scheduleFolderWarm()
+      // Folders are optional and never block the chat list: apply them whenever they arrive.
+      const generation = this.folderSwitchId
+      void this.api.listFolders().then(async (folders) => {
+        if (generation !== this.folderSwitchId || folders.length === 0) return
+        this.folders = folders
+        const current = this.state
+        if (current.screen === 'sidebar' && current.focus === 'chats' && this.activeFolderId === undefined) {
+          await this.setState({ ...current, folderLabel: this.folderLabel() })
+        }
+        this.scheduleFolderWarm()
+      }).catch(() => undefined)
       // The chat list has no preview panel, so nothing is fetched until a chat is opened.
     }, previous)
+  }
+
+  /**
+   * Apply a live message to the chat list without asking the server for the whole list again.
+   * Only safe for my own messages in plain chats already listed: unread counts and the new-message
+   * notice depend on server state, so everything else still takes the full refresh.
+   */
+  private patchChatFromUpdate(update: TelegramUpdate): boolean {
+    if (!update.message.outgoing || this.activeFolderId !== undefined) return false
+    const current = this.state
+    if (current.screen !== 'sidebar' || current.focus !== 'chats') return false
+    const index = current.chats.findIndex((chat) => String(chat.id) === String(update.chatId))
+    if (index < 0 || current.chats[index].isForum) return false
+    const patched: Chat = { ...current.chats[index], lastMessage: update.message.text }
+    const chats = [patched, ...current.chats.filter((_, i) => i !== index)]
+    this.rememberChats(chats)
+    this.cache?.putChats(chats)
+    // Keep the highlight on the same chat if it was not the one that moved.
+    const selected = current.selectedChatIndex === index ? 0 : current.selectedChatIndex + (current.selectedChatIndex < index ? 1 : 0)
+    void this.setState({ ...current, chats, selectedChatIndex: selected })
+    return true
   }
 
   /** Photo pixels for a message, fetched once and kept for the next visit. */
@@ -1909,11 +1930,12 @@ export class TelegramAppController {
     await this.loadChats()
   }
 
-  private async run(operation: () => Promise<void>, previous?: RecoverableState) {
+  private async run(operation: () => Promise<void>, previous?: RecoverableState, retry?: () => Promise<void>) {
     try {
       await operation()
     } catch (error) {
       await this.bridge.setAudioEnabled(false).catch(() => undefined)
+      this.errorRetry = retry
       await this.setState({
         screen: 'error',
         message: error instanceof Error ? error.message : 'Unknown error',
@@ -2414,6 +2436,7 @@ export class TelegramAppController {
       this.deferMessageRefresh()
       return
     }
+    if (this.patchChatFromUpdate(update)) return
     this.deferRootRefresh()
   }
 

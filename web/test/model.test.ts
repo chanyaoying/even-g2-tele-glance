@@ -1057,3 +1057,19 @@ describe('replies, forwards, polls and link cards', () => {
     expect(model.panelImage?.topLine).toBe(2)
   })
 })
+
+describe('backToMessages and send errors', () => {
+  const chat = { id: '1', title: 'A', kind: 'user' as const }
+  it('copies the thread fields and applies overrides', async () => {
+    const { backToMessages } = await import('../src/controller/model')
+    const base = { ...messageState([]), } as Extract<AppState, { screen: 'sidebar'; focus: 'messages' }>
+    const back = backToMessages({ ...base, chat }, { status: "Didn't catch that" })
+    expect(back).toMatchObject({ screen: 'sidebar', focus: 'messages', chat, status: "Didn't catch that" })
+  })
+
+  it('shows the send error above the transcript in the confirm popup', () => {
+    const base = messageState([]) as Extract<AppState, { screen: 'sidebar'; focus: 'messages' }>
+    const model = screenModel({ ...base, screen: 'sidebarConfirm', transcript: 'hello', selectedIndex: 0, sendError: 'Send failed: timeout' } as AppState)
+    expect(JSON.stringify(model)).toContain('Send failed: timeout')
+  })
+})
