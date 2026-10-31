@@ -94,8 +94,11 @@ export class PersistentCache {
     }
   }
 
+  /** Set after the host storage errors or stalls once; the cache then stays off for the rest of the session. */
+  private broken = false
+
   get available(): boolean {
-    return Boolean(this.storage?.getLocalStorage && this.storage?.setLocalStorage)
+    return !this.broken && Boolean(this.storage?.getLocalStorage && this.storage?.setLocalStorage)
   }
 
   /** Load the index. A different account, an old format or expired entries are discarded here. */
@@ -260,21 +263,36 @@ export class PersistentCache {
 
   private async read(key: string): Promise<string | undefined> {
     try {
-      const value = await this.storage?.getLocalStorage?.(key)
+      const value = await withTimeout(this.storage?.getLocalStorage?.(key), STORAGE_TIMEOUT_MS)
       return value ? value : undefined
     } catch {
+      this.broken = true
       return undefined
     }
   }
 
   private async write(key: string, value: string): Promise<boolean> {
     try {
-      const result = await this.storage?.setLocalStorage?.(key, value)
+      const result = await withTimeout(this.storage?.setLocalStorage?.(key, value), STORAGE_TIMEOUT_MS)
       return result !== false
     } catch {
+      this.broken = true
       return false
     }
   }
+}
+
+const STORAGE_TIMEOUT_MS = 2000
+
+/** The host bridge can stall or fail; the cache must never hold up startup or input because of it. */
+function withTimeout<T>(value: Promise<T> | T | undefined, ms: number): Promise<T | undefined> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('storage timeout')), ms)
+    Promise.resolve(value).then(
+      (result) => { clearTimeout(timer); resolve(result) },
+      (error) => { clearTimeout(timer); reject(error) },
+    )
+  })
 }
 
 function safeParse<T>(raw: string): T | undefined {

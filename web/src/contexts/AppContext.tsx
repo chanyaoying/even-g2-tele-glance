@@ -105,7 +105,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           apiHash: restoredSettings.telegramApiHash.trim(),
           session: restoredSettings.telegramSession.trim(),
           backend: restoredSettings.apiBaseUrl.trim(),
-        }))
+        })).catch(() => undefined)
         const createdController = new TelegramAppController(
           api,
           glasses,
