@@ -129,6 +129,12 @@ class TypingUpdate(ApiModel):
     user_name: Optional[str] = None
     action: Literal["typing", "cancel"] = "typing"
 
+class ResyncUpdate(ApiModel):
+    """Sent when a burst overflowed the stream's queue: the phone must refetch what it is showing."""
+
+    type: Literal["resync"] = "resync"
+
+
 class SendMessageRequest(ApiModel):
     text: str = Field(min_length=1)
     topic_id: Optional[int] = None

@@ -19,6 +19,7 @@ from app.models import (
     ReplyInfo,
     PhoneLoginStart,
     PhoneLoginStatus,
+    ResyncUpdate,
     SendMessageResponse,
     TelegramUpdate,
     TopicSummary,
@@ -44,13 +45,37 @@ class TelegramServiceTimeoutError(TelegramServiceError):
     pass
 
 
+class TelegramRateLimitError(TelegramServiceError):
+    """Telegram asked the account to wait; `seconds` is how long."""
+
+    def __init__(self, seconds: int) -> None:
+        self.seconds = max(1, int(seconds))
+        super().__init__(f"Telegram asks you to wait {self.seconds} s before trying again.")
+
+
 
 def _is_auth_key_error(exc: Exception) -> bool:
     name = exc.__class__.__name__
     return name in ("AuthKeyUnregisteredError", "AuthKeyDuplicatedError")
 
 
+_FLOOD_WAIT_NAMES = {"FloodWaitError", "SlowModeWaitError", "FloodPremiumWaitError", "FloodTestPhoneWaitError"}
+
+
+def _flood_wait_seconds(exc: Exception) -> Optional[int]:
+    # Telethon's flood errors are separate classes (SlowModeWaitError is not a FloodWaitError subclass), so match by name.
+    if not any(cls.__name__ in _FLOOD_WAIT_NAMES for cls in type(exc).__mro__):
+        return None
+    seconds = getattr(exc, "seconds", None)
+    return int(seconds) if isinstance(seconds, (int, float)) else 1
+
+
 def wrap_telegram_error(exc: Exception) -> TelegramServiceError:
+    if isinstance(exc, TelegramServiceError):
+        return exc
+    flood = _flood_wait_seconds(exc)
+    if flood is not None:
+        return TelegramRateLimitError(flood)
     if isinstance(exc, TimeoutError):
         return TelegramServiceTimeoutError("Telegram request timed out. Please retry.")
     if _is_auth_key_error(exc):
@@ -129,7 +154,7 @@ class TelegramService(Protocol):
     ) -> None:
         ...
 
-    def update_events(self) -> AsyncIterator[Union[TelegramUpdate, TypingUpdate]]:
+    def update_events(self) -> AsyncIterator[Union[TelegramUpdate, TypingUpdate, ResyncUpdate]]:
         ...
 
 
@@ -211,6 +236,9 @@ FOLDER_LOOKAHEAD = 60
 # A refresh of page one only needs the top of the list; the deeper cached chats are kept.
 HEAD_REFRESH = 40
 PHOTO_CACHE_SIZE = 48
+UPDATE_QUEUE_SIZE = 50
+REPLY_CACHE_CHATS = 16
+REPLY_CACHE_PER_CHAT = 200
 
 
 @dataclass
@@ -284,14 +312,55 @@ def normalize_message(message: Any, entities_by_peer: Optional[dict[int, Any]] =
     )
 
 
+class ReplyPreviewCache:
+    """Small LRU of resolved reply originals, per chat: repeat page fetches then skip the Telegram lookup."""
+
+    def __init__(self, max_chats: int = REPLY_CACHE_CHATS, per_chat: int = REPLY_CACHE_PER_CHAT) -> None:
+        self._chats: "OrderedDict[int, OrderedDict[int, tuple[Optional[str], str]]]" = OrderedDict()
+        self._max_chats = max_chats
+        self._per_chat = per_chat
+
+    def get(self, chat_id: int, message_id: int) -> Optional[tuple[Optional[str], str]]:
+        entries = self._chats.get(chat_id)
+        if entries is None or message_id not in entries:
+            return None
+        entries.move_to_end(message_id)
+        self._chats.move_to_end(chat_id)
+        return entries[message_id]
+
+    def put(self, chat_id: int, message_id: int, sender: Optional[str], preview: str) -> None:
+        entries = self._chats.setdefault(chat_id, OrderedDict())
+        entries[message_id] = (sender, preview)
+        entries.move_to_end(message_id)
+        while len(entries) > self._per_chat:
+            entries.popitem(last=False)
+        self._chats.move_to_end(chat_id)
+        while len(self._chats) > self._max_chats:
+            self._chats.popitem(last=False)
+
+    def invalidate(self, chat_id: int, message_id: int) -> None:
+        entries = self._chats.get(chat_id)
+        if entries is not None:
+            entries.pop(message_id, None)
+
+    def clear(self) -> None:
+        self._chats.clear()
+
+
 async def attach_replies(
     client_get_messages: Any,
     raw_messages: list[Any],
     summaries: list[MessageSummary],
     *,
     topic_id: Optional[int] = None,
+    cache: Optional[ReplyPreviewCache] = None,
+    chat_id: Optional[int] = None,
 ) -> None:
-    """Fill `reply_to` on each summary. Originals already in the batch are reused; the rest cost one lookup."""
+    """Fill `reply_to` on each summary. Originals already in the batch are reused; the rest cost one lookup.
+
+    With `cache` and `chat_id`, originals resolved earlier come from the cache and only unseen ones are fetched.
+    """
+    use_cache = cache is not None and chat_id is not None
     targets = {}
     for raw, summary in zip(raw_messages, summaries):
         target = reply_target_id(raw, topic_id)
@@ -300,7 +369,14 @@ async def attach_replies(
     if not targets:
         return
     known = {int(getattr(raw, "id")): (raw, summary) for raw, summary in zip(raw_messages, summaries)}
-    missing = sorted({target for target in targets.values() if target not in known})
+    cached: dict[int, tuple[Optional[str], str]] = {}
+    if use_cache:
+        for target in set(targets.values()):
+            if target not in known:
+                hit = cache.get(chat_id, target)
+                if hit is not None:
+                    cached[target] = hit
+    missing = sorted({target for target in targets.values() if target not in known and target not in cached})
     fetched: dict[int, Any] = {}
     if missing:
         try:
@@ -316,9 +392,15 @@ async def attach_replies(
         if target in known:
             original, original_summary = known[target]
             sender = original_summary.sender
+        elif target in cached:
+            sender, preview = cached[target]
+            summary.reply_to = ReplyInfo(message_id=target, sender=sender, preview=preview)
+            continue
         elif target in fetched:
             original = fetched[target]
             sender = _display_name(getattr(original, "sender", None)) if getattr(original, "sender", None) is not None else None
+            if use_cache:
+                cache.put(chat_id, target, sender, reply_preview(original))
         else:
             summary.reply_to = ReplyInfo(message_id=target)
             continue
@@ -500,6 +582,7 @@ class TelethonTelegramService:
         self._updates_registered = False
         self._entity_cache: dict[int, Any] = {}
         self._photo_cache: OrderedDict = OrderedDict()
+        self._reply_cache = ReplyPreviewCache()
         self._chat_requests: dict = {}
         self._dialog_lock = asyncio.Lock()
         self._user_name_cache: dict[int, str] = {}
@@ -589,13 +672,25 @@ class TelethonTelegramService:
         if message is None:
             return
         update = normalize_update_message(message, getattr(event, "chat_id", None))
+        # An edit changes what a reply to this message should quote; drop the stale copy.
+        self._reply_cache.invalidate(update.chat_id, update.message.id)
         await self._resolve_live_reply(update, message)
+        self._publish(update)
+
+    def _publish(self, update: Any) -> None:
+        """Fan an update out to every stream. A full queue drops its oldest items and gets a resync marker."""
         for queue in list(self._update_queues):
             try:
                 queue.put_nowait(update)
             except asyncio.QueueFull:
-                # The phone's polling and reconnect catch-up fill in whatever a burst pushed out.
-                pass
+                # Make room for the marker and the new update, then tell the phone it missed something.
+                for _ in range(2):
+                    try:
+                        queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                queue.put_nowait(ResyncUpdate())
+                queue.put_nowait(update)
 
     async def _resolve_live_reply(self, update: TelegramUpdate, message: Any) -> None:
         """Quote the replied-to message on a live update, as list_messages does, so the phone can use it as is."""
@@ -609,6 +704,8 @@ class TelethonTelegramService:
                 [message],
                 [update.message],
                 topic_id=update.topic_id,
+                cache=self._reply_cache,
+                chat_id=update.chat_id,
             )
         except Exception:  # a missing quote is cosmetic; never hold back the message itself
             logging.getLogger(__name__).debug("live reply lookup failed", exc_info=True)
@@ -619,11 +716,7 @@ class TelethonTelegramService:
         update = normalize_chat_action(event, self._typing_user_override(event))
         if update is None:
             return
-        for queue in list(self._update_queues):
-            try:
-                queue.put_nowait(update)
-            except asyncio.QueueFull:
-                pass
+        self._publish(update)
 
     def _typing_user_override(self, event: Any) -> Any:
         user = getattr(event, "user", None)
@@ -651,11 +744,11 @@ class TelethonTelegramService:
             sender = entities_by_peer.get(_message_peer_key(message))
         self._cache_user_name(sender)
 
-    async def update_events(self) -> AsyncIterator[Union[TelegramUpdate, TypingUpdate]]:
+    async def update_events(self) -> AsyncIterator[Union[TelegramUpdate, TypingUpdate, ResyncUpdate]]:
         client = await self._get_client()
         if not await client.is_user_authorized():
             raise TelegramServiceError("Telegram session is not authorized")
-        queue: asyncio.Queue[Union[TelegramUpdate, TypingUpdate]] = asyncio.Queue(maxsize=50)
+        queue: asyncio.Queue = asyncio.Queue(maxsize=UPDATE_QUEUE_SIZE)
         self._update_queues.add(queue)
         try:
             while True:
@@ -759,6 +852,7 @@ class TelethonTelegramService:
         self._client = None
         self._updates_registered = False
         self._entity_cache.clear()
+        self._reply_cache.clear()
         self._phone_code_hashes.clear()
         self._dialog_snapshot = None
         if client is None:
@@ -1010,6 +1104,8 @@ class TelethonTelegramService:
                     list(messages),
                     summaries,
                     topic_id=topic_id,
+                    cache=self._reply_cache,
+                    chat_id=chat_id,
                 )
                 return summaries
 
@@ -1021,6 +1117,8 @@ class TelethonTelegramService:
                 lambda ids: asyncio.wait_for(client.get_messages(entity, ids=ids), timeout=10),
                 list(messages),
                 summaries,
+                cache=self._reply_cache,
+                chat_id=chat_id,
             )
             return summaries
         except Exception as exc:

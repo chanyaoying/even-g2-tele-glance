@@ -28,6 +28,7 @@ from app.models import (
     PhoneLoginVerifyRequest,
     SendMessageRequest,
     SendMessageResponse,
+    ResyncUpdate,
     TopicSummary,
     TelegramUpdate,
     TranscriptionResponse,
@@ -35,7 +36,7 @@ from app.models import (
 )
 from app.services.audio import pcm16le_to_wav
 from app.services.secure_auth import SecureAuthError, decrypt_payload, encrypt_payload
-from app.services.telegram import TelegramService, TelegramServiceError, TelegramServiceTimeoutError, TelegramSessionExpiredError
+from app.services.telegram import TelegramService, TelegramServiceError, TelegramRateLimitError, TelegramServiceTimeoutError, TelegramSessionExpiredError
 from app.services.transcription import TranscriptionServiceError, WhisperTranscriptionService
 
 # Seconds of silence before the update stream sends a keepalive comment; the phone treats ~3x this as dead.
@@ -46,6 +47,8 @@ timing_logger = logging.getLogger("uvicorn.error")
 def raise_telegram_http_error(exc: Exception) -> None:
     if isinstance(exc, TelegramSessionExpiredError):
         raise HTTPException(status_code=401, detail=str(exc)) from exc
+    if isinstance(exc, TelegramRateLimitError):
+        raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": str(exc.seconds)}) from exc
     if isinstance(exc, (TelegramServiceTimeoutError, TimeoutError)):
         raise HTTPException(status_code=504, detail=str(exc) or "Telegram request timed out. Please retry.") from exc
     raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -69,7 +72,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
-        expose_headers=["X-TeleGlance-Encrypted", "Server-Timing"],
+        expose_headers=["X-TeleGlance-Encrypted", "Server-Timing", "Retry-After"],
     )
 
     async def require_app_backend_auth(request: Request) -> None:
@@ -272,7 +275,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     except StopAsyncIteration:
                         return
                     payload = update.model_dump_json(by_alias=True)
-                    if isinstance(update, TypingUpdate):
+                    if isinstance(update, ResyncUpdate):
+                        yield f"event: resync\ndata: {event_data(payload)}\n\n"
+                    elif isinstance(update, TypingUpdate):
                         yield f"event: typing\ndata: {event_data(payload)}\n\n"
                     else:
                         yield f"event: message\ndata: {event_data(payload)}\n\n"
