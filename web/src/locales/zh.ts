@@ -183,8 +183,19 @@ const zh: LocaleStrings = {
   settingsSave: '保存设置',
   settingsSaved: '已保存',
   settingsReset: '重置',
-  settingsClearCache: 'Clear cache',
-  settingsCacheCleared: 'Cache cleared',
+  settingsClearCache: '清除缓存',
+  settingsCacheCleared: '缓存已清除',
+  settingsTestConnection: '测试连接',
+  settingsTesting: '测试中...',
+  settingsTestHealthOk: '后端可访问',
+  settingsTestHealthFail: '后端无法访问',
+  settingsTestSessionOk: '密钥已通过,Telegram 已登录',
+  settingsTestSessionNotLoggedIn: '密钥已通过,Telegram 尚未登录',
+  settingsTestSessionFail: '后端拒绝了请求',
+  settingsTestSessionSkipped: '已跳过(后端无法访问)',
+  phoneForwardedFrom: '转发自',
+  phonePhoto: '照片',
+  phoneSticker: '贴纸',
 }
 
 export default zh

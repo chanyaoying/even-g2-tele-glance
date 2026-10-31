@@ -181,8 +181,19 @@ const ms: LocaleStrings = {
   settingsSave: 'Simpan Tetapan',
   settingsSaved: 'Disimpan',
   settingsReset: 'Tetap Semula',
-  settingsClearCache: 'Clear cache',
-  settingsCacheCleared: 'Cache cleared',
+  settingsClearCache: 'Kosongkan cache',
+  settingsCacheCleared: 'Cache dikosongkan',
+  settingsTestConnection: 'Uji sambungan',
+  settingsTesting: 'Menguji...',
+  settingsTestHealthOk: 'Pelayan boleh dicapai',
+  settingsTestHealthFail: 'Pelayan tidak boleh dicapai',
+  settingsTestSessionOk: 'Rahsia diterima, Telegram telah log masuk',
+  settingsTestSessionNotLoggedIn: 'Rahsia diterima, Telegram belum log masuk',
+  settingsTestSessionFail: 'Pelayan menolak permintaan',
+  settingsTestSessionSkipped: 'Dilangkau (pelayan tidak boleh dicapai)',
+  phoneForwardedFrom: 'Dimajukan daripada',
+  phonePhoto: 'foto',
+  phoneSticker: 'pelekat',
 }
 
 export default ms

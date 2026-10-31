@@ -438,3 +438,14 @@ textarea {
     align-items: flex-start;
   }
 }
+
+.bubble-forward, .bubble-reply { opacity: 0.7; font-size: 0.85em; margin: 0 0 4px; }
+.bubble-reply { border-left: 2px solid currentColor; padding-left: 6px; }
+.bubble-media { opacity: 0.8; font-style: italic; margin: 0 0 4px; }
+.bubble-link { border-left: 2px solid currentColor; padding-left: 6px; margin-top: 4px; display: flex; flex-direction: column; font-size: 0.9em; }
+.bubble-link p { margin: 2px 0 0; opacity: 0.8; }
+.bubble-poll { margin-top: 4px; }
+.poll-option { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; margin-top: 4px; font-size: 0.9em; }
+.poll-bar { grid-column: 1 / -1; grid-row: 2; height: 4px; background: rgba(128,128,128,0.3); border-radius: 2px; overflow: hidden; }
+.poll-bar i { display: block; height: 100%; background: currentColor; }
+.test-results { margin: 4px 0; padding-left: 18px; font-size: 0.9em; }

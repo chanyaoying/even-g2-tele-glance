@@ -183,8 +183,19 @@ const ko: LocaleStrings = {
   settingsSave: '설정 저장',
   settingsSaved: '저장됨',
   settingsReset: '초기화',
-  settingsClearCache: 'Clear cache',
-  settingsCacheCleared: 'Cache cleared',
+  settingsClearCache: '캐시 지우기',
+  settingsCacheCleared: '캐시를 지웠습니다',
+  settingsTestConnection: '연결 테스트',
+  settingsTesting: '테스트 중...',
+  settingsTestHealthOk: '백엔드에 연결할 수 있음',
+  settingsTestHealthFail: '백엔드에 연결할 수 없음',
+  settingsTestSessionOk: '시크릿 승인됨, 텔레그램 로그인됨',
+  settingsTestSessionNotLoggedIn: '시크릿 승인됨, 텔레그램 아직 로그인 안 됨',
+  settingsTestSessionFail: '백엔드가 요청을 거부했습니다',
+  settingsTestSessionSkipped: '건너뜀(백엔드에 연결할 수 없음)',
+  phoneForwardedFrom: '전달됨:',
+  phonePhoto: '사진',
+  phoneSticker: '스티커',
 }
 
 export default ko
