@@ -157,6 +157,8 @@ const cs: LocaleStrings = {
   settingsSave: 'Uložit nastavení',
   settingsSaved: 'Uloženo',
   settingsReset: 'Obnovit',
+  settingsClearCache: 'Clear cache',
+  settingsCacheCleared: 'Cache cleared',
   bridgeEmptyList: 'Prázdné',
 }
 export default cs

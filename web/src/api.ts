@@ -27,12 +27,12 @@ export interface TelegramApi {
   listChats(limit?: number, options?: ListChatsOptions): Promise<Chat[]>
   listFolders(): Promise<Folder[]>
   listTopics(chatId: Id): Promise<Topic[]>
-  listMessages(chatId: Id, options?: { topicId?: Id; beforeId?: Id; limit?: number }): Promise<Message[]>
+  listMessages(chatId: Id, options?: { topicId?: Id; beforeId?: Id; afterId?: Id; limit?: number }): Promise<Message[]>
   getPhoto(chatId: Id, messageId: Id): Promise<Photo>
   sendMessage(chatId: Id, request: SendMessageRequest): Promise<Message>
   markRead(chatId: Id, request: MarkReadRequest): Promise<void>
   transcribe(wav: Blob, language?: string): Promise<TranscriptionResult>
-  subscribeUpdates(onUpdate: (update: TelegramUpdate | TelegramTypingUpdate) => void, onError?: (error: Event | Error) => void): () => void
+  subscribeUpdates(onUpdate: (update: TelegramUpdate | TelegramTypingUpdate) => void, onError?: (error: Event | Error) => void, onReconnect?: () => void): () => void
 }
 
 export type TelegramAuthConfig = {
@@ -139,10 +139,11 @@ export class HttpTelegramApi implements TelegramApi {
     return this.get(`/api/chats/${encodeURIComponent(String(chatId))}/topics`)
   }
 
-  async listMessages(chatId: Id, options: { topicId?: Id; beforeId?: Id; limit?: number } = {}): Promise<Message[]> {
+  async listMessages(chatId: Id, options: { topicId?: Id; beforeId?: Id; afterId?: Id; limit?: number } = {}): Promise<Message[]> {
     const params = new URLSearchParams()
     if (options.topicId) params.set('topic_id', String(options.topicId))
     if (options.beforeId) params.set('before_id', String(options.beforeId))
+    if (options.afterId) params.set('after_id', String(options.afterId))
     params.set('limit', String(options.limit ?? 8))
     return this.get(`/api/chats/${encodeURIComponent(String(chatId))}/messages?${params.toString()}`)
   }
@@ -178,13 +179,43 @@ export class HttpTelegramApi implements TelegramApi {
     const sttBaseUrl = this.sttBaseUrl()
     return this.request('/api/transcribe', { method: 'POST', body: form }, sttBaseUrl, sttBaseUrl === this.baseUrl)
   }
-  subscribeUpdates(onUpdate: (update: TelegramUpdate | TelegramTypingUpdate) => void, onError?: (error: Event | Error) => void) {
+  subscribeUpdates(onUpdate: (update: TelegramUpdate | TelegramTypingUpdate) => void, onError?: (error: Event | Error) => void, onReconnect?: () => void) {
     if (typeof fetch === 'undefined' || typeof AbortController === 'undefined') return () => undefined
     const controller = new AbortController()
-    void this.streamUpdates(controller.signal, onUpdate).catch((error) => {
-      if (!controller.signal.aborted) onError?.(error instanceof Error ? error : new Error('Update stream failed'))
-    })
+    void this.keepStreamAlive(controller.signal, onUpdate, onError, onReconnect)
     return () => controller.abort()
+  }
+
+  /** Keep one update stream open for as long as the caller is subscribed, reconnecting with backoff when it drops. */
+  private async keepStreamAlive(
+    signal: AbortSignal,
+    onUpdate: (update: TelegramUpdate | TelegramTypingUpdate) => void,
+    onError?: (error: Event | Error) => void,
+    onReconnect?: () => void,
+  ) {
+    let failures = 0
+    let connections = 0
+    while (!signal.aborted) {
+      const startedAt = Date.now()
+      try {
+        await this.streamUpdates(signal, onUpdate, () => {
+          connections += 1
+          // A reconnect may have missed events while it was down, so let the caller catch up.
+          if (connections > 1) onReconnect?.()
+        })
+      } catch (error) {
+        if (signal.aborted) return
+        if (isUnrecoverableStreamError(error)) {
+          onError?.(error instanceof Error ? error : new Error('Update stream failed'))
+          return
+        }
+        onError?.(error instanceof Error ? error : new Error('Update stream failed'))
+      }
+      if (signal.aborted) return
+      // A stream that stayed up for a while was healthy, so the next drop starts the backoff over.
+      failures = Date.now() - startedAt > STREAM_HEALTHY_MS ? 0 : failures + 1
+      await sleepUnlessAborted(Math.min(STREAM_RETRY_MAX_MS, STREAM_RETRY_BASE_MS * 2 ** Math.max(0, failures - 1)), signal)
+    }
   }
 
   private get<T>(path: string): Promise<T> {
@@ -269,26 +300,51 @@ export class HttpTelegramApi implements TelegramApi {
   private async streamUpdates(
     signal: AbortSignal,
     onUpdate: (update: TelegramUpdate | TelegramTypingUpdate) => void,
+    onOpen?: () => void,
   ) {
     const headers = await this.withTelegramHeaders(undefined, true)
-    let response: Response
-    try {
-      response = await fetch(`${this.baseUrl}/api/updates`, {
-        headers,
-        signal,
-      })
-    } catch {
-      throw new Error(BACKEND_UNREACHABLE_MESSAGE)
+    // The server sends a keepalive every few seconds; silence means the connection died without telling us.
+    const inner = new AbortController()
+    const forwardAbort = () => inner.abort()
+    signal.addEventListener('abort', forwardAbort, { once: true })
+    let watchdog: ReturnType<typeof setTimeout> | undefined
+    const resetWatchdog = () => {
+      if (watchdog) clearTimeout(watchdog)
+      watchdog = setTimeout(() => inner.abort(), STREAM_SILENCE_MS)
     }
-    if (!response.ok) throw new Error(readableErrorText(response.status, await this.responseText(response, true)))
-    if (!response.body) throw new Error('Update stream is unavailable')
+    try {
+      resetWatchdog()
+      let response: Response
+      try {
+        response = await fetch(`${this.baseUrl}/api/updates`, {
+          headers,
+          signal: inner.signal,
+        })
+      } catch {
+        throw new Error(BACKEND_UNREACHABLE_MESSAGE)
+      }
+      if (!response.ok) throw new Error(readableErrorText(response.status, await this.responseText(response, true)))
+      if (!response.body) throw new Error('Update stream is unavailable')
+      onOpen?.()
+      await this.readEventStream(response.body.getReader(), signal, onUpdate, resetWatchdog)
+    } finally {
+      if (watchdog) clearTimeout(watchdog)
+      signal.removeEventListener('abort', forwardAbort)
+    }
+  }
 
-    const reader = response.body.getReader()
+  private async readEventStream(
+    reader: ReadableStreamDefaultReader<Uint8Array>,
+    signal: AbortSignal,
+    onUpdate: (update: TelegramUpdate | TelegramTypingUpdate) => void,
+    onActivity: () => void,
+  ) {
     const decoder = new TextDecoder()
     let buffer = ''
     while (!signal.aborted) {
       const { done, value } = await reader.read()
       if (done) return
+      onActivity()
       buffer += decoder.decode(value, { stream: true })
       const events = buffer.split('\n\n')
       buffer = events.pop() ?? ''
@@ -389,5 +445,31 @@ function sleep(ms: number) {
     const timeout = setTimeout(resolve, ms)
     const maybeNodeTimeout = timeout as unknown as { unref?: () => void }
     maybeNodeTimeout.unref?.()
+  })
+}
+
+/** After this long without any bytes (the server sends a keepalive every 15 s) the stream is treated as dead. */
+const STREAM_SILENCE_MS = 45_000
+const STREAM_RETRY_BASE_MS = 1_000
+const STREAM_RETRY_MAX_MS = 30_000
+/** A stream that lived this long counts as healthy, which resets the retry backoff. */
+const STREAM_HEALTHY_MS = 30_000
+
+/** Missing settings never fix themselves by retrying; everything else (network, restart, 5xx) does. */
+function isUnrecoverableStreamError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : ''
+  return message.includes('shared secret is required') || message.includes('Encrypted auth requires')
+}
+
+function sleepUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve()
+    const timer = setTimeout(done, ms)
+    function done() {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', done)
+      resolve()
+    }
+    signal.addEventListener('abort', done, { once: true })
   })
 }

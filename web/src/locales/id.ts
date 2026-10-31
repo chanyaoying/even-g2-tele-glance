@@ -157,6 +157,8 @@ const id: LocaleStrings = {
   settingsSave: 'Simpan Pengaturan',
   settingsSaved: 'Disimpan',
   settingsReset: 'Atur Ulang',
+  settingsClearCache: 'Clear cache',
+  settingsCacheCleared: 'Cache cleared',
   bridgeEmptyList: 'Kosong',
 }
 export default id

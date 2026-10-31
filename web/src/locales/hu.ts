@@ -157,6 +157,8 @@ const hu: LocaleStrings = {
   settingsSave: 'Beállítások mentése',
   settingsSaved: 'Mentve',
   settingsReset: 'Visszaállítás',
+  settingsClearCache: 'Clear cache',
+  settingsCacheCleared: 'Cache cleared',
   bridgeEmptyList: 'Üres',
 }
 export default hu

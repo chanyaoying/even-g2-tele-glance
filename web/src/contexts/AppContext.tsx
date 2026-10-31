@@ -6,6 +6,7 @@ import type { AppInput, AppState, ScreenModel } from '../controller/model'
 import { FixtureTelegramApi, bindFixtureApi, bindFixtureCommandHandler, setFixtureLocale } from '../fixtureApi'
 import { InstrumentedTelegramApi } from '../instrumentedApi'
 import { localeFromCode, setLocale } from '../locales'
+import { PersistentCache, cacheAccountStamp } from '../cache/persistentCache'
 
 import {
   clearFrontendConfigFromAppStorage,
@@ -30,6 +31,7 @@ type AppContextValue = {
   saveSettings: (settings: FrontendConfig) => Promise<void>
   resetSettings: () => Promise<void>
   logoutTelegram: () => Promise<void>
+  clearCache: () => Promise<void>
   localeVersion: number
 }
 
@@ -94,6 +96,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
         const api = new InstrumentedTelegramApi(baseApi)
         apiRef.current = api
         if (fixtureMode) logLifecycleEvent('start', {})
+        // Last known chats and recent threads, so a launch shows something before the network answers.
+        const persistentCache = fixtureMode
+          ? undefined
+          : new PersistentCache(appStorageRef.current, { canWrite: () => !(controllerRef.current?.isInputQuiet() ?? false) })
+        await persistentCache?.open(cacheAccountStamp({
+          apiId: restoredSettings.telegramApiId.trim(),
+          apiHash: restoredSettings.telegramApiHash.trim(),
+          session: restoredSettings.telegramSession.trim(),
+          backend: restoredSettings.apiBaseUrl.trim(),
+        }))
         const createdController = new TelegramAppController(
           api,
           glasses,
@@ -111,6 +123,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
             const telegramOk = Boolean(settings.telegramApiId.trim() && settings.telegramApiHash.trim())
             return telegramOk && Boolean(settings.apiBaseUrl.trim()) && Boolean(effectiveBackendSharedSecret(settings, settings.apiBaseUrl))
           },
+          persistentCache,
         )
         controller = createdController
         controllerRef.current = createdController
@@ -141,9 +154,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
           if (active) setState(next)
         })
         await createdController.init()
-        unsubscribeUpdates = api.subscribeUpdates((update) => {
-          void createdController.handleTelegramUpdate(update)
-        })
+        unsubscribeUpdates = api.subscribeUpdates(
+          (update) => {
+            void createdController.handleTelegramUpdate(update)
+          },
+          undefined,
+          () => {
+            void createdController.handleStreamReconnect()
+          },
+        )
       } catch (error) {
         if (active) setStartupError(error instanceof Error ? error.message : 'Startup failed')
       }
@@ -203,12 +222,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, [])
   const handleResetSettings = useCallback(async () => {
+    await controllerRef.current?.clearCache().catch(() => undefined)
     resetFrontendConfig()
     await clearFrontendConfigFromAppStorage(appStorageRef.current)
     window.location.reload()
   }, [])
 
+  const clearCache = useCallback(async () => {
+    await controllerRef.current?.clearCache()
+  }, [])
+
   const logoutTelegram = useCallback(async () => {
+    await controllerRef.current?.clearCache().catch(() => undefined)
     await apiRef.current?.logout()
     const next = { ...settingsRef.current, telegramSession: '' }
     saveFrontendConfig(next)
@@ -228,7 +253,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     saveSettings: handleSaveSettings,
     resetSettings: handleResetSettings,
     logoutTelegram,
-  }), [dispatch, handleResetSettings, handleSaveSettings, localeVersion, logoutTelegram, sendText, settings, startPhoneLogin, startupError, state, verifyPhoneLogin])
+    clearCache,
+  }), [clearCache, dispatch, handleResetSettings, handleSaveSettings, localeVersion, logoutTelegram, sendText, settings, startPhoneLogin, startupError, state, verifyPhoneLogin])
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>
 }

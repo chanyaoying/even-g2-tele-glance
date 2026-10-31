@@ -5,6 +5,7 @@ import { MAX_RECORDING_BYTES } from '../src/audio/wav'
 import type { Chat, Folder, Message, Topic, TranscriptionResult } from '../src/types'
 import { screenModel } from '../src/controller/model'
 import type { AppState, ScreenModel } from '../src/controller/model'
+import { PersistentCache } from '../src/cache/persistentCache'
 
 const chats: Chat[] = [
   { id: '1', title: 'Alice', kind: 'user' },
@@ -2425,3 +2426,137 @@ function deferred<T>() {
   })
   return { promise, resolve, reject }
 }
+
+
+describe('on-phone cache and live updates', () => {
+  function memoryStorage() {
+    const data = new Map<string, string>()
+    return {
+      data,
+      getLocalStorage: async (key: string) => data.get(key) ?? '',
+      setLocalStorage: async (key: string, value: string) => {
+        if (value === '') data.delete(key)
+        else data.set(key, value)
+        return true
+      },
+    }
+  }
+
+  async function seededCache(storage = memoryStorage(), seed?: (cache: PersistentCache) => void) {
+    const cache = new PersistentCache(storage, { flushDelayMs: 1 })
+    await cache.open('acct')
+    seed?.(cache)
+    await cache.flush()
+    const reopened = new PersistentCache(storage, { flushDelayMs: 1 })
+    await reopened.open('acct')
+    return { cache: reopened, storage }
+  }
+
+  it('shows the stored chat list while the session check is still running', async () => {
+    const stored: Chat[] = [{ id: '1', title: 'Stored Alice', kind: 'user' }]
+    const { cache } = await seededCache(undefined, (c) => c.putChats(stored))
+    const gate = deferred<{ authorized: boolean }>()
+    const api = fakeApi({ authorized: true }) as unknown as { authStatus: ReturnType<typeof vi.fn> }
+    api.authStatus.mockImplementation(() => gate.promise)
+    const controller = new TelegramAppController(api as unknown as TelegramApi, fakeBridge(), 0, undefined, () => true, cache)
+
+    const starting = controller.init()
+    await flushAsync()
+    expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'chats' })
+    expect((controller.snapshot as Extract<AppState, { focus: 'chats' }>).chats[0].title).toBe('Stored Alice')
+
+    gate.resolve({ authorized: true })
+    await starting
+    expect((controller.snapshot as Extract<AppState, { focus: 'chats' }>).chats.map((chat) => chat.title)).toEqual(['Alice', 'Project'])
+  })
+
+  it('does not keep or show stored chats when the account is signed out', async () => {
+    const { cache, storage } = await seededCache(undefined, (c) => c.putChats([{ id: '1', title: 'Stored', kind: 'user' }]))
+    const controller = new TelegramAppController(fakeApi({ authorized: false }), fakeBridge(), 0, undefined, () => true, cache)
+    await controller.init()
+    await flushAsync()
+    expect(controller.snapshot.screen).toBe('auth')
+    expect([...storage.data.keys()].filter((key) => key.includes('cache'))).toEqual([])
+  })
+
+  it('opens a read thread from the stored page at once and refreshes it in the background', async () => {
+    const { cache } = await seededCache(undefined, (c) => c.putThread('1:', { messages: [{ id: '50', sender: 'Alice', text: 'stored text' }], cursor: '50' }))
+    const gate = deferred<Message[]>()
+    const api = fakeApi({ authorized: true })
+    const listMessages = (api as unknown as { listMessages: ReturnType<typeof vi.fn> }).listMessages
+    listMessages.mockImplementation(() => gate.promise)
+    const controller = new TelegramAppController(api, fakeBridge(), 0, undefined, () => true, cache)
+
+    await controller.init()
+    await controller.dispatch({ type: 'press' }) // open the first chat
+    await flushAsync()
+
+    expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'messages' })
+    expect((controller.snapshot as Extract<AppState, { focus: 'messages' }>).messages[0].text).toBe('stored text')
+    expect(listMessages).toHaveBeenCalled() // the freshness fetch is still issued
+
+    gate.resolve([{ id: '51', sender: 'Alice', text: 'fresh text' }])
+    await flushAsync()
+    await flushAsync()
+    expect((controller.snapshot as Extract<AppState, { focus: 'messages' }>).messages.map((m) => m.text)).toContain('fresh text')
+  })
+
+  it('does not open an unread thread from a stale stored page', async () => {
+    const unread: Chat[] = [{ id: '1', title: 'Alice', kind: 'user', unreadCount: 3 }, chats[1]]
+    const { cache } = await seededCache(undefined, (c) => c.putThread('1:', { messages: [{ id: '50', sender: 'Alice', text: 'stale' }] }))
+    const api = fakeApi({ authorized: true, chats: unread, latestMessages: [{ id: '60', sender: 'Alice', text: 'live' }] })
+    const controller = new TelegramAppController(api, fakeBridge(), 0, undefined, () => true, cache)
+
+    await controller.init()
+    await controller.dispatch({ type: 'press' })
+    await flushAsync()
+    const shown = (controller.snapshot as Extract<AppState, { focus: 'messages' }>).messages.map((m) => m.text)
+    expect(shown).toContain('live')
+    expect(shown).not.toContain('stale')
+  })
+
+  it('applies a live message to the open thread without refetching the page', async () => {
+    const api = fakeApi({ authorized: true })
+    const listMessages = (api as unknown as { listMessages: ReturnType<typeof vi.fn> }).listMessages
+    const controller = new TelegramAppController(api, fakeBridge(), 0)
+    await controller.init()
+    await controller.dispatch({ type: 'press' })
+    await flushAsync()
+    clearInputQuiet(controller)
+    const newestPageFetches = () => listMessages.mock.calls.filter(([, request]) => request?.beforeId === undefined).length
+    const callsBefore = newestPageFetches()
+
+    await controller.handleTelegramUpdate({
+      type: 'message',
+      chatId: '1',
+      message: { id: '777', sender: 'Alice', text: 'just arrived', sentAt: '2026-05-29T10:05:00Z' },
+    })
+
+    expect(newestPageFetches()).toBe(callsBefore) // merged from the stream; only older-page prefetch may follow
+    expect((controller.snapshot as Extract<AppState, { focus: 'messages' }>).messages.map((m) => m.text)).toContain('just arrived')
+  })
+
+  it('catches up on the open thread after the live stream reconnects', async () => {
+    const api = fakeApi({ authorized: true })
+    const listMessages = (api as unknown as { listMessages: ReturnType<typeof vi.fn> }).listMessages
+    const controller = new TelegramAppController(api, fakeBridge(), 0)
+    await controller.init()
+    await controller.dispatch({ type: 'press' })
+    await flushAsync()
+    clearInputQuiet(controller)
+    const callsBefore = listMessages.mock.calls.length
+
+    await controller.handleStreamReconnect()
+    expect(listMessages.mock.calls.length).toBeGreaterThan(callsBefore)
+  })
+
+  it('clearCache() empties the stored data and the in-memory pages', async () => {
+    const { cache, storage } = await seededCache(undefined, (c) => {
+      c.putChats([{ id: '1', title: 'Stored', kind: 'user' }])
+      c.putThread('1:', { messages: [{ id: '1', text: 'x' }] })
+    })
+    const controller = new TelegramAppController(fakeApi({ authorized: true }), fakeBridge(), 0, undefined, () => true, cache)
+    await controller.clearCache()
+    expect(storage.data.size).toBe(0)
+  })
+})

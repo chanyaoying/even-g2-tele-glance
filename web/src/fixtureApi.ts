@@ -256,7 +256,7 @@ export class FixtureTelegramApi implements TelegramApi {
     return { width: 20, height: 20, data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==' }
   }
 
-  async listMessages(chatId: Id, options: { topicId?: Id; beforeId?: Id; limit?: number } = {}) {
+  async listMessages(chatId: Id, options: { topicId?: Id; beforeId?: Id; afterId?: Id; limit?: number } = {}) {
     await fixtureDelay(80)
     if (options.beforeId !== undefined) {
       const before = Number(options.beforeId)

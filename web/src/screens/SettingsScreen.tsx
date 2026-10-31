@@ -5,9 +5,10 @@ import { useApp } from '../contexts/AppContext'
 import type { FrontendConfig } from '../storage'
 
 export function SettingsScreen({ buildVersion }: { buildVersion: string }) {
-  const { state, settings, saveSettings, resetSettings, logoutTelegram } = useApp()
+  const { state, settings, saveSettings, resetSettings, logoutTelegram, clearCache } = useApp()
   const [draft, setDraft] = useState<FrontendConfig>(settings)
   const [saved, setSaved] = useState(false)
+  const [cacheCleared, setCacheCleared] = useState(false)
   const [isLoggingOut, setIsLoggingOut] = useState(false)
   const [logoutError, setLogoutError] = useState<string | null>(null)
 
@@ -168,6 +169,11 @@ scripts/start-backend.sh --reload`}</code></pre>
           setSaved(true)
         }}>
           {saved ? l.settingsSaved : l.settingsSave}
+        </button>
+        <button type="button" className="secondary" onClick={() => {
+          void clearCache().then(() => setCacheCleared(true))
+        }}>
+          {cacheCleared ? l.settingsCacheCleared : l.settingsClearCache}
         </button>
         <button type="button" className="secondary" onClick={resetSettings}>{l.settingsReset}</button>
       </div>

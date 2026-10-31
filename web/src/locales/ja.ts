@@ -182,6 +182,8 @@ const ja: LocaleStrings = {
   settingsSave: '設定を保存',
   settingsSaved: '保存されました',
   settingsReset: 'リセット',
+  settingsClearCache: 'Clear cache',
+  settingsCacheCleared: 'Cache cleared',
 }
 
 export default ja

@@ -96,6 +96,7 @@ class TelegramService(Protocol):
         *,
         topic_id: Optional[int] = None,
         before_id: Optional[int] = None,
+        after_id: Optional[int] = None,
         limit: int = 8,
     ) -> list[MessageSummary]:
         ...
@@ -575,6 +576,8 @@ class TelethonTelegramService:
             raise TelegramServiceError("Telethon update API is unavailable") from exc
 
         self._client.add_event_handler(self._handle_new_message, events.NewMessage())
+        # An edit is delivered like a new message with the same id; the phone replaces the old copy.
+        self._client.add_event_handler(self._handle_new_message, events.MessageEdited())
         self._client.add_event_handler(self._handle_chat_action, events.ChatAction())
         self._client.add_event_handler(self._handle_chat_action, events.UserUpdate())
         self._updates_registered = True
@@ -586,11 +589,29 @@ class TelethonTelegramService:
         if message is None:
             return
         update = normalize_update_message(message, getattr(event, "chat_id", None))
+        await self._resolve_live_reply(update, message)
         for queue in list(self._update_queues):
             try:
                 queue.put_nowait(update)
             except asyncio.QueueFull:
+                # The phone's polling and reconnect catch-up fill in whatever a burst pushed out.
                 pass
+
+    async def _resolve_live_reply(self, update: TelegramUpdate, message: Any) -> None:
+        """Quote the replied-to message on a live update, as list_messages does, so the phone can use it as is."""
+        if reply_target_id(message, update.topic_id) is None:
+            return
+        try:
+            client = await self._get_client()
+            entity = await self._get_entity(update.chat_id)
+            await attach_replies(
+                lambda ids: asyncio.wait_for(client.get_messages(entity, ids=ids), timeout=3),
+                [message],
+                [update.message],
+                topic_id=update.topic_id,
+            )
+        except Exception:  # a missing quote is cosmetic; never hold back the message itself
+            logging.getLogger(__name__).debug("live reply lookup failed", exc_info=True)
 
     async def _handle_chat_action(self, event: Any) -> None:
         if not self._update_queues:
@@ -942,6 +963,7 @@ class TelethonTelegramService:
         *,
         topic_id: Optional[int] = None,
         before_id: Optional[int] = None,
+        after_id: Optional[int] = None,
         limit: int = 8,
     ) -> list[MessageSummary]:
         client = await self._get_client()
@@ -950,6 +972,9 @@ class TelethonTelegramService:
             kwargs: dict[str, Any] = {"limit": limit}
             if before_id is not None:
                 kwargs["offset_id"] = before_id
+            if after_id is not None:
+                # Only messages newer than the one the phone already has (newest first, at most `limit`).
+                kwargs["min_id"] = after_id
             if topic_id is not None:
                 try:
                     from telethon.tl.functions.messages import GetRepliesRequest
@@ -966,7 +991,7 @@ class TelethonTelegramService:
                             add_offset=0,
                             limit=limit,
                             max_id=0,
-                            min_id=0,
+                            min_id=after_id or 0,
                             hash=0,
                         )
                     ),

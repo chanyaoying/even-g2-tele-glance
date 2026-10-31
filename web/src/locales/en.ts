@@ -187,6 +187,8 @@ const en = {
   settingsSave: 'Save Settings',
   settingsSaved: 'Saved',
   settingsReset: 'Reset',
+  settingsClearCache: 'Clear cache',
+  settingsCacheCleared: 'Cache cleared',
 
   // ── Bridge ──
   bridgeEmptyList: 'Empty',

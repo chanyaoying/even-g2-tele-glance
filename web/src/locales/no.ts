@@ -157,6 +157,8 @@ const no: LocaleStrings = {
   settingsSave: 'Lagre innstillinger',
   settingsSaved: 'Lagret',
   settingsReset: 'Nullstill',
+  settingsClearCache: 'Clear cache',
+  settingsCacheCleared: 'Cache cleared',
   bridgeEmptyList: 'Tom',
 }
 export default no

@@ -157,6 +157,8 @@ const ro: LocaleStrings = {
   settingsSave: 'Salvează setările',
   settingsSaved: 'Salvat',
   settingsReset: 'Resetare',
+  settingsClearCache: 'Clear cache',
+  settingsCacheCleared: 'Cache cleared',
   bridgeEmptyList: 'Gol',
 }
 export default ro

@@ -157,6 +157,8 @@ const nl: LocaleStrings = {
   settingsSave: 'Instellingen opslaan',
   settingsSaved: 'Opgeslagen',
   settingsReset: 'Reset',
+  settingsClearCache: 'Clear cache',
+  settingsCacheCleared: 'Cache cleared',
   bridgeEmptyList: 'Leeg',
 }
 export default nl

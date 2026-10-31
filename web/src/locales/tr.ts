@@ -157,6 +157,8 @@ const tr: LocaleStrings = {
   settingsSave: 'Ayarları Kaydet',
   settingsSaved: 'Kaydedildi',
   settingsReset: 'Sıfırla',
+  settingsClearCache: 'Clear cache',
+  settingsCacheCleared: 'Cache cleared',
   bridgeEmptyList: 'Boş',
 }
 export default tr

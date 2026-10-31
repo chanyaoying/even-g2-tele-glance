@@ -48,7 +48,7 @@ export class InstrumentedTelegramApi implements TelegramApi {
     return this.wrap('listTopics', { chatId }, () => this.inner.listTopics(chatId))
   }
 
-  async listMessages(chatId: Id, options: { topicId?: Id; beforeId?: Id; limit?: number } = {}): Promise<Message[]> {
+  async listMessages(chatId: Id, options: { topicId?: Id; beforeId?: Id; afterId?: Id; limit?: number } = {}): Promise<Message[]> {
     return this.wrap('listMessages', { chatId, options }, () => this.inner.listMessages(chatId, options))
   }
 
@@ -68,7 +68,7 @@ export class InstrumentedTelegramApi implements TelegramApi {
     return this.wrap('transcribe', { size: wav.size, language }, () => this.inner.transcribe(wav, language))
   }
 
-  subscribeUpdates(onUpdate: (update: TelegramUpdate | TelegramTypingUpdate) => void, onError?: (error: Event | Error) => void): () => void {
+  subscribeUpdates(onUpdate: (update: TelegramUpdate | TelegramTypingUpdate) => void, onError?: (error: Event | Error) => void, onReconnect?: () => void): () => void {
     if (isTeleGlanceFixtureMode()) {
       const startedAt = Date.now()
       const unsubscribe = this.inner.subscribeUpdates(onUpdate, onError)
@@ -79,7 +79,7 @@ export class InstrumentedTelegramApi implements TelegramApi {
         logApiEvent('unsubscribeUpdates', undefined, stopAt, Date.now(), true)
       }
     }
-    return this.inner.subscribeUpdates(onUpdate, onError)
+    return this.inner.subscribeUpdates(onUpdate, onError, onReconnect)
   }
 
   private async wrap<T>(call: string, args: unknown, fn: () => Promise<T>): Promise<T> {

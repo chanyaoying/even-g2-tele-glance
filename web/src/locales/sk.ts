@@ -157,6 +157,8 @@ const sk: LocaleStrings = {
   settingsSave: 'Uložiť nastavenia',
   settingsSaved: 'Uložené',
   settingsReset: 'Resetovať',
+  settingsClearCache: 'Clear cache',
+  settingsCacheCleared: 'Cache cleared',
   bridgeEmptyList: 'Prázdne',
 }
 export default sk

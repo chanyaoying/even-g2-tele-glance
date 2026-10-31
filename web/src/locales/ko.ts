@@ -183,6 +183,8 @@ const ko: LocaleStrings = {
   settingsSave: '설정 저장',
   settingsSaved: '저장됨',
   settingsReset: '초기화',
+  settingsClearCache: 'Clear cache',
+  settingsCacheCleared: 'Cache cleared',
 }
 
 export default ko

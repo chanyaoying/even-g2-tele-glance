@@ -157,6 +157,8 @@ const pt: LocaleStrings = {
   settingsSave: 'Salvar configurações',
   settingsSaved: 'Salvo',
   settingsReset: 'Redefinir',
+  settingsClearCache: 'Clear cache',
+  settingsCacheCleared: 'Cache cleared',
   bridgeEmptyList: 'Vazio',
 }
 export default pt

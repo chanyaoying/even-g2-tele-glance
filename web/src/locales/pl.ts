@@ -157,6 +157,8 @@ const pl: LocaleStrings = {
   settingsSave: 'Zapisz ustawienia',
   settingsSaved: 'Zapisano',
   settingsReset: 'Resetuj',
+  settingsClearCache: 'Clear cache',
+  settingsCacheCleared: 'Cache cleared',
   bridgeEmptyList: 'Pusta',
 }
 export default pl

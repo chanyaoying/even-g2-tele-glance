@@ -199,6 +199,8 @@ const es: LocaleStrings = {
   settingsSave: 'Guardar Ajustes',
   settingsSaved: 'Guardado',
   settingsReset: 'Restablecer',
+  settingsClearCache: 'Clear cache',
+  settingsCacheCleared: 'Cache cleared',
 
   // ── Bridge ──
   bridgeEmptyList: 'Vacío',

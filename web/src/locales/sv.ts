@@ -157,6 +157,8 @@ const sv: LocaleStrings = {
   settingsSave: 'Spara inställningar',
   settingsSaved: 'Sparat',
   settingsReset: 'Återställ',
+  settingsClearCache: 'Clear cache',
+  settingsCacheCleared: 'Cache cleared',
   bridgeEmptyList: 'Tom',
 }
 export default sv

@@ -181,6 +181,8 @@ const ms: LocaleStrings = {
   settingsSave: 'Simpan Tetapan',
   settingsSaved: 'Disimpan',
   settingsReset: 'Tetap Semula',
+  settingsClearCache: 'Clear cache',
+  settingsCacheCleared: 'Cache cleared',
 }
 
 export default ms

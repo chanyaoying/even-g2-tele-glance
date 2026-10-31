@@ -157,6 +157,8 @@ const da: LocaleStrings = {
   settingsSave: 'Gem indstillinger',
   settingsSaved: 'Gemt',
   settingsReset: 'Nulstil',
+  settingsClearCache: 'Clear cache',
+  settingsCacheCleared: 'Cache cleared',
   bridgeEmptyList: 'Tom',
 }
 export default da

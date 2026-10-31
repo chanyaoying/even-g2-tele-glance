@@ -56,9 +56,10 @@ class FakeTelegramService:
         assert chat_id == 2
         return [TopicSummary(id=11, title="Build", top_message_id=101, unread_count=2)]
 
-    async def list_messages(self, chat_id, *, topic_id=None, before_id=None, limit=8):
+    async def list_messages(self, chat_id, *, topic_id=None, before_id=None, after_id=None, limit=8):
         self.message_calls.append(
             {"chat_id": chat_id, "topic_id": topic_id, "before_id": before_id, "limit": limit}
+            | ({"after_id": after_id} if after_id is not None else {})
         )
         return [
             MessageSummary(
@@ -403,3 +404,45 @@ async def test_photo_endpoint_returns_the_prepared_image_and_forwards_the_size_l
     assert response.json() == {"width": 2, "height": 1, "format": "png", "data": "UE5H"}
     assert telegram.photo_calls == [(2, 8, 200, 100)]
     assert too_big.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_messages_after_id_is_forwarded_only_when_given(app, fake_services):
+    telegram, _ = fake_services
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        await client.get("/api/chats/2/messages?after_id=40&limit=5")
+
+    assert telegram.message_calls == [
+        {"chat_id": 2, "topic_id": None, "before_id": None, "limit": 5, "after_id": 40}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_api_responses_carry_server_timing(app):
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/chats?limit=5")
+
+    assert response.headers["server-timing"].startswith("app;dur=")
+
+
+@pytest.mark.asyncio
+async def test_updates_stream_sends_keepalive_while_idle(app, fake_services, monkeypatch):
+    import asyncio
+    import app.main as main_module
+
+    telegram, _ = fake_services
+
+    async def idle_updates():
+        await asyncio.sleep(0.2)
+        return
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(main_module, "STREAM_KEEPALIVE_SECONDS", 0.05)
+    monkeypatch.setattr(telegram, "update_events", idle_updates, raising=False)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/updates")
+
+    assert ": keepalive" in response.text

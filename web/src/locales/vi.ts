@@ -157,6 +157,8 @@ const vi: LocaleStrings = {
   settingsSave: 'Lưu cài đặt',
   settingsSaved: 'Đã lưu',
   settingsReset: 'Đặt lại',
+  settingsClearCache: 'Clear cache',
+  settingsCacheCleared: 'Cache cleared',
   bridgeEmptyList: 'Trống',
 }
 export default vi

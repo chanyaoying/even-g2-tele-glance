@@ -157,6 +157,8 @@ const fi: LocaleStrings = {
   settingsSave: 'Tallenna asetukset',
   settingsSaved: 'Tallennettu',
   settingsReset: 'Nollaa',
+  settingsClearCache: 'Clear cache',
+  settingsCacheCleared: 'Cache cleared',
   bridgeEmptyList: 'Tyhjä',
 }
 export default fi

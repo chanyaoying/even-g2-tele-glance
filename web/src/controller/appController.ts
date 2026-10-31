@@ -7,6 +7,7 @@ import { anchorMessageId, messageScrollUnitCount, nextMessageScrollOffset, offse
 import { isTeleGlanceFixtureMode, logLifecycleEvent, logRecordingEvent, logStateWork, nowMs } from '../testMode'
 import { consumeInjectedAudioChunks } from '../fixtureApi'
 import type { Photo } from '../types'
+import type { PersistentCache } from '../cache/persistentCache'
 
 export interface GlassesBridge {
   render(model: ScreenModel): Promise<void>
@@ -101,6 +102,8 @@ export class TelegramAppController {
     }
     | undefined
   private rootRefreshInFlight = false
+  /** True while the chat list shown came from the on-phone cache and the real one has not arrived yet. */
+  private showingStoredChats = false
   // Telegram chat folders. `activeFolderId === undefined` means "All chats".
   private folders: Folder[] = []
   private activeFolderId: Id | undefined
@@ -172,6 +175,7 @@ export class TelegramAppController {
     options: Partial<ControllerRuntimeConfig> | number = {},
     private readonly onTelegramSession?: (session: string) => void,
     private readonly hasTelegramCredentials: () => boolean = () => true,
+    private readonly cache?: PersistentCache,
   ) {
     this.runtimeConfig = typeof options === 'number'
       ? { ...DEFAULT_RUNTIME_CONFIG, messagePressDelayMs: options }
@@ -285,7 +289,23 @@ export class TelegramAppController {
       return
     }
     if (state.screen === 'sidebar' && state.focus === 'messages' && updateMatchesThread(update, state)) {
+      // The stream already carries the whole message, so merge it instead of refetching the page.
+      // Polling stays on as the safety net and fills in anything the stream could not (for example edits).
+      if (update.message && String(update.message.id) !== '') {
+        await this.applyIncomingMessages([update.message])
+        return
+      }
       await this.refreshVisibleMessages()
+    }
+  }
+
+  /** The live stream dropped and came back: catch up on whatever was missed meanwhile. */
+  async handleStreamReconnect() {
+    const state = this.state
+    if (state.screen === 'sidebar' && state.focus === 'messages') {
+      await this.refreshVisibleMessages({ background: true })
+    } else if ((state.screen === 'sidebar' && state.focus === 'chats') || state.screen === 'asleep' || state.screen === 'newMessage') {
+      await this.refreshRootChats({ background: true })
     }
   }
 
@@ -344,8 +364,16 @@ export class TelegramAppController {
         })
         return
       }
+      // Show the last known chat list straight away; the real list replaces it as soon as it arrives.
+      const storedChats = await this.cache?.getChats().catch(() => undefined)
+      if (storedChats && storedChats.length > 0) {
+        this.showingStoredChats = true
+        await this.setState(this.chatsState(storedChats, 0))
+      }
       const status = await this.api.authStatus()
       if (!status.authorized) {
+        this.showingStoredChats = false
+        void this.cache?.clear()
         const hasFrontendCredentials = this.hasTelegramCredentials()
         await this.setState({
           screen: 'auth',
@@ -1184,7 +1212,15 @@ export class TelegramAppController {
       this.folderChatsCache.clear()
       this.folderSwitchId += 1
       this.rememberChats(chats)
-      await this.setState(this.chatsState(chats, 0))
+      this.cache?.putChats(chats)
+      // If the stored list is on screen, keep the user's place in it by chat id.
+      const shown = this.state
+      const keptChatId = this.showingStoredChats && shown.screen === 'sidebar' && shown.focus === 'chats'
+        ? String(shown.chats[shown.selectedChatIndex]?.id)
+        : undefined
+      this.showingStoredChats = false
+      const keptIndex = keptChatId === undefined ? -1 : chats.findIndex((chat) => String(chat.id) === keptChatId)
+      await this.setState(this.chatsState(chats, keptIndex >= 0 ? keptIndex : 0))
       this.scheduleFolderWarm()
       // The chat list has no preview panel, so nothing is fetched until a chat is opened.
     }, previous)
@@ -1520,7 +1556,8 @@ export class TelegramAppController {
     const topics = topic && previous.screen === 'sidebar' && previous.focus === 'topics' ? previous.topics : undefined
     const selectedTopicIndex = topic && previous.screen === 'sidebar' && previous.focus === 'topics' ? previous.selectedTopicIndex : undefined
     await this.run(async () => {
-      const cached = this.messageCache.get(messageThreadKey({ chat, topic }))
+      const threadKey = messageThreadKey({ chat, topic })
+      const cached = this.messageCache.get(threadKey) ?? (await this.loadStoredThread(chat, topic))
       if (cached) {
         const plan = this.planUnreadOpen(chat, topic, cached.messages)
         const openState: AppState = {
@@ -1653,6 +1690,24 @@ export class TelegramAppController {
     this.maybePrefetchOlder()
   }
 
+  /**
+   * Poll for what arrived since the newest message already shown. A short answer is complete; a full page
+   * may hide a gap, so that case falls back to fetching the whole newest page.
+   */
+  private async fetchNewerMessages(state: { chat: Chat; topic?: Topic; messages?: Message[] }) {
+    const newest = state.messages && state.messages.length > 0 ? state.messages[state.messages.length - 1] : undefined
+    const newestId = newest ? Number(newest.id) : NaN
+    if (!Number.isFinite(newestId) || newestId <= 0) return this.refreshLatestMessages(state)
+    const newer = normalizeMessagePage(await this.api.listMessages(state.chat.id, {
+      topicId: topicThreadId(state.topic),
+      afterId: newestId,
+      limit: MESSAGE_PAGE_LIMIT,
+    }))
+    if (newer.length >= MESSAGE_PAGE_LIMIT) return this.refreshLatestMessages(state)
+    if (newer.length > 0) this.cacheMessages(state.chat, state.topic, normalizeMessagePage([...(state.messages ?? []), ...newer]))
+    return newer
+  }
+
   private async refreshLatestMessages(state: { chat: Chat; topic?: Topic }) {
     const messages = normalizeMessagePage(await this.api.listMessages(state.chat.id, { topicId: topicThreadId(state.topic), limit: MESSAGE_PAGE_LIMIT }))
     this.cacheMessages(state.chat, state.topic, messages)
@@ -1753,10 +1808,33 @@ export class TelegramAppController {
 
   private cacheMessages(chat: Chat, topic: Topic | undefined, messages: Message[]) {
     this.prefetchPhotos(chat, messages)
-    this.messageCache.set(messageThreadKey({ chat, topic }), {
-      messages,
-      cursor: oldestMessageId(messages),
-    })
+    const key = messageThreadKey({ chat, topic })
+    const entry = { messages, cursor: oldestMessageId(messages) }
+    this.messageCache.set(key, entry)
+    this.cache?.putThread(key, entry)
+  }
+
+  /**
+   * The last stored page of a thread, for opening it instantly while a fresh page is fetched. Only used for
+   * threads with nothing unread: the "last read" divider depends on the unread count, which a stale page
+   * cannot place correctly.
+   */
+  private async loadStoredThread(chat: Chat, topic: Topic | undefined): Promise<{ messages: Message[]; cursor?: Id } | undefined> {
+    if (!this.cache || (topic ?? chat).unreadCount) return undefined
+    const key = messageThreadKey({ chat, topic })
+    const stored = await this.cache.getThread(key).catch(() => undefined)
+    if (!stored || stored.messages.length === 0) return undefined
+    const entry = { messages: stored.messages, cursor: stored.cursor ?? oldestMessageId(stored.messages) }
+    this.messageCache.set(key, entry)
+    return entry
+  }
+
+  /** Forget everything stored on the phone for fast startup (credentials and session are untouched). */
+  async clearCache() {
+    this.messageCache.clear()
+    this.topicsCache.clear()
+    this.photoCache.clear()
+    await this.cache?.clear()
   }
 
   private async prefetchOlderMessages(state: Extract<AppState, { screen: 'sidebar'; focus: 'messages' }>, options: { chain?: boolean } = {}) {
@@ -2035,6 +2113,7 @@ export class TelegramAppController {
 
       const activity = this.findNewChatActivity(chats)
       this.rememberChats(chats)
+      if (this.activeFolderId === undefined) this.cache?.putChats(chats)
 
       const current = this.state
       if ((current.screen !== 'sidebar' || current.focus !== 'chats') && current.screen !== 'asleep' && current.screen !== 'newMessage') return
@@ -2095,30 +2174,37 @@ export class TelegramAppController {
     const requestedThreadKey = messageThreadKey(state)
     this.messageRefreshInFlight = true
     try {
-      const messages = await this.refreshLatestMessages(state).catch(() => undefined)
+      const messages = await this.fetchNewerMessages(state).catch(() => undefined)
       if (!messages || messages.length === 0) return
-      const current = this.state
-      if ((current.screen !== 'sidebar' || current.focus !== 'messages') && current.screen !== 'sidebarSent') return
-      if (messageThreadKey(current) !== requestedThreadKey) return
-
-      const merged = normalizeMessagePage([...current.messages, ...messages])
-      if (!hasMessageChanges(current.messages, merged)) return
-      const hasIncoming = hasIncomingChange(current.messages, merged)
-      if (current.screen === 'sidebar' && current.focus === 'messages' && this.isReadingFromUnread(current)) {
-        const flagged = this.flagUnread(current.chat, current.topic, merged)
-        const scrollOffset = this.keepPlace(current, flagged)
-        await this.setState({ ...current, messages: flagged, cursor: oldestMessageId(flagged), newerPages: [], isNewestPage: scrollOffset === 0, scrollOffset })
-        return
-      }
-      if (current.screen === 'sidebar' && current.focus === 'messages') {
-        await this.setStateWithVisibleRead({ ...current, messages: this.flagUnread(current.chat, current.topic, merged), cursor: oldestMessageId(merged), status: hasIncoming ? 'New reply' : undefined, newerPages: [], isNewestPage: true, scrollOffset: 0 }, current.chat, current.topic, merged, { forceAck: hasIncoming })
-        this.maybePrefetchOlder()
-        return
-      }
-      await this.setStateWithVisibleRead({ ...current, messages: merged, status: hasIncoming ? 'New reply' : undefined, newerPages: [], isNewestPage: true, scrollOffset: 0 }, current.chat, current.topic, merged, { forceAck: hasIncoming })
+      await this.applyIncomingMessages(messages, requestedThreadKey)
     } finally {
       this.messageRefreshInFlight = false
     }
+  }
+
+  /** Merge freshly received messages into the open thread (from a poll or straight from the live stream). */
+  private async applyIncomingMessages(messages: Message[], requestedThreadKey?: string) {
+    if (messages.length === 0) return
+    const current = this.state
+    if ((current.screen !== 'sidebar' || current.focus !== 'messages') && current.screen !== 'sidebarSent') return
+    if (requestedThreadKey !== undefined && messageThreadKey(current) !== requestedThreadKey) return
+
+    const merged = normalizeMessagePage([...current.messages, ...messages])
+    if (!hasMessageChanges(current.messages, merged)) return
+    const hasIncoming = hasIncomingChange(current.messages, merged)
+    this.cacheMessages(current.chat, current.topic, merged)
+    if (current.screen === 'sidebar' && current.focus === 'messages' && this.isReadingFromUnread(current)) {
+      const flagged = this.flagUnread(current.chat, current.topic, merged)
+      const scrollOffset = this.keepPlace(current, flagged)
+      await this.setState({ ...current, messages: flagged, cursor: oldestMessageId(flagged), newerPages: [], isNewestPage: scrollOffset === 0, scrollOffset })
+      return
+    }
+    if (current.screen === 'sidebar' && current.focus === 'messages') {
+      await this.setStateWithVisibleRead({ ...current, messages: this.flagUnread(current.chat, current.topic, merged), cursor: oldestMessageId(merged), status: hasIncoming ? 'New reply' : undefined, newerPages: [], isNewestPage: true, scrollOffset: 0 }, current.chat, current.topic, merged, { forceAck: hasIncoming })
+      this.maybePrefetchOlder()
+      return
+    }
+    await this.setStateWithVisibleRead({ ...current, messages: merged, status: hasIncoming ? 'New reply' : undefined, newerPages: [], isNewestPage: true, scrollOffset: 0 }, current.chat, current.topic, merged, { forceAck: hasIncoming })
   }
 
   private async setStateWithVisibleRead(

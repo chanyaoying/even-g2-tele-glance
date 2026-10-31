@@ -38,6 +38,8 @@ from app.services.secure_auth import SecureAuthError, decrypt_payload, encrypt_p
 from app.services.telegram import TelegramService, TelegramServiceError, TelegramServiceTimeoutError, TelegramSessionExpiredError
 from app.services.transcription import TranscriptionServiceError, WhisperTranscriptionService
 
+# Seconds of silence before the update stream sends a keepalive comment; the phone treats ~3x this as dead.
+STREAM_KEEPALIVE_SECONDS = 15.0
 timing_logger = logging.getLogger("uvicorn.error")
 
 
@@ -67,7 +69,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
-        expose_headers=["X-TeleGlance-Encrypted"],
+        expose_headers=["X-TeleGlance-Encrypted", "Server-Timing"],
     )
 
     async def require_app_backend_auth(request: Request) -> None:
@@ -96,6 +98,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         response = await call_next(request)
         handled_ms = (time.perf_counter() - started) * 1000
         if request.url.path.startswith("/api/") and request.url.path != "/api/updates":
+            # Lets the phone tell server time from network time (readable via Server-Timing / DevTools).
+            response.headers["Server-Timing"] = f"app;dur={handled_ms:.0f}"
             # Handler time (Telegram + normalising), excluding wire transfer; shows where a slow load went.
             timing_logger.info("%s %s -> %s in %.0f ms", request.method, request.url.path, response.status_code, handled_ms)
         if not should_encrypt or not _is_json_response(response):
@@ -220,15 +224,18 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         chat_id: int,
         topic_id: Optional[int] = None,
         before_id: Optional[int] = None,
+        after_id: Optional[int] = None,
         limit: int = Query(default=8, ge=1, le=50),
         telegram: TelegramService = Depends(get_telegram_service),
     ) -> list[MessageSummary]:
+        extra = {"after_id": after_id} if after_id is not None else {}
         try:
             return await telegram.list_messages(
                 chat_id,
                 topic_id=topic_id,
                 before_id=before_id,
                 limit=limit,
+                **extra,
             )
         except (TelegramServiceError, TimeoutError) as exc:
             raise_telegram_http_error(exc)
@@ -247,8 +254,23 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             return json.dumps({"encryptedPayload": encrypted})
 
         async def events():
+            updates = telegram.update_events().__aiter__()
+            pending: Optional[asyncio.Future] = None
             try:
-                async for update in telegram.update_events():
+                while True:
+                    if pending is None:
+                        pending = asyncio.ensure_future(updates.__anext__())
+                    done, _ = await asyncio.wait({pending}, timeout=STREAM_KEEPALIVE_SECONDS)
+                    if not done:
+                        # A comment line: ignored by the phone's parser, but it proves the connection is alive
+                        # and stops proxies and phones from silently dropping an idle stream.
+                        yield ": keepalive\n\n"
+                        continue
+                    future, pending = pending, None
+                    try:
+                        update = future.result()
+                    except StopAsyncIteration:
+                        return
                     payload = update.model_dump_json(by_alias=True)
                     if isinstance(update, TypingUpdate):
                         yield f"event: typing\ndata: {event_data(payload)}\n\n"
@@ -257,6 +279,12 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             except TelegramServiceError as exc:
                 payload = json.dumps({"detail": str(exc)})
                 yield f"event: error\ndata: {event_data(payload)}\n\n"
+            finally:
+                if pending is not None:
+                    pending.cancel()
+                aclose = getattr(updates, "aclose", None)
+                if aclose is not None:
+                    await aclose()
 
         return StreamingResponse(
             events(),

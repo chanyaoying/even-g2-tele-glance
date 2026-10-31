@@ -157,6 +157,8 @@ const ca: LocaleStrings = {
   settingsSave: 'Desa la configuració',
   settingsSaved: 'Desat',
   settingsReset: 'Reinicia',
+  settingsClearCache: 'Clear cache',
+  settingsCacheCleared: 'Cache cleared',
   bridgeEmptyList: 'Buit',
 }
 export default ca

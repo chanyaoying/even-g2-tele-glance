@@ -170,6 +170,8 @@ const fr: LocaleStrings = {
   settingsSave: 'Enregistrer',
   settingsSaved: 'Enregistré',
   settingsReset: 'Réinitialiser',
+  settingsClearCache: 'Clear cache',
+  settingsCacheCleared: 'Cache cleared',
   bridgeEmptyList: 'Vide',
 }
 export default fr

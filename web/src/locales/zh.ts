@@ -183,6 +183,8 @@ const zh: LocaleStrings = {
   settingsSave: '保存设置',
   settingsSaved: '已保存',
   settingsReset: '重置',
+  settingsClearCache: 'Clear cache',
+  settingsCacheCleared: 'Cache cleared',
 }
 
 export default zh
