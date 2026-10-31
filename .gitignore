@@ -61,3 +61,4 @@ coverage/
 even-terminal-*.log
 
 .codegraph/
+.claude/worktrees/
