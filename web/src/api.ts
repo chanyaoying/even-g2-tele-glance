@@ -69,14 +69,50 @@ export function effectiveBackendSharedSecret(config: TelegramAuthConfig, baseUrl
 export const API_BASE_URL_STORAGE_KEY = 'teleGlance.apiBaseUrl'
 export const G2_TELE_API_BASE_URL_STORAGE_KEY = 'g2Tele.apiBaseUrl'
 export const LEGACY_API_BASE_URL_STORAGE_KEY = 'evenTelegram.apiBaseUrl'
-export const BACKEND_BUSY_MESSAGE = 'Backend is busy. Retrying in a moment.'
+export const BACKEND_BUSY_MESSAGE = 'Server busy'
 const BACKOFF_AFTER_FAILURES = 3
 const BACKOFF_BASE_MS = 2000
 const BACKOFF_MAX_MS = 30_000
-export const BACKEND_UNREACHABLE_MESSAGE ='Backend is not reachable. Fill Backend URL in Settings and make sure the backend server is running.'
+export const BACKEND_UNREACHABLE_MESSAGE = 'No connection'
+export const BACKEND_TIMEOUT_MESSAGE = 'Server slow'
+export const TELEGRAM_BUSY_MESSAGE = 'Telegram busy'
+const BACKEND_UNREACHABLE_DETAIL = 'Backend is not reachable. Fill Backend URL in Settings and make sure the backend server is running.'
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000
-function REQUEST_TIMEOUT_MESSAGE(ms: number) {
+const SEND_REQUEST_TIMEOUT_MS = 20_000
+const TRANSCRIBE_REQUEST_TIMEOUT_MS = 60_000
+
+/** Short message (fits the glasses) in `message`; the full technical text for the phone UI is in `detail`. */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly detail: string = message,
+    readonly status?: number,
+    readonly retryAfterSeconds?: number,
+  ) {
+    super(message)
+    this.name = 'ApiError'
+  }
+}
+
+export function requestTimeoutMs(path: string, method = 'GET') {
+  if (path === '/api/transcribe') return TRANSCRIBE_REQUEST_TIMEOUT_MS
+  if (method === 'POST' && /^\/api\/chats\/[^/]+\/messages$/.test(path)) return SEND_REQUEST_TIMEOUT_MS
+  return DEFAULT_REQUEST_TIMEOUT_MS
+}
+
+function timeoutDetail(ms: number) {
   return `Backend request timed out after ${Math.round(ms / 1000)}s. The server may be unreachable or stuck. Try again or check the backend.`
+}
+
+function floodWaitMessage(seconds: number) {
+  return `Telegram asks you to wait ${seconds} s`
+}
+
+function parseRetryAfter(value: string | null, text: string): number | undefined {
+  const header = value ? Number(value) : NaN
+  if (Number.isFinite(header) && header > 0) return Math.ceil(header)
+  const match = /(?:wait|retry)[^0-9]{0,40}(\d+)/i.exec(text)
+  return match ? Number(match[1]) : undefined
 }
 
 function localApiBaseUrl() {
@@ -238,7 +274,7 @@ export class HttpTelegramApi implements TelegramApi {
   /** After repeated timeouts or gateway errors, fail fast for a moment instead of piling more requests on. */
   private assertBackendNotBackedOff(path: string) {
     if (path.startsWith('/api/session/')) return // sign-in must always be able to try
-    if (Date.now() < this.blockedUntil) throw new Error(BACKEND_BUSY_MESSAGE)
+    if (Date.now() < this.blockedUntil) throw new ApiError(BACKEND_BUSY_MESSAGE, 'Backend is busy. Retrying in a moment.')
   }
 
   private noteBackendResult(failed: boolean) {
@@ -273,7 +309,7 @@ export class HttpTelegramApi implements TelegramApi {
     const headers = await this.withTelegramHeaders(init.headers, includeTelegramAuth)
     const requestInit = await this.withEncryptedJsonBody(init, headers, includeTelegramAuth)
     const controller = new AbortController()
-    const timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS
+    const timeoutMs = requestTimeoutMs(path, init.method)
     const timer = setTimeout(() => controller.abort(), timeoutMs)
     let response: Response
     try {
@@ -285,15 +321,15 @@ export class HttpTelegramApi implements TelegramApi {
     } catch (error) {
       if (ownBackend) this.noteBackendResult(true)
       if (controller.signal.aborted) {
-        throw new Error(REQUEST_TIMEOUT_MESSAGE(timeoutMs))
+        throw new ApiError(BACKEND_TIMEOUT_MESSAGE, timeoutDetail(timeoutMs))
       }
-      throw new Error(BACKEND_UNREACHABLE_MESSAGE)
+      throw new ApiError(BACKEND_UNREACHABLE_MESSAGE, BACKEND_UNREACHABLE_DETAIL)
     } finally {
       clearTimeout(timer)
     }
     if (ownBackend) this.noteBackendResult(response.status === 502 || response.status === 503 || response.status === 504)
     const text = await this.responseText(response, includeTelegramAuth)
-    if (!response.ok) throw new Error(readableErrorText(response.status, text))
+    if (!response.ok) throw httpError(response, text)
     return JSON.parse(text) as T
   }
 
@@ -321,9 +357,9 @@ export class HttpTelegramApi implements TelegramApi {
           signal: inner.signal,
         })
       } catch {
-        throw new Error(BACKEND_UNREACHABLE_MESSAGE)
+        throw new ApiError(BACKEND_UNREACHABLE_MESSAGE, BACKEND_UNREACHABLE_DETAIL)
       }
-      if (!response.ok) throw new Error(readableErrorText(response.status, await this.responseText(response, true)))
+      if (!response.ok) throw httpError(response, await this.responseText(response, true))
       if (!response.body) throw new Error('Update stream is unavailable')
       onOpen?.()
       await this.readEventStream(response.body.getReader(), signal, onUpdate, resetWatchdog)
@@ -427,6 +463,19 @@ export class HttpTelegramApi implements TelegramApi {
       await sleep(100)
     }
   }
+}
+
+function httpError(response: Response, text: string): ApiError {
+  const detail = readableErrorText(response.status, text)
+  if (response.status === 429) {
+    const seconds = parseRetryAfter(response.headers.get('Retry-After'), detail)
+    return seconds
+      ? new ApiError(floodWaitMessage(seconds), detail, 429, seconds)
+      : new ApiError(TELEGRAM_BUSY_MESSAGE, detail, 429)
+  }
+  if (response.status === 502 || response.status === 503) return new ApiError(BACKEND_BUSY_MESSAGE, detail, response.status)
+  if (response.status === 504) return new ApiError(BACKEND_TIMEOUT_MESSAGE, detail, 504)
+  return new ApiError(detail, detail, response.status)
 }
 
 function readableErrorText(status: number, text: string) {
