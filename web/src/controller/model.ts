@@ -113,6 +113,8 @@ export type AppState =
       chats: Chat[]; selectedChatIndex: number;
       chat: Chat; topic?: Topic;
       messages: Message[]; transcript: string; selectedIndex: number;
+      /** Shown above the transcript when the last send attempt failed; Send retries it. */
+      sendError?: string;
       scrollOffset?: number; back?: RecoverableState; status?: string;
       newerPages?: Message[][]; isNewestPage?: boolean; typing?: { userName: string; expiresAt: number } | null; }
   | { screen: 'sidebarSending'; focus: 'messages';
@@ -133,6 +135,35 @@ export type RecoverableState = Extract<
   AppState,
   { screen: 'auth' | 'sidebar' | 'asleep' | 'newMessage' | 'sidebarConfirm' | 'sidebarSent' }
 >
+
+/** Short glasses statuses without locale entries yet: shown as-is (English fallback) until locales add them. */
+export const DIDNT_CATCH_STATUS = "Didn't catch that"
+export const UPDATING_STATUS = 'Updating...'
+
+type MessagesState = Extract<AppState, { screen: 'sidebar'; focus: 'messages' }>
+type ThreadSource = Extract<AppState, { focus: 'messages' }>
+
+/**
+ * The message view for a thread-carrying state (recording, transcribing, confirm, sending, sent...).
+ * Copies the thread fields across so every "return to the thread" path stays in one place;
+ * `overrides` replaces any of them (for example `status`, `messages`, `scrollOffset`).
+ */
+export function backToMessages(state: ThreadSource, overrides: Partial<MessagesState> = {}): MessagesState {
+  return {
+    screen: 'sidebar', focus: 'messages',
+    chats: state.chats, selectedChatIndex: state.selectedChatIndex,
+    chat: state.chat,
+    topic: state.topic,
+    messages: state.messages,
+    back: state.back,
+    status: state.status,
+    newerPages: state.newerPages,
+    isNewestPage: state.isNewestPage,
+    scrollOffset: state.scrollOffset,
+    typing: state.typing,
+    ...overrides,
+  }
+}
 
 export function screenModel(state: AppState): ScreenModel {
   const l = getLocale()
@@ -315,7 +346,7 @@ export function screenModel(state: AppState): ScreenModel {
         focus: 'panel',
         popup: {
           title: l.titleConfirmReply,
-          body: `${clampTranscript(sanitizeGlassesText(state.transcript))}\n\n${send}\n${cancel}`,
+          body: `${state.sendError ? `${sanitizeGlassesText(localizeStatus(state.sendError))}\n` : ''}${clampTranscript(sanitizeGlassesText(state.transcript))}\n\n${send}\n${cancel}`,
         },
       }
     }

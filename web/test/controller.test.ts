@@ -2038,7 +2038,7 @@ describe('TelegramAppController', () => {
     })
   })
 
-  it('shows error when sending fails in sidebarConfirm', async () => {
+  it('keeps the confirm screen and transcript when sending fails, and Send retries', async () => {
     const api = fakeApi({ authorized: true, transcription: { text: 'Send this' } })
     vi.mocked(api.sendMessage).mockRejectedValueOnce(new Error('Flood wait'))
     const controller = new TelegramAppController(api, fakeBridge(), 0)
@@ -2049,17 +2049,94 @@ describe('TelegramAppController', () => {
     await controller.dispatch({ type: 'audioChunk', pcm: speechLikePcm() })
     await controller.dispatch({ type: 'longPressRelease' })
     await controller.dispatch({ type: 'press' })
-
-    // Should transition to error screen with the send failure.
     await flushAsync()
     await flushAsync()
     expect(controller.snapshot).toMatchObject({
-      screen: 'error',
-      message: expect.stringContaining('Flood wait'),
+      screen: 'sidebarConfirm',
+      transcript: 'Send this',
+      sendError: expect.stringContaining('Flood wait'),
     })
+    expect(vi.mocked(api.sendMessage)).toHaveBeenCalledTimes(1)
+
+    await controller.dispatch({ type: 'press' })
+    await flushAsync()
+    await flushAsync()
+    expect(vi.mocked(api.sendMessage)).toHaveBeenCalledTimes(2)
+    expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'messages' })
   })
 
+  it('returns to the thread with a short status when the recording was silent', async () => {
+    const api = fakeApi({ authorized: true })
+    vi.mocked(api.transcribe).mockRejectedValueOnce(new Error('recording is silent'))
+    const controller = new TelegramAppController(api, fakeBridge(), 0)
 
+    await controller.init()
+    await controller.dispatch({ type: 'press' })
+    await controller.dispatch({ type: 'longPress' })
+    await controller.dispatch({ type: 'audioChunk', pcm: speechLikePcm() })
+    await controller.dispatch({ type: 'longPressRelease' })
+    await flushAsync()
+    await flushAsync()
+    expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'messages', status: "Didn't catch that" })
+  })
+
+  it('does not resend when the failed send actually reached the chat', async () => {
+    const api = fakeApi({ authorized: true, transcription: { text: 'Send this' } })
+    vi.mocked(api.sendMessage).mockRejectedValueOnce(new Error('timeout'))
+    vi.mocked(api.listMessages).mockResolvedValue([
+      { id: '99', text: 'Send this', outgoing: true, sentAt: new Date().toISOString() } as Message,
+    ])
+    const controller = new TelegramAppController(api, fakeBridge(), 0)
+
+    await controller.init()
+    await controller.dispatch({ type: 'press' })
+    await controller.dispatch({ type: 'longPress' })
+    await controller.dispatch({ type: 'audioChunk', pcm: speechLikePcm() })
+    await controller.dispatch({ type: 'longPressRelease' })
+    await controller.dispatch({ type: 'press' })
+    await flushAsync()
+    await flushAsync()
+    expect(vi.mocked(api.sendMessage)).toHaveBeenCalledTimes(1)
+    expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'messages' })
+  })
+
+  it('shows the chat list while the folders request is still pending', async () => {
+    const api = fakeApi({ authorized: true })
+    const folders = deferred<Folder[]>()
+    vi.mocked(api.listFolders).mockReturnValue(folders.promise)
+    const controller = new TelegramAppController(api, fakeBridge(), 0)
+    await controller.init()
+    await flushAsync()
+    expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'chats' })
+    folders.resolve([{ id: '1', title: 'Work' }])
+    await flushAsync()
+    await flushAsync()
+    expect(controller.snapshot).toMatchObject({ folderLabel: expect.stringContaining('1/2') })
+  })
+
+  it('discards the chat list requested in parallel when the session is not authorized', async () => {
+    const api = fakeApi({ authorized: false })
+    const controller = new TelegramAppController(api, fakeBridge(), 0)
+    await controller.init()
+    await flushAsync()
+    expect(controller.snapshot).toMatchObject({ screen: 'auth' })
+  })
+
+  it('refreshes in place on foreground when a thread is open', async () => {
+    const api = fakeApi({ authorized: true })
+    const controller = new TelegramAppController(api, fakeBridge(), 0)
+    await controller.init()
+    await controller.dispatch({ type: 'press' })
+    await flushAsync()
+    await flushAsync()
+    const before = controller.snapshot
+    expect(before).toMatchObject({ screen: 'sidebar', focus: 'messages' })
+    const authCalls = vi.mocked(api.authStatus).mock.calls.length
+    await controller.dispatch({ type: 'foreground' })
+    await flushAsync()
+    expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'messages' })
+    expect(vi.mocked(api.authStatus).mock.calls.length).toBe(authCalls)
+  })
 
   // ── Bug 1: Language change not translating phone UI ──
   // The controller's model layer (screenModel → getLocale()) CORRECTLY
