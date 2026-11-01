@@ -5,7 +5,7 @@ import { getLocale } from '../locales'
 import { backToMessages, DIDNT_CATCH_STATUS, UPDATING_STATUS } from './model'
 import type { AppInput, AppState, RecoverableState, ScreenModel } from './model'
 import { anchorMessageId, messageScrollUnitCount, nextMessageScrollOffset, offsetForAnchorMessage, screenModel, unreadScrollOffset } from './model'
-import { isTeleGlanceFixtureMode, logLifecycleEvent, logRecordingEvent, logStateWork, nowMs } from '../testMode'
+import { isTeleGlanceFixtureMode, logLifecycleEvent, logRecordingEvent, logStateWork, logTeleGlanceTest, nowMs } from '../testMode'
 import { consumeInjectedAudioChunks } from '../fixtureApi'
 import type { Photo } from '../types'
 import type { PersistentCache } from '../cache/persistentCache'
@@ -52,6 +52,7 @@ const RENDER_DEFER_MS = 0
 const RENDER_COOLDOWN_MS = 60
 const INPUT_QUIET_MS = 900
 const IMAGE_SEND_DELAY_MS = 350
+const IMAGE_MAX_WAIT_MS = 1500
 const TOPIC_PREVIEW_IDLE_MS = 200
 // How long after a full `bridge.render()` we treat a list click as
 // post-firmware-reset. The G2 firmware (and the simulator) reset the
@@ -182,6 +183,7 @@ export class TelegramAppController {
   private imageTimer: ReturnType<typeof setTimeout> | undefined
   /** True once scrolling has paused, so a picture page may carry its picture. */
   private imagesSettled = false
+  private imageDeferredSince = 0
   private lastUserInputAt = 0
   constructor(
     private readonly api: TelegramApi,
@@ -1287,13 +1289,18 @@ export class TelegramAppController {
    */
   private scheduleImageSettle() {
     this.cancelImage()
+    if (!this.imageDeferredSince) this.imageDeferredSince = Date.now()
     this.imageTimer = setTimeout(() => {
       this.imageTimer = undefined
-      if (Date.now() - this.lastUserInputAt < IMAGE_SEND_DELAY_MS) {
+      // Never hold the picture back for long: stray input must not keep it off the glasses forever.
+      const waitedTooLong = Date.now() - this.imageDeferredSince > IMAGE_MAX_WAIT_MS
+      if (!waitedTooLong && Date.now() - this.lastUserInputAt < IMAGE_SEND_DELAY_MS) {
         this.scheduleImageSettle()
         return
       }
       this.imagesSettled = true
+      this.imageDeferredSince = 0
+      logTeleGlanceTest('image.settle', { waitedTooLong })
       this.enqueueRender(this.state)
     }, IMAGE_SEND_DELAY_MS)
     const maybeNodeTimeout = this.imageTimer as unknown as { unref?: () => void }
