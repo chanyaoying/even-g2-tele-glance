@@ -446,3 +446,33 @@ async def test_updates_stream_sends_keepalive_while_idle(app, fake_services, mon
         response = await client.get("/api/updates")
 
     assert ": keepalive" in response.text
+
+
+@pytest.mark.asyncio
+async def test_updates_stream_cleans_up_when_the_client_goes_away(app, fake_services, monkeypatch):
+    import asyncio
+    import app.main as main_module
+
+    telegram, _ = fake_services
+    closed = asyncio.Event()
+
+    async def idle_updates():
+        try:
+            await asyncio.sleep(3600)
+            yield  # pragma: no cover
+        finally:
+            closed.set()
+
+    monkeypatch.setattr(main_module, "STREAM_KEEPALIVE_SECONDS", 0.05)
+    monkeypatch.setattr(telegram, "update_events", idle_updates, raising=False)
+    route = next(r for r in app.routes if getattr(r, "path", "") == "/api/updates")
+    del route  # exercised through the ASGI app below
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        try:
+            await asyncio.wait_for(client.get("/api/updates"), timeout=0.3)
+        except asyncio.TimeoutError:
+            pass
+
+    await asyncio.wait_for(closed.wait(), timeout=2)

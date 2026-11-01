@@ -287,9 +287,17 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             finally:
                 if pending is not None:
                     pending.cancel()
+                    # The cancelled __anext__ must finish before the generator can be closed.
+                    try:
+                        await pending
+                    except BaseException:
+                        pass
                 aclose = getattr(updates, "aclose", None)
                 if aclose is not None:
-                    await aclose()
+                    try:
+                        await aclose()
+                    except RuntimeError:
+                        pass
 
         return StreamingResponse(
             events(),
