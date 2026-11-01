@@ -3,6 +3,10 @@ import { useApp } from '../contexts/AppContext'
 import { getLocale } from '../locales'
 import type { Message, MessagePoll } from '../types'
 
+// The phone view shows the latest messages only: a long thread loaded for glasses scrolling would otherwise
+// put thousands of elements on the page and re-render them all on every change.
+const PHONE_MESSAGE_LIMIT = 60
+
 export function ChatScreen() {
   const { state, sendText, localeVersion } = useApp()
   const l = getLocale()
@@ -43,7 +47,7 @@ export function ChatScreen() {
           <div className="messages-list" aria-label="Messages">
             {state.messages.length === 0 ? (
               <p className="empty-text">{l.phoneNoMessages}</p>
-            ) : state.messages.map((message) => <MessageBubble key={String(message.id)} message={message} />)}
+            ) : state.messages.slice(-PHONE_MESSAGE_LIMIT).map((message) => <MessageBubble key={String(message.id)} message={message} />)}
             <div ref={messageEndRef} />
           </div>
         )}

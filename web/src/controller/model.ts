@@ -543,8 +543,13 @@ function messageDisplayPages(messages: Message[]): MessageDisplayPage[] {
 
   // Continuous scrolling: one page per block, each a window of blocks that ends at that block. A swipe
   // therefore moves the view by a single message instead of jumping a whole screenful.
+  // Per-block line and byte counts, so growing a window costs a few additions instead of re-joining text.
+  const blockLines = blocks.map((block) => block.text.split('\n').length)
+  const blockBytes = blocks.map((block) => utf8ByteLength(block.text))
   for (let endExclusive = 1; endExclusive <= blocks.length; endExclusive += 1) {
     const selected: MessageDisplayBlock[] = []
+    let linesAll = 0
+    let bytesAll = 0
 
     for (let index = endExclusive - 1; index >= 0; index -= 1) {
       const block = blocks[index]
@@ -553,10 +558,20 @@ function messageDisplayPages(messages: Message[]): MessageDisplayPage[] {
         break
       }
 
-      const candidate = [block, ...selected]
-      if (lineCount(candidate) > MESSAGE_VISIBLE_ROW_LIMIT) break
-      if (utf8ByteLength(candidate.map((item) => item.text).join('\n')) > TEXT_CONTAINER_BYTE_LIMIT) break
+      // Same limits as measuring the joined candidate: gap blocks at either end of a page take no row.
+      const count = endExclusive - index
+      const nextLinesAll = linesAll + blockLines[index]
+      const nextBytesAll = bytesAll + blockBytes[index] + (count > 1 ? 1 : 0)
+      let lines = nextLinesAll
+      const first = blocks[index]
+      const last = blocks[endExclusive - 1]
+      if (first.gap) lines -= blockLines[index]
+      if (count > 1 && last.gap) lines -= blockLines[endExclusive - 1]
+      if (lines > MESSAGE_VISIBLE_ROW_LIMIT) break
+      if (nextBytesAll > TEXT_CONTAINER_BYTE_LIMIT) break
 
+      linesAll = nextLinesAll
+      bytesAll = nextBytesAll
       selected.unshift(block)
     }
 
@@ -582,7 +597,29 @@ type MessageDisplayPage = {
   boxPartCount?: number
 }
 
+const messageBlocksCache = new WeakMap<Message[], MessageDisplayBlock[]>()
+// Formatting one message is pure in (message, day label, locale), so keep the result with the message
+// object: loading an older page then only formats the new messages, not the whole loaded thread again.
+const perMessageBlocks = new WeakMap<Message, { locale: unknown; byDay: Map<string, MessageDisplayBlock[]> }>()
+
+function blocksForMessage(message: Message, dayLabel: string): MessageDisplayBlock[] {
+  const locale = getLocale()
+  let entry = perMessageBlocks.get(message)
+  if (!entry || entry.locale !== locale) {
+    entry = { locale, byDay: new Map() }
+    perMessageBlocks.set(message, entry)
+  }
+  let blocks = entry.byDay.get(dayLabel)
+  if (!blocks) {
+    blocks = formatMessageBlocks(message, dayLabel)
+    entry.byDay.set(dayLabel, blocks)
+  }
+  return blocks
+}
+
 function messageDisplayBlocks(messages: Message[]): MessageDisplayBlock[] {
+  const cachedBlocks = messageBlocksCache.get(messages)
+  if (cachedBlocks && cachedBlocks.length > 0) return cachedBlocks
   const blocks: MessageDisplayBlock[] = []
   const now = new Date()
   for (let i = 0; i < messages.length; i++) {
@@ -592,8 +629,9 @@ function messageDisplayBlocks(messages: Message[]): MessageDisplayBlock[] {
     const dayLabel = startsDay ? formatDayLabel(messages[i].sentAt, now) : ''
     if (messages[i].firstUnread) blocks.push({ text: `----- ${getLocale().dividerLastRead} -----` })
     const id = String(messages[i].id)
-    blocks.push(...formatMessageBlocks(messages[i], dayLabel).map((block) => ({ ...block, messageId: id })))
+    blocks.push(...blocksForMessage(messages[i], dayLabel).map((block) => ({ ...block, messageId: id })))
   }
+  messageBlocksCache.set(messages, blocks)
   return blocks
 }
 
@@ -872,15 +910,6 @@ function trimBoxText(value: string) {
 
 function splitBoxRows(value: string) {
   return splitDisplayWordRows(value, MESSAGE_BOX_CONTENT_WIDTH, MESSAGE_ROW_BYTE_LIMIT).map(trimBoxText)
-}
-
-function lineCount(blocks: MessageDisplayBlock[]) {
-  const content = blocks.filter((block, i) => {
-    if (!block.gap) return true
-    return i > 0 && i < blocks.length - 1
-  })
-  if (content.length === 0) return 0
-  return content.map((block) => block.text).join('\n').split('\n').length
 }
 
 function wordCount(value: string) {
