@@ -188,3 +188,19 @@ async def test_transcribe_wav_rejects_truncated_wav_header():
     bogus = b"RIFF" + b"\x00" * 4 + b"WAVE" + b"\x00" * 60
     with pytest.raises(TranscriptionServiceError):
         await service.transcribe_wav(bogus)
+
+
+def test_groq_is_used_when_a_key_is_set_and_local_model_is_the_fallback():
+    import asyncio
+
+    settings = Settings(GROQ_API_KEY="test-key", TELEGLANCE_SHARED_SECRET=None)
+    service = WhisperTranscriptionService(settings)
+    wav = make_tiny_wav()
+
+    with patch.object(service, "_transcribe_groq", return_value=TranscriptionResponse(text="from groq")) as groq:
+        assert asyncio.run(service.transcribe_wav(wav)).text == "from groq"
+        groq.assert_called_once()
+
+    with patch.object(service, "_transcribe_groq", side_effect=OSError("offline")), \
+         patch.object(service, "_transcribe_blocking", return_value=TranscriptionResponse(text="from local")):
+        assert asyncio.run(service.transcribe_wav(wav)).text == "from local"

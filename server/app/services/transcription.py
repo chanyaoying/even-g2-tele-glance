@@ -1,12 +1,21 @@
 import asyncio
 import io
+import json
+import logging
 import struct
+import urllib.error
+import urllib.request
+import uuid
 import wave
 from dataclasses import dataclass
 from typing import Optional
 
 from app.config import Settings
 from app.models import TranscriptionResponse
+
+
+logger = logging.getLogger(__name__)
+GROQ_TRANSCRIPTIONS_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 
 
 class TranscriptionServiceError(RuntimeError):
@@ -51,11 +60,57 @@ class WhisperTranscriptionService:
         if not _looks_like_wav(wav_bytes):
             # Never hand arbitrary bytes to the FFmpeg-backed decoder, which probes formats by content.
             raise TranscriptionServiceError("audio must be a RIFF/WAVE file")
+        if self.settings.groq_api_key:
+            if _is_effectively_silent(wav_bytes):
+                raise TranscriptionServiceError(
+                    "recording is silent — try speaking closer to the glasses microphone"
+                )
+            try:
+                return await asyncio.to_thread(self._transcribe_groq, wav_bytes, language)
+            except TranscriptionServiceError:
+                raise
+            except Exception as exc:  # network, quota, bad response: keep working with the local model
+                logger.warning("Groq transcription failed (%s); using the local model", exc.__class__.__name__)
         # One transcription at a time, off the event loop so other requests stay responsive.
         if self._lock is None:
             self._lock = asyncio.Lock()
         async with self._lock:
             return await asyncio.to_thread(self._transcribe_blocking, wav_bytes, language)
+
+    def _transcribe_groq(self, wav_bytes: bytes, language: Optional[str]) -> TranscriptionResponse:
+        boundary = uuid.uuid4().hex
+        fields = {"model": self.settings.groq_stt_model, "response_format": "verbose_json", "temperature": "0"}
+        if language:
+            fields["language"] = language
+        parts = []
+        for name, value in fields.items():
+            parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
+        parts.append(
+            f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="reply.wav"\r\n'
+            "Content-Type: audio/wav\r\n\r\n".encode()
+        )
+        parts.append(wav_bytes)
+        parts.append(f"\r\n--{boundary}--\r\n".encode())
+        request = urllib.request.Request(
+            GROQ_TRANSCRIPTIONS_URL,
+            data=b"".join(parts),
+            headers={
+                "Authorization": f"Bearer {self.settings.groq_api_key}",
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "User-Agent": "teleglance-backend",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=self.settings.groq_stt_timeout_seconds) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        text = str(payload.get("text", "")).strip()
+        if not text:
+            raise TranscriptionServiceError("no speech detected in recording")
+        return TranscriptionResponse(
+            text=text,
+            language=payload.get("language"),
+            duration_seconds=payload.get("duration"),
+        )
 
     def _transcribe_blocking(self, wav_bytes: bytes, language: Optional[str]) -> TranscriptionResponse:
         # Validate audio is not silent before invoking Whisper.

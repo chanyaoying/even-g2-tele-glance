@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     )
     whisper_preload: bool = Field(default=True, validation_alias="WHISPER_PRELOAD")
     whisper_model_revision: Optional[str] = Field(default=None, validation_alias="WHISPER_MODEL_REVISION")
+    # Optional hosted transcription. When a key is set, recordings go to Groq's Whisper first and fall back
+    # to the local model if Groq fails. Audio leaves the machine in that case.
+    groq_api_key: Optional[str] = Field(default=None, validation_alias="GROQ_API_KEY")
+    groq_stt_model: str = Field(default="whisper-large-v3-turbo", validation_alias="GROQ_STT_MODEL")
+    groq_stt_timeout_seconds: float = Field(default=20.0, validation_alias="GROQ_STT_TIMEOUT_SECONDS")
     transcribe_max_upload_bytes: int = Field(default=2_000_000, validation_alias="TRANSCRIBE_MAX_UPLOAD_BYTES")
     teleglance_shared_secret: Optional[str] = Field(default=None, validation_alias="TELEGLANCE_SHARED_SECRET")
 
