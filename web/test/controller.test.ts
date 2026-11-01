@@ -1880,7 +1880,7 @@ describe('TelegramAppController', () => {
     expect(controller.snapshot).toMatchObject({ screen: 'sidebarConfirm' })
   })
 
-  it('surfaces transcription errors without sending', async () => {
+  it('returns to the thread when transcription fails, without sending', async () => {
     // When transcribe throws, the controller transitions to the error screen
     // with the error message, and no send occurs.
     const api = fakeApi({ authorized: true })
@@ -1899,8 +1899,9 @@ describe('TelegramAppController', () => {
     expect(api.transcribe).toHaveBeenCalledOnce()
     expect(api.sendMessage).not.toHaveBeenCalled()
     expect(controller.snapshot).toMatchObject({
-      screen: 'error',
-      message: 'Whisper crashed',
+      screen: 'sidebar',
+      focus: 'messages',
+      status: 'Transcription failed',
     })
   })
 
@@ -2038,7 +2039,7 @@ describe('TelegramAppController', () => {
     })
   })
 
-  it('keeps the confirm screen and transcript when sending fails, and Send retries', async () => {
+  it('returns to the thread with a short status when sending fails', async () => {
     const api = fakeApi({ authorized: true, transcription: { text: 'Send this' } })
     vi.mocked(api.sendMessage).mockRejectedValueOnce(new Error('Flood wait'))
     const controller = new TelegramAppController(api, fakeBridge(), 0)
@@ -2051,18 +2052,8 @@ describe('TelegramAppController', () => {
     await controller.dispatch({ type: 'press' })
     await flushAsync()
     await flushAsync()
-    expect(controller.snapshot).toMatchObject({
-      screen: 'sidebarConfirm',
-      transcript: 'Send this',
-      sendError: expect.stringContaining('Flood wait'),
-    })
+    expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'messages', status: 'Send failed' })
     expect(vi.mocked(api.sendMessage)).toHaveBeenCalledTimes(1)
-
-    await controller.dispatch({ type: 'press' })
-    await flushAsync()
-    await flushAsync()
-    expect(vi.mocked(api.sendMessage)).toHaveBeenCalledTimes(2)
-    expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'messages' })
   })
 
   it('returns to the thread with a short status when the recording was silent', async () => {

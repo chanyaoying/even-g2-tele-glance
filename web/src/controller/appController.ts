@@ -34,6 +34,8 @@ const MESSAGE_PAGE_LIMIT = 8
 // Older pages are fetched in bigger chunks than the first page: a history call costs about the same for 8
 // or 24 messages, and a bigger chunk means far fewer waits at the edge of loaded history while scrolling.
 /** Ignore a plain click this soon after a hold event (some firmware double-reports). */
+const SEND_FAILED_STATUS = 'Send failed'
+const TRANSCRIBE_FAILED_STATUS = 'Transcription failed'
 const HOLD_PRESS_GUARD_MS = 350
 const OLDER_PAGE_LIMIT = 24
 // Optimistic folder loading: once the chat list is up and the user is idle, fetch each folder's first page
@@ -1035,7 +1037,9 @@ export class TelegramAppController {
           await didntCatch()
           return
         }
-        throw error
+        // Any other failure also returns to the thread with a short status instead of an error screen.
+        await this.setState(backToMessages(state, { status: TRANSCRIBE_FAILED_STATUS }))
+        return
       }
       if (isTeleGlanceFixtureMode()) logRecordingEvent('transcribe.end', { transcript })
       if (transcript.length === 0) {
@@ -1084,9 +1088,9 @@ export class TelegramAppController {
       try {
         sent = await this.sendWithDuplicateCheck(state, state.transcript)
       } catch (error) {
-        // Keep the transcript: Send tries again, Cancel returns to the thread.
-        const message = error instanceof Error && error.message ? error.message : 'Send failed'
-        await this.setState({ ...state, sendError: `Send failed: ${message}`.slice(0, 80), selectedIndex: 0 })
+        // Back to the thread with a short status; the duplicate guard keeps a retry from sending twice.
+        void error
+        await this.setState(backToMessages(state, { status: SEND_FAILED_STATUS }))
         return
       }
       await this.run(async () => {
