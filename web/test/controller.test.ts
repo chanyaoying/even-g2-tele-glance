@@ -749,7 +749,7 @@ describe('TelegramAppController', () => {
     expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'chats' })
   })
 
-  it('wakes from screen-off state when a root chat receives a new message', async () => {
+  it('stays asleep when a root chat receives a new message, with the list updated for later', async () => {
     let currentChats = chats
     const api = fakeApi({ authorized: true, chats: () => currentChats })
     const controller = new TelegramAppController(api, fakeBridge())
@@ -759,43 +759,8 @@ describe('TelegramAppController', () => {
     currentChats = [{ ...chats[0], unreadCount: 1, lastMessage: 'wake up' }, chats[1]]
     await refreshRootChats(controller)
 
-    expect(controller.snapshot).toMatchObject({
-      screen: 'newMessage',
-      chat: expect.objectContaining({ id: '1' }),
-      message: 'wake up',
-    })
-  })
-
-  it('opens the new-message target thread on press', async () => {
-    let currentChats = chats
-    const api = fakeApi({ authorized: true, chats: () => currentChats })
-    const controller = new TelegramAppController(api, fakeBridge())
-
-    await controller.init()
-    await controller.dispatch({ type: 'doublePress' })
-    currentChats = [{ ...chats[0], unreadCount: 1, lastMessage: 'wake up' }, chats[1]]
-    await refreshRootChats(controller)
-    await controller.dispatch({ type: 'press' })
-
-    expect(api.listMessages).toHaveBeenCalledWith('1', { topicId: undefined, limit: 8 })
-    expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'messages', chat: expect.objectContaining({ id: '1' }) })
-  })
-
-  it('resolves unread forum topic before opening a new-message prompt', async () => {
-    let currentChats = chats
-    const unreadTopics = [{ ...topics[1], unreadCount: 1 }, topics[0]]
-    const api = fakeApi({ authorized: true, chats: () => currentChats, topics: unreadTopics })
-    const controller = new TelegramAppController(api, fakeBridge())
-
-    await controller.init()
-    await controller.dispatch({ type: 'doublePress' })
-    currentChats = [chats[0], { ...chats[1], unreadCount: 1, lastMessage: 'topic ping' }]
-    await refreshRootChats(controller)
-    await controller.dispatch({ type: 'press' })
-
-    expect(api.listTopics).toHaveBeenCalledWith('2')
-    expect(api.listMessages).toHaveBeenCalledWith('2', { topicId: '20', limit: 8 })
-    expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'messages', topic: expect.objectContaining({ id: '20' }) })
+    expect(controller.snapshot).toMatchObject({ screen: 'asleep' })
+    expect((controller.snapshot as { chats: Chat[] }).chats[0]).toMatchObject({ unreadCount: 1, lastMessage: 'wake up' })
   })
 
   it('opens forum topics before message history', async () => {
@@ -1616,11 +1581,8 @@ describe('TelegramAppController', () => {
     clearInputQuiet(controller)
     await controller.handleTelegramUpdate({ type: 'message', chatId: '1', message: { id: '200', sender: 'Alice', text: 'streamed root' } })
 
-    expect(controller.snapshot).toMatchObject({
-      screen: 'newMessage',
-      chat: expect.objectContaining({ id: '1' }),
-      message: 'streamed root',
-    })
+    expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'chats' })
+    expect((controller.snapshot as { chats: Chat[] }).chats[0]).toMatchObject({ unreadCount: 1, lastMessage: 'streamed root' })
   })
 
   it('double press from topic messages returns to the topic list instead of paging older messages', async () => {

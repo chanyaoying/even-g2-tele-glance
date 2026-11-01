@@ -2193,22 +2193,14 @@ export class TelegramAppController {
       // through; inside a folder the displayed list is left alone (only activity detection uses it).
       const displayedChats = this.activeFolderId === undefined ? mergeChatPages(current.chats, chats) : current.chats
       const selectedChatIndex = clamp(current.selectedChatIndex, 0, Math.max(0, displayedChats.length - 1))
-      if (!activity) {
-        if (current.screen === 'sidebar' && current.focus === 'chats') {
-          await this.setStateWithoutRender({ ...current, chats: displayedChats, selectedChatIndex })
-        }
-        return
+      // New activity never takes over the glasses: the Even app already notifies natively. The list just picks up
+      // the new badge/preview (and a sleeping screen stays asleep, with the list ready for when it wakes).
+      if (current.screen === 'sidebar' && current.focus === 'chats') {
+        if (activity) await this.setState({ ...current, chats: displayedChats, selectedChatIndex })
+        else await this.setStateWithoutRender({ ...current, chats: displayedChats, selectedChatIndex })
+      } else if (current.screen === 'asleep') {
+        await this.setStateWithoutRender({ ...current, chats: displayedChats, selectedChatIndex })
       }
-
-      const topic = activity.chat.isForum ? await this.findUnreadTopic(activity.chat).catch(() => undefined) : undefined
-      await this.setState({
-        screen: 'newMessage',
-        chat: activity.chat,
-        topic,
-        message: activity.chat.lastMessage ?? '',
-        chats: displayedChats,
-        selectedChatIndex,
-      })
     } finally {
       this.rootRefreshInFlight = false
     }
@@ -2227,11 +2219,6 @@ export class TelegramAppController {
 
   private rememberChats(chats: Chat[]) {
     this.chatFingerprints = new Map(chats.map((chat) => [String(chat.id), chatFingerprint(chat)]))
-  }
-
-  private async findUnreadTopic(chat: Chat) {
-    const topics = await this.api.listTopics(chat.id)
-    return topics.find((topic) => (topic.unreadCount ?? 0) > 0) ?? topics[0]
   }
 
   private async refreshVisibleMessages(options: { background?: boolean } = {}) {
