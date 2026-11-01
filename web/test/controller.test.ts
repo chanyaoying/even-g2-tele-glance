@@ -1405,6 +1405,27 @@ describe('TelegramAppController', () => {
     controller.dispose()
   })
 
+  it('leaves the picture out of the page while scrolling and adds it once scrolling pauses', async () => {
+    const photoMessages: Message[] = [
+      { id: '90', sender: 'Alice', text: 'hello' },
+      { id: '100', sender: 'Alice', text: '[photo]', media: 'photo', sentAt: '2026-05-29T10:00:00Z' },
+    ]
+    const api = fakeApi({ authorized: true, latestMessages: photoMessages })
+    const bridge = fakeBridge()
+    const controller = new TelegramAppController(api, bridge)
+
+    await controller.init()
+    await controller.dispatch({ type: 'press' })
+    await vi.waitFor(() => expect(bridge.updateImage).toHaveBeenCalledTimes(1))
+
+    const pageModels = vi.mocked(bridge.render).mock.calls
+      .map(([model]) => model)
+      .filter((model) => model.kind === 'sidebar' && model.focus === 'panel')
+    expect(pageModels.some((model) => model.kind === 'sidebar' && !model.panelImage)).toBe(true)
+    expect(pageModels[pageModels.length - 1]).toMatchObject({ panelImage: { messageId: '100' } })
+    controller.dispose()
+  })
+
   it('does not push a photo the user has already scrolled away from', async () => {
     const photoMessages: Message[] = [
       { id: '90', sender: 'Alice', text: 'hello' },

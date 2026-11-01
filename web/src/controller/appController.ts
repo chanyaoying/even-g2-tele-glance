@@ -180,6 +180,9 @@ export class TelegramAppController {
   private inputQuietUntil = 0
   private typingTimer: ReturnType<typeof setTimeout> | undefined
   private imageTimer: ReturnType<typeof setTimeout> | undefined
+  /** True once scrolling has paused, so a picture page may carry its picture. */
+  private imagesSettled = false
+  private lastUserInputAt = 0
   constructor(
     private readonly api: TelegramApi,
     private readonly bridge: GlassesBridge,
@@ -1279,14 +1282,19 @@ export class TelegramAppController {
   }
 
   /**
-   * Sending picture pixels occupies the glasses link for seconds, and every swipe past a picture moves it
-   * (a new layout and a new transfer). Wait until scrolling pauses, so swipes stay responsive.
+   * Picture pixels occupy the glasses link for seconds, and every swipe past a picture moves it (a new layout
+   * and a new transfer). So pictures are left out while scrolling and added once the user pauses.
    */
-  private scheduleImage(image: { chatId: string; messageId: string }) {
+  private scheduleImageSettle() {
     this.cancelImage()
     this.imageTimer = setTimeout(() => {
       this.imageTimer = undefined
-      void this.showPanelImage(image).catch(() => undefined)
+      if (Date.now() - this.lastUserInputAt < IMAGE_SEND_DELAY_MS) {
+        this.scheduleImageSettle()
+        return
+      }
+      this.imagesSettled = true
+      this.enqueueRender(this.state)
     }, IMAGE_SEND_DELAY_MS)
     const maybeNodeTimeout = this.imageTimer as unknown as { unref?: () => void }
     maybeNodeTimeout.unref?.()
@@ -2075,10 +2083,17 @@ export class TelegramAppController {
       this.pendingRenderState = undefined
       if (state) {
         this.lastFullRenderAt = Date.now()
-        const model = screenModel(state)
+        let model = screenModel(state)
+        // While the user is swiping, leave the picture out of the page: moving it means a heavier layout and a
+        // transfer over the glasses link for every swipe. It is added back once scrolling pauses.
+        const deferredImage = model.kind === 'sidebar' && model.panelImage && !this.imagesSettled
+        if (deferredImage && model.kind === 'sidebar') model = { ...model, panelImage: undefined }
         await this.bridge.render(model)
-        if (model.kind === 'sidebar' && model.panelImage) this.scheduleImage(model.panelImage)
-        else this.cancelImage()
+        if (deferredImage) this.scheduleImageSettle()
+        else {
+          this.cancelImage()
+          if (model.kind === 'sidebar' && model.panelImage) void this.showPanelImage(model.panelImage).catch(() => undefined)
+        }
       }
     } catch {
       // Rendering failures should not block controller state/input handling.
@@ -2447,6 +2462,8 @@ export class TelegramAppController {
   }
   private noteUserInput() {
     this.inputQuietUntil = Math.max(this.inputQuietUntil, Date.now() + INPUT_QUIET_MS)
+    this.imagesSettled = false
+    this.lastUserInputAt = Date.now()
   }
 
   private msUntilQuiet() {
