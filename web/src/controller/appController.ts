@@ -51,6 +51,7 @@ const LOADING_OLDER_STATUS = 'Loading older messages...'
 const RENDER_DEFER_MS = 0
 const RENDER_COOLDOWN_MS = 60
 const INPUT_QUIET_MS = 900
+const IMAGE_SEND_DELAY_MS = 350
 const TOPIC_PREVIEW_IDLE_MS = 200
 // How long after a full `bridge.render()` we treat a list click as
 // post-firmware-reset. The G2 firmware (and the simulator) reset the
@@ -178,6 +179,7 @@ export class TelegramAppController {
   private openRequestId = 0
   private inputQuietUntil = 0
   private typingTimer: ReturnType<typeof setTimeout> | undefined
+  private imageTimer: ReturnType<typeof setTimeout> | undefined
   constructor(
     private readonly api: TelegramApi,
     private readonly bridge: GlassesBridge,
@@ -236,6 +238,7 @@ export class TelegramAppController {
       this.readAckFlushTimer,
       this.startupPrefetchTimer,
       this.renderTimer,
+      this.imageTimer,
     ]) {
       if (timer) clearTimeout(timer)
     }
@@ -1275,6 +1278,25 @@ export class TelegramAppController {
     return promise
   }
 
+  /**
+   * Sending picture pixels occupies the glasses link for seconds, and every swipe past a picture moves it
+   * (a new layout and a new transfer). Wait until scrolling pauses, so swipes stay responsive.
+   */
+  private scheduleImage(image: { chatId: string; messageId: string }) {
+    this.cancelImage()
+    this.imageTimer = setTimeout(() => {
+      this.imageTimer = undefined
+      void this.showPanelImage(image).catch(() => undefined)
+    }, IMAGE_SEND_DELAY_MS)
+    const maybeNodeTimeout = this.imageTimer as unknown as { unref?: () => void }
+    maybeNodeTimeout.unref?.()
+  }
+
+  private cancelImage() {
+    if (this.imageTimer !== undefined) clearTimeout(this.imageTimer)
+    this.imageTimer = undefined
+  }
+
   /** Fetch a photo page's picture and push it to the glasses, unless the user has scrolled on meanwhile. */
   private async showPanelImage(image: { chatId: string; messageId: string }) {
     if (!this.bridge.updateImage) return
@@ -2055,7 +2077,8 @@ export class TelegramAppController {
         this.lastFullRenderAt = Date.now()
         const model = screenModel(state)
         await this.bridge.render(model)
-        if (model.kind === 'sidebar' && model.panelImage) void this.showPanelImage(model.panelImage).catch(() => undefined)
+        if (model.kind === 'sidebar' && model.panelImage) this.scheduleImage(model.panelImage)
+        else this.cancelImage()
       }
     } catch {
       // Rendering failures should not block controller state/input handling.

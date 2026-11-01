@@ -1388,6 +1388,23 @@ describe('TelegramAppController', () => {
     controller.dispose()
   })
 
+  it('waits for scrolling to pause before sending a photo to the glasses', async () => {
+    const photoMessages: Message[] = [
+      { id: '90', sender: 'Alice', text: 'hello' },
+      { id: '100', sender: 'Alice', text: '[photo]', media: 'photo', sentAt: '2026-05-29T10:00:00Z' },
+    ]
+    const api = fakeApi({ authorized: true, latestMessages: photoMessages })
+    const bridge = fakeBridge()
+    const controller = new TelegramAppController(api, bridge)
+
+    await controller.init()
+    await controller.dispatch({ type: 'press' })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(bridge.updateImage).not.toHaveBeenCalled()
+    await vi.waitFor(() => expect(bridge.updateImage).toHaveBeenCalledTimes(1))
+    controller.dispose()
+  })
+
   it('does not push a photo the user has already scrolled away from', async () => {
     const photoMessages: Message[] = [
       { id: '90', sender: 'Alice', text: 'hello' },
