@@ -159,4 +159,46 @@ describe('cache account stamp', () => {
     expect(a).not.toContain('secret')
     expect(shortHash('x')).toHaveLength(8)
   })
+
+  describe('photos', () => {
+    const photo = (tag: string) => ({ width: 288, height: 120, format: 'png', data: tag.repeat(100) })
+
+    it('keeps pictures across a restart and forgets them on clear', async () => {
+      const { cache, storage } = await opened()
+      cache.putPhoto('1:10', photo('a'))
+      await cache.flush()
+
+      const again = new PersistentCache(storage, { flushDelayMs: 1, now: () => 1_000 })
+      await again.open('acct')
+      expect((await again.getPhoto('1:10'))?.data).toBe('a'.repeat(100))
+      expect(await again.getPhoto('1:11')).toBeUndefined()
+
+      await again.clear()
+      expect(await again.getPhoto('1:10')).toBeUndefined()
+      expect([...storage.data.keys()].filter((key) => key.includes('.p.'))).toEqual([])
+    })
+
+    it('drops the least recently used pictures when over the photo budget, without touching threads', async () => {
+      const { cache, tick } = await opened(fakeStorage(), { photoBudgetBytes: 1_000 })
+      cache.putThread('1', { messages: messages(2) })
+      for (const key of ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']) {
+        cache.putPhoto(key, photo(key))
+        tick(10)
+        await cache.flush()
+      }
+      expect(cache.photoStats().bytes).toBeLessThanOrEqual(1_000)
+      expect(await cache.getPhoto('a')).toBeUndefined()
+      expect(await cache.getPhoto('h')).toBeDefined()
+      expect(await cache.getThread('1')).toBeDefined()
+    })
+
+    it('does not show another account the stored pictures', async () => {
+      const { cache, storage } = await opened()
+      cache.putPhoto('1:10', photo('a'))
+      await cache.flush()
+      const other = new PersistentCache(storage, { flushDelayMs: 1, now: () => 1_000 })
+      await other.open('someone-else')
+      expect(await other.getPhoto('1:10')).toBeUndefined()
+    })
+  })
 })

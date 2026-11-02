@@ -1259,14 +1259,24 @@ export class TelegramAppController {
     return true
   }
 
-  /** Photo pixels for a message, fetched once and kept for the next visit. */
+  /** A picture saved on the phone by an earlier session (never throws; storage trouble just means a fetch). */
+  private storedPhoto(key: string): Promise<Photo | undefined> {
+    if (!this.cache) return Promise.resolve(undefined)
+    return this.cache.getPhoto(key).catch(() => undefined)
+  }
+
+  /** Photo pixels for a message, fetched once and kept for the next visit (in memory and on the phone). */
   private loadPhoto(chatId: string, messageId: string): Promise<Photo> {
     const key = `${chatId}:${messageId}`
     const cached = this.photoCache.get(key)
     if (cached) return Promise.resolve(cached)
     const inFlight = this.photoInFlight.get(key)
     if (inFlight) return inFlight
-    const promise = this.api.getPhoto(chatId, messageId)
+    const promise = this.storedPhoto(key)
+      .then((stored) => stored ?? this.api.getPhoto(chatId, messageId).then((fresh) => {
+        this.cache?.putPhoto(key, fresh)
+        return fresh
+      }))
       .then((photo) => {
         this.photoCache.set(key, photo)
         while (this.photoCache.size > PHOTO_CACHE_LIMIT) {
