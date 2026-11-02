@@ -132,6 +132,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         if mapped.get("type") == "audioChunk":
             return {"count": len(debug_events)}
         event["received_at"] = datetime.now(timezone.utc).isoformat()
+        if event.get("note"):
+            # Timing notes from the phone (picture transfer, page rebuild) also go to the log for easy reading.
+            timing_logger.info("debug-note %s", event.get("raw"))
         debug_events.append(event)
         return {"count": len(debug_events)}
 

@@ -46,6 +46,12 @@ type EvenBridgeOptions = {
 
 let activeEventListenerToken: symbol | undefined
 
+/**
+ * Timing notes for the Debug events setting: sent to the backend (and its log) so the glasses-link cost of a
+ * picture or a page rebuild can be read without a dev console. Set by `create`; does nothing while the setting is off.
+ */
+let debugNote: ((note: string, data: Record<string, unknown>) => void) | undefined
+
 type EvenBridgeInstance = {
   createStartUpPageContainer(container: unknown): Promise<number>
   rebuildPageContainer(container: unknown): Promise<boolean>
@@ -98,6 +104,12 @@ export class EvenHubGlassesBridge implements GlassesBridge {
     const sdk = (await waitForEvenAppBridge()) as unknown as EvenBridgeInstance
     const dispatchInput = createInputCoalescer(createBoundedInputDispatcher(onInput))
     let debugLogInFlight = false
+    debugNote = options.debugEventsEnabled
+      ? (note, data) => {
+          if (!options.debugEventsEnabled?.()) return
+          void postDebugNote(note, data, options.authConfig)
+        }
+      : undefined
     const listenerToken = Symbol('even-hub-listener')
     activeEventListenerToken = listenerToken
     const unsubscribeEvents = sdk.onEvenHubEvent((event) => {
@@ -219,8 +231,10 @@ export class EvenHubGlassesBridge implements GlassesBridge {
         // (`this.lastSidebarModel = ...` and the completion log) runs
         // immediately, and any in-flight SDK call from a previous
         // render is abandoned cleanly.
+        const rebuildStartedAt = Date.now()
         this.sdk.rebuildPageContainer(container).then(
           (accepted) => {
+            debugNote?.('page-rebuild', { durationMs: Date.now() - rebuildStartedAt, accepted, withImage: model.kind === 'sidebar' && Boolean(model.panelImage) })
             // The host answers `false` when it refuses a page. Ignoring that left the glasses on the previous
             // screen while the phone moved on, so fall back to a simpler layout and try again.
             if (accepted === false) {
@@ -476,7 +490,9 @@ export class EvenHubGlassesBridge implements GlassesBridge {
             'updateImageRawData',
           )
           ok = isImageSuccess(result)
-          logTeleGlanceTest('image', { bytes: next.byteLength, result: String(result), ok, durationMs: Date.now() - startedAt })
+          const durationMs = Date.now() - startedAt
+          logTeleGlanceTest('image', { bytes: next.byteLength, result: String(result), ok, durationMs })
+          debugNote?.('image-transfer', { bytes: next.byteLength, result: String(result), ok, durationMs })
         }
       } catch {
         ok = false
@@ -1071,6 +1087,25 @@ function visibleListWindow(items: string[], selectedIndex: number, maxVisible: n
   const half = Math.floor(maxVisible / 2)
   const start = Math.max(0, Math.min(clamped - half, Math.max(0, items.length - maxVisible)))
   return Object.assign(items.slice(start, start + maxVisible), { start })
+}
+
+async function postDebugNote(note: string, data: Record<string, unknown>, authConfig?: () => TelegramAuthConfig) {
+  try {
+    const config = authConfig?.()
+    const sharedSecret = config ? effectiveBackendSharedSecret(config, defaultApiBaseUrl()) : ''
+    const effectiveConfig = config ? { ...config, backendSharedSecret: sharedSecret } : undefined
+    const encryptedAuth = effectiveConfig ? await encryptedTelegramAuthHeader(effectiveConfig) : null
+    if (!encryptedAuth || !sharedSecret) return
+    const body = JSON.stringify({ source: 'even-hub', buildVersion: APP_BUILD_VERSION, raw: { event: note, ...data }, mapped: null, note })
+    const encryptedPayload = await encryptJsonPayload(body, sharedSecret)
+    await fetch(`${defaultApiBaseUrl()}/api/debug/events`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-TeleGlance-Auth': encryptedAuth },
+      body: JSON.stringify({ encryptedPayload }),
+    })
+  } catch {
+    // Debug notes must never affect the glasses.
+  }
 }
 
 async function logHardwareEvent(raw: unknown, mapped: AppInput | undefined, authConfig?: () => TelegramAuthConfig) {
