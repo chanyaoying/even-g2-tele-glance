@@ -336,3 +336,5 @@ Do not replace a blank simulator glasses capture with a macOS desktop screenshot
 - Photo caches (1.0.77): the phone keeps up to 64 prepared pictures in memory (was 16) and the backend 128 (was 48). The `image` debug event now carries `durationMs` (how long `updateImageRawData` took), so the glasses-link transfer time can finally be measured instead of assumed.
 
 - Photos on the phone (1.0.78): prepared pictures are saved in Even App SDK storage (`PersistentCache.putPhoto/getPhoto`, one key per picture, own 2.5 MB LRU budget kept apart from the 400 KB message budget, 7-day max age, account-stamp invalidation, cleared by Clear cache / logout / Reset settings). `loadPhoto` order: memory -> phone storage -> backend. A picture bigger than a quarter of the photo budget is not stored. Real storage speed/limits for this volume are unverified on the phone.
+
+- Photo store (1.0.79): the stored-picture budget is 7.5 MB (was 2.5 MB) and pictures no longer expire; only the size budget removes them, least recently used first. Messages keep the 7-day expiry (they can be edited or deleted; a picture never changes for a given message).

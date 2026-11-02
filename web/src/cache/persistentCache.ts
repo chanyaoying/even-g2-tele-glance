@@ -34,7 +34,7 @@ const CHATS_KEY = `${PREFIX}chats`
 
 const DEFAULTS = {
   budgetBytes: 400_000,
-  photoBudgetBytes: 2_500_000,
+  photoBudgetBytes: 7_500_000,
   maxAgeMs: 7 * 24 * 60 * 60 * 1000,
   flushDelayMs: 2000,
   maxMessagesPerThread: 24,
@@ -130,13 +130,6 @@ export class PersistentCache {
         await this.write(`${PREFIX}t.${id}`, '')
       }
     }
-    for (const [id, meta] of Object.entries(this.index.photos ?? {})) {
-      if (meta.usedAt < cutoff) {
-        delete this.index.photos![id]
-        this.indexDirty = true
-        await this.write(`${PREFIX}p.${id}`, '')
-      }
-    }
     if (this.indexDirty) this.scheduleFlush()
   }
 
@@ -169,8 +162,8 @@ export class PersistentCache {
     if (!this.index.photos?.[id]) return undefined
     const raw = await this.read(`${PREFIX}p.${id}`)
     const stored = raw ? safeParse<{ at: number; key: string; photo: Photo }>(raw) : undefined
+    // No expiry: a picture never changes for a given message, so only the size budget (least recently used first) removes it.
     if (!stored || stored.key !== photoKey || typeof stored.photo?.data !== 'string') return undefined
-    if (this.options.now() - stored.at > this.options.maxAgeMs) return undefined
     this.index.photos[id].usedAt = this.options.now()
     this.indexDirty = true
     this.scheduleFlush()
