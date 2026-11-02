@@ -465,6 +465,7 @@ export class EvenHubGlassesBridge implements GlassesBridge {
         while (this.pendingImage) {
           const next = this.pendingImage
           this.pendingImage = undefined
+          const startedAt = Date.now()
           const result = await withTimeout(
             this.sdk.updateImageRawData!(new ImageRawDataUpdate({
               containerID: IMAGE_CONTAINER_ID,
@@ -475,7 +476,7 @@ export class EvenHubGlassesBridge implements GlassesBridge {
             'updateImageRawData',
           )
           ok = isImageSuccess(result)
-          logTeleGlanceTest('image', { bytes: next.byteLength, result: String(result), ok })
+          logTeleGlanceTest('image', { bytes: next.byteLength, result: String(result), ok, durationMs: Date.now() - startedAt })
         }
       } catch {
         ok = false

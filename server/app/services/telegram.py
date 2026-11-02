@@ -235,7 +235,7 @@ DIALOG_CACHE_TTL_SECONDS = 45.0
 FOLDER_LOOKAHEAD = 60
 # A refresh of page one only needs the top of the list; the deeper cached chats are kept.
 HEAD_REFRESH = 40
-PHOTO_CACHE_SIZE = 48
+PHOTO_CACHE_SIZE = 128
 UPDATE_QUEUE_SIZE = 50
 REPLY_CACHE_CHATS = 16
 REPLY_CACHE_PER_CHAT = 200

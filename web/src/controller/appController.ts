@@ -42,7 +42,7 @@ const OLDER_PAGE_LIMIT = 24
 // so switching folders later is instant.
 const FOLDER_WARM_DELAY_MS = 2500
 const OLDER_PREFETCH_LOW_WATER = 14
-const PHOTO_CACHE_LIMIT = 16
+const PHOTO_CACHE_LIMIT = 64
 const PHOTO_PREFETCH_COUNT = 2
 const CHAT_LIST_LIMIT = 20
 // When the selection gets this close to the end of the loaded chats, fetch the next page.
