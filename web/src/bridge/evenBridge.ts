@@ -53,6 +53,26 @@ let activeEventListenerToken: symbol | undefined
  * picture or a page rebuild can be read without a dev console. Set by `create`; does nothing while the setting is off.
  */
 let debugNote: ((note: string, data: Record<string, unknown>) => void) | undefined
+let errorReportingInstalled = false
+
+/**
+ * An error that escapes the app used to leave no trace at all. With Debug events on, send uncaught errors and
+ * unhandled promise rejections to the backend log (`debug-note ... js-error`), with the start of the stack.
+ */
+function reportUncaughtErrors() {
+  if (errorReportingInstalled || typeof window === 'undefined') return
+  errorReportingInstalled = true
+  const describe = (value: unknown) => {
+    if (value instanceof Error) return { message: value.message.slice(0, 300), stack: String(value.stack ?? '').slice(0, 600) }
+    return { message: String(value).slice(0, 300) }
+  }
+  window.addEventListener('error', (event) => {
+    debugNote?.('js-error', { kind: 'error', ...describe(event.error ?? event.message), at: `${event.filename ?? ''}:${event.lineno ?? 0}` })
+  })
+  window.addEventListener('unhandledrejection', (event) => {
+    debugNote?.('js-error', { kind: 'unhandledrejection', ...describe(event.reason) })
+  })
+}
 
 type EvenBridgeInstance = {
   createStartUpPageContainer(container: unknown): Promise<number>
@@ -84,6 +104,8 @@ export class EvenHubGlassesBridge implements GlassesBridge {
   private rebuildSentAt = 0
   private pendingFullModel: ScreenModel | undefined
   private pendingFlushTimer: ReturnType<typeof setTimeout> | undefined
+  /** The one-time startup call has been used for a plain text page (see `render`). */
+  private startupBootstrapped = false
   private audioChain: Promise<void> = Promise.resolve()
   private pageGeneration = 0
   private renderSequence = 0
@@ -120,6 +142,7 @@ export class EvenHubGlassesBridge implements GlassesBridge {
           void postDebugNote(note, data, options.authConfig)
         }
       : undefined
+    reportUncaughtErrors()
     const listenerToken = Symbol('even-hub-listener')
     activeEventListenerToken = listenerToken
     const unsubscribeEvents = sdk.onEvenHubEvent((event) => {
@@ -203,6 +226,13 @@ export class EvenHubGlassesBridge implements GlassesBridge {
       return
     }
     this.pendingFullModel = undefined
+    if (!this.hasRendered && !this.startupBootstrapped && model.kind === 'sidebar') {
+      // The host creates the first page only once, and only a plain text page has been proven to be accepted there.
+      // Send the chat list as text first (it is on the glasses at once), then apply the full layout as a rebuild.
+      this.startupBootstrapped = true
+      this.pendingFullModel = model
+      model = { kind: 'text', title: model.title, body: model.panelBody.trim() ? model.panelBody : ' ' }
+    }
     this.rebuildInFlight = true
     this.rebuildSentAt = Date.now()
     const generation = ++this.pageGeneration

@@ -7,6 +7,11 @@ function flushAsync(ms = 0) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms))
 }
 
+/** The bridge sends a plain text page through the one-time startup call; these tests look at the full layout itself. */
+function skipTextBootstrap(bridge: unknown) {
+  ;(bridge as { startupBootstrapped: boolean }).startupBootstrapped = true
+}
+
 function textObjectById(container: unknown, containerID: number) {
   const textObject = (container as { textObject?: Array<{ containerID?: number }> }).textObject ?? []
   return textObject.find((item) => item.containerID === containerID) as { yPosition: number; height: number } | undefined
@@ -121,6 +126,7 @@ describe('EvenHubGlassesBridge', () => {
         return undefined
       },
     })
+    skipTextBootstrap(bridge)
 
     await bridge.render({
       kind: 'sidebar',
@@ -159,6 +165,7 @@ describe('EvenHubGlassesBridge', () => {
         return undefined
       },
     })
+    skipTextBootstrap(bridge)
 
     await bridge.render({
       kind: 'sidebar',
@@ -195,6 +202,7 @@ describe('EvenHubGlassesBridge', () => {
         return undefined
       },
     })
+    skipTextBootstrap(bridge)
 
     await bridge.render({
       kind: 'sidebar',
@@ -223,6 +231,7 @@ describe('EvenHubGlassesBridge', () => {
       async audioControl() { return undefined },
       onEvenHubEvent() { return undefined },
     })
+    skipTextBootstrap(bridge)
 
     await bridge.render({
       kind: 'sidebar',
@@ -370,6 +379,29 @@ describe('EvenHubGlassesBridge', () => {
     expect(stats2.dispatched).toBeGreaterThanOrEqual(1)
   })
 
+  it('starts with a plain text page and applies the sidebar layout as a rebuild', async () => {
+    const startup: Array<{ textObject?: unknown[]; listObject?: unknown[] }> = []
+    const rebuilds: unknown[] = []
+    const bridge = new EvenHubGlassesBridge({
+      async createStartUpPageContainer(container: { textObject?: unknown[] }) { startup.push(container); return 0 },
+      async rebuildPageContainer(container: unknown) { rebuilds.push(container); return true },
+      async textContainerUpgrade() { return true },
+      async audioControl() { return undefined },
+      onEvenHubEvent() { return undefined },
+    } as never)
+    await bridge.render({
+      kind: 'sidebar', title: 'Chats', focus: 'sidebar', sidebarTitle: 'Chats', sidebarItems: ['Alice', 'Bob'], sidebarSelected: 0,
+      panelTitle: '', panelBody: '> Alice\n  Bob', panelFooter: 'Swipe',
+    })
+    await flushAsync(10)
+
+    expect(startup).toHaveLength(1)
+    expect(JSON.stringify(startup[0])).toContain('> Alice') // the chat list is on the glasses straight away
+    expect(JSON.stringify(startup[0])).not.toContain('event-overlay')
+    expect(rebuilds).toHaveLength(1)
+    expect(JSON.stringify(rebuilds[0])).toContain('event-overlay') // then the interactive layout
+  })
+
   it('sends one full rebuild at a time and only the newest waiting screen after it', async () => {
     const answers: Array<(accepted: boolean) => void> = []
     const sent: string[] = []
@@ -417,6 +449,7 @@ describe('EvenHubGlassesBridge', () => {
       async audioControl() { return undefined },
       onEvenHubEvent() { return undefined },
     })
+    skipTextBootstrap(bridge)
     const model: Extract<ScreenModel, { kind: 'sidebar' }> = {
       kind: 'sidebar',
       title: 'Chats',
@@ -531,6 +564,7 @@ describe('EvenHubGlassesBridge photos', () => {
       },
       ...extra,
     } as never)
+    skipTextBootstrap(bridge)
     return { bridge, rebuilt }
   }
 
@@ -540,9 +574,13 @@ describe('EvenHubGlassesBridge photos', () => {
   it('always includes the image container: 288x120 over the text gap for a picture, a 20x20 blank otherwise', async () => {
     const { bridge, rebuilt } = makeBridge()
 
+    // Pages go out one at a time, so let each one be answered before sending the next.
     await bridge.render({ ...baseModel, panelImage: { chatId: '1', messageId: '2', topLine: 1 } } as ScreenModel)
+    await flushAsync(5)
     await bridge.render({ ...baseModel, panelImage: { chatId: '1', messageId: '2', topLine: 3 } } as ScreenModel)
+    await flushAsync(5)
     await bridge.render({ ...baseModel } as ScreenModel)
+    await flushAsync(5)
 
     const first = imageObject(rebuilt[0])
     const lower = imageObject(rebuilt[1])
@@ -606,6 +644,8 @@ describe('EvenHubGlassesBridge photos', () => {
         return undefined
       },
     })
+    skipTextBootstrap(bridge)
+    skipTextBootstrap(bridge)
     const base = {
       kind: 'sidebar' as const,
       title: 'Project',
