@@ -370,6 +370,41 @@ describe('EvenHubGlassesBridge', () => {
     expect(stats2.dispatched).toBeGreaterThanOrEqual(1)
   })
 
+  it('sends one full rebuild at a time and only the newest waiting screen after it', async () => {
+    const answers: Array<(accepted: boolean) => void> = []
+    const sent: string[] = []
+    const bridge = new EvenHubGlassesBridge({
+      async createStartUpPageContainer() { return 0 },
+      rebuildPageContainer(container: { textObject?: Array<{ containerName?: string; content?: string }> }) {
+        sent.push(container.textObject?.map((text) => text.content ?? '').join('|') ?? '')
+        return new Promise<boolean>((resolve) => answers.push(resolve))
+      },
+      async textContainerUpgrade() { return true },
+      async audioControl() { return undefined },
+      onEvenHubEvent() { return undefined },
+    } as never)
+    const screen = (body: string): Extract<ScreenModel, { kind: 'sidebar' }> => ({
+      kind: 'sidebar', title: 'Chats', focus: 'sidebar', sidebarTitle: 'Chats', sidebarItems: ['Alice'], sidebarSelected: 0,
+      panelTitle: 'Alice', panelBody: body, panelFooter: 'Click',
+    })
+    await bridge.render(screen('first')) // startup page
+    await flushAsync(5)
+    await bridge.render(screen('second')) // rebuild goes out
+    await flushAsync(5)
+    expect(sent).toHaveLength(1)
+
+    await bridge.render(screen('third'))
+    await bridge.render(screen('fourth'))
+    await flushAsync(5)
+    expect(sent).toHaveLength(1) // still waiting for the glasses to answer the second
+
+    answers[0](true)
+    await flushAsync(5)
+    expect(sent).toHaveLength(2)
+    expect(sent[1]).toContain('fourth')
+    expect(sent.join('\n')).not.toContain('third')
+  })
+
   it('rejects direct renderSidebarPanel with stale generation', async () => {
     const upgrades: Array<unknown> = []
     const bridge = new EvenHubGlassesBridge({

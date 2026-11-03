@@ -28,6 +28,8 @@ const encoder = new TextEncoder()
 const IMAGE_CONTAINER_ID = 9
 const IMAGE_CONTAINER_NAME = 'panel-image'
 const POPUP_CONTAINER_ID = 10
+/** Longest the bridge waits for the glasses to answer a page before it sends the next one anyway. */
+const REBUILD_MAX_WAIT_MS = 3000
 const POPUP_CONTAINER_NAME = 'popup'
 export const APP_BUILD_VERSION: string = (typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0')
 
@@ -74,6 +76,14 @@ export class EvenHubGlassesBridge implements GlassesBridge {
   private audioOn = false
   /** 0 = full sidebar layout; raised when the host rejects a page, until pages are accepted again. */
   private layoutTier: LayoutTier = 0
+  /**
+   * Full rebuilds go to the glasses one at a time. The host needs hundreds of milliseconds to seconds per page, and a
+   * rebuild sent while another is still being drawn is slow or refused; the newest screen waits and replaces the rest.
+   */
+  private rebuildInFlight = false
+  private rebuildSentAt = 0
+  private pendingFullModel: ScreenModel | undefined
+  private pendingFlushTimer: ReturnType<typeof setTimeout> | undefined
   private audioChain: Promise<void> = Promise.resolve()
   private pageGeneration = 0
   private renderSequence = 0
@@ -183,6 +193,18 @@ export class EvenHubGlassesBridge implements GlassesBridge {
   }
 
   async render(model: ScreenModel) {
+    if (this.rebuildInFlight && Date.now() - this.rebuildSentAt < REBUILD_MAX_WAIT_MS) {
+      this.pendingFullModel = model
+      if (!this.pendingFlushTimer) {
+        // If the host never answers the page in flight, stop waiting for it once the limit passes.
+        this.pendingFlushTimer = setTimeout(() => this.rebuildFinished(), REBUILD_MAX_WAIT_MS)
+      }
+      logTeleGlanceTest('render.queued', { reason: 'rebuild-in-flight' })
+      return
+    }
+    this.pendingFullModel = undefined
+    this.rebuildInFlight = true
+    this.rebuildSentAt = Date.now()
     const generation = ++this.pageGeneration
     const sequence = ++this.renderSequence
     // A full page rebuild invalidates every pending partial update. Clear the
@@ -234,6 +256,7 @@ export class EvenHubGlassesBridge implements GlassesBridge {
         const rebuildStartedAt = Date.now()
         this.sdk.rebuildPageContainer(container).then(
           (accepted) => {
+            this.rebuildFinished()
             debugNote?.('page-rebuild', { durationMs: Date.now() - rebuildStartedAt, accepted, withImage: model.kind === 'sidebar' && Boolean(model.panelImage) })
             // The host answers `false` when it refuses a page. Ignoring that left the glasses on the previous
             // screen while the phone moved on, so fall back to a simpler layout and try again.
@@ -245,6 +268,7 @@ export class EvenHubGlassesBridge implements GlassesBridge {
             logTeleGlanceTest('render', { sequence, generation, model: summarizeScreenModel(model) })
           },
           () => {
+            this.rebuildFinished()
             // SDK call rejected. Mark the bridge as needing a full
             // rebuild so the next render uses
             // `createStartUpPageContainer` instead of
@@ -259,6 +283,7 @@ export class EvenHubGlassesBridge implements GlassesBridge {
         logTeleGlanceTest('render', { sequence, generation, model: summarizeScreenModel(model), attempted: true })
         this.sdk.createStartUpPageContainer(container).then(
           (result) => {
+            this.rebuildFinished()
             if (typeof result === 'number' && result !== 0) {
               this.handleRejectedPage(model, generation, 'createStartUpPageContainer', result)
               return
@@ -268,14 +293,31 @@ export class EvenHubGlassesBridge implements GlassesBridge {
             logTeleGlanceTest('render', { sequence, generation, model: summarizeScreenModel(model) })
           },
           () => {
+            this.rebuildFinished()
             logTeleGlanceTest('render.failed', { sequence, generation, method: 'createStartUpPageContainer' })
           },
         )
       }
+    } catch (error) {
+      this.rebuildFinished()
+      throw error
     } finally {
       this.fullRenderInFlight = false
       this.emitQueueDepth('full-render-end')
     }
+  }
+
+  /** The page in flight was answered (or given up on): send the newest waiting screen, if any. */
+  private rebuildFinished() {
+    if (this.pendingFlushTimer) {
+      clearTimeout(this.pendingFlushTimer)
+      this.pendingFlushTimer = undefined
+    }
+    this.rebuildInFlight = false
+    const next = this.pendingFullModel
+    if (!next) return
+    this.pendingFullModel = undefined
+    void this.render(next).catch(() => undefined)
   }
 
   /**

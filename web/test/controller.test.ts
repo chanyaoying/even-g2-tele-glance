@@ -2455,6 +2455,22 @@ describe('on-phone cache and live updates', () => {
     expect((controller.snapshot as Extract<AppState, { focus: 'chats' }>).chats.map((chat) => chat.title)).toEqual(['Alice', 'Project'])
   })
 
+  it('never draws the loading screen when a stored chat list exists', async () => {
+    const stored: Chat[] = [{ id: '1', title: 'Stored Alice', kind: 'user' }]
+    const { cache } = await seededCache(undefined, (c) => c.putChats(stored))
+    const api = fakeApi({ authorized: true })
+    const bridge = fakeBridge()
+    const controller = new TelegramAppController(api, bridge, 0, undefined, () => true, cache)
+
+    await controller.init()
+    await flushAsync()
+
+    const drawn = vi.mocked(bridge.render).mock.calls.map(([model]) => JSON.stringify(model))
+    expect(drawn.length).toBeGreaterThan(0)
+    expect(drawn.some((model) => model.includes('Checking Telegram session'))).toBe(false)
+    expect(drawn[0]).toContain('"kind":"sidebar"')
+  })
+
   it('does not keep or show stored chats when the account is signed out', async () => {
     const { cache, storage } = await seededCache(undefined, (c) => c.putChats([{ id: '1', title: 'Stored', kind: 'user' }]))
     const controller = new TelegramAppController(fakeApi({ authorized: false }), fakeBridge(), 0, undefined, () => true, cache)

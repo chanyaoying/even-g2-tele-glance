@@ -84,7 +84,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setLocale(localeFromCode(restoredSettings.language))
         if (!fixtureMode) {
           saveFrontendConfig(restoredSettings)
-          await saveFrontendConfigToAppStorage(appStorageRef.current, restoredSettings)
+          // Not awaited: the settings were just read from this same storage, so the first screen need not wait for the write.
+          void saveFrontendConfigToAppStorage(appStorageRef.current, restoredSettings)?.catch?.(() => undefined)
         }
         const baseApi: TelegramApi = fixtureMode
           ? new FixtureTelegramApi()

@@ -376,7 +376,19 @@ export class TelegramAppController {
   }
 
   async init() {
-    await this.setState({ screen: 'loading', message: 'Checking Telegram session...' })
+    // Read the stored chat list before drawing anything: when there is one, the glasses go straight to it and never
+    // show the "Checking Telegram session..." screen (every extra page costs the glasses link a rebuild).
+    // The network request starts first so it runs while the stored list is read and drawn.
+    const hasCredentials = this.hasTelegramCredentials()
+    const chatsRequest = hasCredentials ? this.api.listChats(CHAT_LIST_LIMIT) : undefined
+    chatsRequest?.catch(() => undefined)
+    const storedChats = hasCredentials ? await this.cache?.getChats().catch(() => undefined) : undefined
+    if (storedChats && storedChats.length > 0) {
+      this.showingStoredChats = true
+      await this.setState(this.chatsState(storedChats, 0, { status: UPDATING_STATUS }))
+    } else {
+      await this.setState({ screen: 'loading', message: 'Checking Telegram session...' })
+    }
     await this.run(async () => {
       if (!this.hasTelegramCredentials()) {
         await this.setState({
@@ -386,15 +398,7 @@ export class TelegramAppController {
         })
         return
       }
-      // Show the last known chat list straight away; the real list replaces it as soon as it arrives.
-      const storedChats = await this.cache?.getChats().catch(() => undefined)
-      if (storedChats && storedChats.length > 0) {
-        this.showingStoredChats = true
-        await this.setState(this.chatsState(storedChats, 0, { status: UPDATING_STATUS }))
-      }
-      // Ask for the chat list while the session check is still running; it is dropped if the session is not authorized.
-      const chatsRequest = this.api.listChats(CHAT_LIST_LIMIT)
-      chatsRequest.catch(() => undefined)
+      // The chat list request is already running; it is dropped if the session is not authorized.
       const status = await this.api.authStatus()
       if (!status.authorized) {
         this.showingStoredChats = false
