@@ -142,47 +142,6 @@ describe('TelegramAppController', () => {
     expect((controller.snapshot as Extract<AppState, { screen: 'sidebar'; focus: 'messages' }>).messages).toEqual(opsMessages)
   })
 
-  it('forces a full rebuild when the topic-list panelBox visibility flips', async () => {
-    const longMessage: Message = {
-      id: '200',
-      sender: 'Long Sender',
-      // > 25 words so formatMessageBox produces a panelBox.
-      text: 'one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty twenty-one twenty-two twenty-three twenty-four twenty-five twenty-six twenty-seven',
-      sentAt: '2026-05-29T10:00:00Z',
-    }
-    const shortMessage: Message = { id: '210', sender: 'Short', text: 'hi', sentAt: '2026-05-29T10:01:00Z' }
-    let activeTopicId = 'topic-long'
-    const api = fakeApi({
-      authorized: true,
-      chats: [chats[0], chats[1]],
-      topics: [
-        { id: 'topic-long', title: 'Long', unreadCount: 0, lastMessage: 'long' },
-        { id: 'topic-short', title: 'Short', unreadCount: 0, lastMessage: 'short' },
-      ],
-      latestMessages: () => Promise.resolve(activeTopicId === 'topic-long' ? [longMessage] : [shortMessage]),
-    })
-    const bridge = fakeBridge()
-    const controller = new TelegramAppController(api, bridge)
-
-    await controller.init()
-    await controller.dispatch({ type: 'swipeDown' })
-    await controller.dispatch({ type: 'press' }) // open topics list
-    await flushAsync()
-    // Manually fetch preview for the long topic (initial selection).
-    await fetchTopicPreview(controller, chats[1], { id: 'topic-long', title: 'Long' })
-    await flushAsync()
-    const renderCountAfterLongPreview = vi.mocked(bridge.render).mock.calls.length
-    const enqueueCountAfterLongPreview = vi.mocked(bridge.enqueueSidebarPanel ?? (() => undefined)).mock.calls.length
-
-    // Swipe to the short topic; this must trigger a full render (not a partial enqueue)
-    // because the panelBox visibility flipped from defined to undefined.
-    activeTopicId = 'topic-short'
-    await controller.dispatch({ type: 'swipeDown' })
-    await flushAsync()
-    expect(vi.mocked(bridge.render).mock.calls.length).toBeGreaterThan(renderCountAfterLongPreview)
-    expect(vi.mocked(bridge.enqueueSidebarPanel ?? (() => undefined)).mock.calls.length).toBe(enqueueCountAfterLongPreview)
-  })
-
   it('suppresses the auto-press path on the same-index selection fired right after a swipe', async () => {
     // Use a single non-forum chat so the prefetch runs in the background without
     // opening any extra message threads we have to track.
@@ -1303,36 +1262,6 @@ describe('TelegramAppController', () => {
       cursor: 80,
       scrollOffset: 1, // scrolling moves one message at a time: the freshly loaded older message is now in view
     })
-  })
-
-  it('keeps swipe-up inside a boxed message until the first chunk', async () => {
-    const boxedThread: Message[] = [
-      { id: '100', sender: 'Alice', text: 'older small', sentAt: '2026-05-29T10:00:00Z' },
-      { id: '101', sender: 'Bob', text: controllerLongText('boxed', 3), sentAt: '2026-05-29T10:01:00Z' },
-      { id: '102', sender: 'Carol', text: 'newer small', sentAt: '2026-05-29T10:02:00Z' },
-    ]
-    const api = fakeApi({ authorized: true, latestMessages: boxedThread })
-    const controller = new TelegramAppController(api, fakeBridge())
-
-    await controller.init()
-    await controller.dispatch({ type: 'press' })
-    await controller.dispatch({ type: 'swipeUp' })
-    expect(messagePanelHeading(controller.snapshot)).toMatch(/Bob .*1\//)
-
-    await controller.dispatch({ type: 'swipeDown' })
-    expect(messagePanelHeading(controller.snapshot)).toMatch(/Bob .*2\//)
-
-    await controller.dispatch({ type: 'swipeDown' })
-    expect(messagePanelHeading(controller.snapshot)).toMatch(/Bob .*3\//)
-
-    await controller.dispatch({ type: 'swipeUp' })
-    expect(messagePanelHeading(controller.snapshot)).toMatch(/Bob .*2\//)
-
-    await controller.dispatch({ type: 'swipeUp' })
-    expect(messagePanelHeading(controller.snapshot)).toMatch(/Bob .*1\//)
-
-    await controller.dispatch({ type: 'swipeUp' })
-    expect(messagePanelBody(controller.snapshot)).toContain('Alice')
   })
 
   it('fetches a photo for the visible photo page and pushes it to the glasses once', async () => {
@@ -2459,22 +2388,10 @@ function flushReadAcks(controller: TelegramAppController) {
   ;(controller as unknown as { flushReadAcks: () => void }).flushReadAcks()
 }
 
-function messagePanelHeading(state: AppState) {
-  const model = screenModel(state)
-  expect(model.kind).toBe('sidebar')
-  return model.kind === 'sidebar' ? model.panelBox?.heading : undefined
-}
-
 function messagePanelBody(state: AppState) {
   const model = screenModel(state)
   expect(model.kind).toBe('sidebar')
   return model.kind === 'sidebar' ? model.panelBody : ''
-}
-
-function controllerLongText(seed: string, repeats = 3) {
-  return Array.from({ length: repeats }, (_, index) =>
-    `${seed}-${index} alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega`
-  ).join(' ')
 }
 
 function latestMessageCallCount(api: TelegramApi) {

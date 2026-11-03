@@ -42,6 +42,25 @@ function wordCountForTest(text: string) {
 }
 
 describe('screenModel', () => {
+  it('scrolls a long message through page-sized blocks without truncating it or boxing it', () => {
+    const words = Array.from({ length: 160 }, (_, index) => `w${index}`)
+    const messages: Message[] = [
+      { id: '1', sender: 'Alice', text: 'short' },
+      { id: '2', sender: 'Bob', text: words.join(' ') },
+    ]
+    const seen = new Set<string>()
+    const pageCount = messageScrollUnitCount(messages)
+    for (let offset = 0; offset < pageCount; offset += 1) {
+      const model = modelAt(messages, offset)
+      if (model.kind !== 'sidebar') throw new Error('expected sidebar')
+      expect(model.panelBox).toBeUndefined()
+      expect(model.panelBody.split('\n').length).toBeLessThanOrEqual(7)
+      expect(encoder.encode(model.panelBody).byteLength).toBeLessThanOrEqual(999)
+      for (const word of words) if (new RegExp(`\\b${word}\\b`).test(model.panelBody)) seen.add(word)
+    }
+    expect(seen.size).toBe(words.length)
+  })
+
   it('keeps message text under the Even Hub 999 byte text limit', () => {
     const state: AppState = {
       screen: 'sidebar', focus: 'messages',
@@ -64,126 +83,6 @@ describe('screenModel', () => {
       // `model.ts` sidebar.messages footer.
       expect(model.panelFooter).toBe('Swipe scroll | Hold to record | Double click back')
     }
-  })
-
-  it('lets large messages scroll through later chunks instead of truncating to ellipsis only', () => {
-    const state: AppState = {
-      screen: 'sidebar', focus: 'messages',
-      chats: [], selectedChatIndex: 0,
-      chat: { id: '1', title: 'Project', kind: 'group' },
-      messages: [
-        { id: '1', sender: 'Alice', text: 'short' },
-        { id: '2', sender: 'Bob', text: 'a '.repeat(65) + 'last' },
-      ],
-    }
-
-    const fullModel = screenModel(state)
-
-    expect(fullModel.kind).toBe('sidebar')
-    if (fullModel.kind === 'sidebar') {
-      // scrollOffset 0 is the newest page — Bob's long box
-      expect(fullModel.panelBox).toBeDefined()
-    }
-
-    const scrolled = screenModel({ ...state, scrollOffset: messageScrollUnitCount(state.messages) - 1 })
-    expect(scrolled.kind).toBe('sidebar')
-    if (scrolled.kind === 'sidebar') {
-      // scrollOffset 1 is Alice's short message
-      expect(scrolled.panelBody).toContain('Alice')
-    }
-  })
-
-  it('navigates boxed message chunks in reading order with adjacent-message boundaries', () => {
-    const state: AppState = {
-      screen: 'sidebar', focus: 'messages',
-      chats: [], selectedChatIndex: 0,
-      chat: { id: '1', title: 'Project', kind: 'group' },
-      messages: [
-        { id: '1', sender: 'Alice', text: 'older note' },
-        { id: '2', sender: 'Bob', text: 'alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega '.repeat(3) },
-        { id: '3', sender: 'Carol', text: 'newer note' },
-      ],
-    }
-
-    const newest = screenModel({ ...state, scrollOffset: 0 })
-    expect(newest.kind).toBe('sidebar')
-    if (newest.kind === 'sidebar') expect(newest.panelBody).toContain('Carol')
-
-    const firstBoxOffset = nextMessageScrollOffset(state.messages, 0, 'up')
-    const firstBox = screenModel({ ...state, scrollOffset: firstBoxOffset })
-    expect(firstBox.kind).toBe('sidebar')
-    if (firstBox.kind === 'sidebar') {
-      expect(firstBox.panelBox?.heading).toContain('1/')
-      expect(firstBox.panelBox?.content).toContain('alpha')
-    }
-
-    const secondBoxOffset = nextMessageScrollOffset(state.messages, firstBoxOffset, 'down')
-    const secondBox = screenModel({ ...state, scrollOffset: secondBoxOffset })
-    expect(secondBox.kind).toBe('sidebar')
-    if (secondBox.kind === 'sidebar') {
-      expect(secondBox.panelBox?.heading).toContain('2/')
-      expect(nextMessageScrollOffset(state.messages, secondBoxOffset, 'up')).toBe(firstBoxOffset)
-    }
-
-    const thirdBoxOffset = nextMessageScrollOffset(state.messages, secondBoxOffset, 'down')
-    const thirdBox = screenModel({ ...state, scrollOffset: thirdBoxOffset })
-    expect(thirdBox.kind).toBe('sidebar')
-    if (thirdBox.kind === 'sidebar') {
-      expect(thirdBox.panelBox?.heading).toContain('3/')
-      expect(nextMessageScrollOffset(state.messages, thirdBoxOffset, 'up')).toBe(secondBoxOffset)
-    }
-
-    expect(nextMessageScrollOffset(state.messages, firstBoxOffset, 'up')).toBe(messageScrollUnitCount(state.messages) - 1)
-    const olderOffset = messageScrollUnitCount(state.messages) - 1
-    const older = screenModel({ ...state, scrollOffset: olderOffset })
-    expect(older.kind).toBe('sidebar')
-    if (older.kind === 'sidebar') expect(older.panelBody).toContain('Alice')
-    expect(nextMessageScrollOffset(state.messages, olderOffset, 'down')).toBe(firstBoxOffset)
-
-    let lastBoxOffset = firstBoxOffset
-    while (true) {
-      const next = nextMessageScrollOffset(state.messages, lastBoxOffset, 'down')
-      if (next === 0) break
-      lastBoxOffset = next
-    }
-    expect(nextMessageScrollOffset(state.messages, lastBoxOffset, 'down')).toBe(0)
-  })
-
-  it('keeps navigation ordering correct across mixed small messages and multi-chunk boxes', () => {
-    const messages: Message[] = [
-      { id: 'old-small', sender: 'Alice', text: 'old small message' },
-      { id: 'old-box', sender: 'Bob', text: longText('old-box', 4) },
-      { id: 'middle-small', sender: 'Carol', text: 'middle small message' },
-      { id: 'new-box', sender: 'Dana', text: longText('new-box', 4) },
-      { id: 'new-small', sender: 'Eve', text: 'new small message' },
-    ]
-
-    const newest = modelAt(messages, 0)
-    if (newest.kind === 'sidebar') expect(newest.panelBody).toContain('Eve')
-
-    const newBoxFirst = nextMessageScrollOffset(messages, 0, 'up')
-    expect(boxPart(messages, newBoxFirst)).toMatchObject({ sender: 'Dana', part: 1 })
-
-    const newBoxSecond = nextMessageScrollOffset(messages, newBoxFirst, 'down')
-    expect(boxPart(messages, newBoxSecond)).toMatchObject({ sender: 'Dana', part: 2 })
-
-    const newBoxThird = nextMessageScrollOffset(messages, newBoxSecond, 'down')
-    expect(boxPart(messages, newBoxThird)).toMatchObject({ sender: 'Dana', part: 3 })
-    expect(nextMessageScrollOffset(messages, newBoxThird, 'up')).toBe(newBoxSecond)
-
-    const middleSmall = nextMessageScrollOffset(messages, newBoxFirst, 'up')
-    const middleModel = modelAt(messages, middleSmall)
-    if (middleModel.kind === 'sidebar') expect(middleModel.panelBody).toContain('Carol')
-    expect(nextMessageScrollOffset(messages, middleSmall, 'down')).toBe(newBoxFirst)
-
-    const oldBoxFirst = nextMessageScrollOffset(messages, middleSmall, 'up')
-    expect(boxPart(messages, oldBoxFirst)).toMatchObject({ sender: 'Bob', part: 1 })
-    expect(boxPart(messages, nextMessageScrollOffset(messages, oldBoxFirst, 'down'))).toMatchObject({ sender: 'Bob', part: 2 })
-
-    const oldSmall = nextMessageScrollOffset(messages, oldBoxFirst, 'up')
-    const oldSmallModel = modelAt(messages, oldSmall)
-    if (oldSmallModel.kind === 'sidebar') expect(oldSmallModel.panelBody).toContain('Alice')
-    expect(nextMessageScrollOffset(messages, oldSmall, 'down')).toBe(oldBoxFirst)
   })
 
   it('fuzzes mixed small/large message navigation around every boxed message', () => {
@@ -318,72 +217,6 @@ describe('screenModel', () => {
     }
   })
 
-  it('keeps boxed long-message pages separate from adjacent short messages', () => {
-    const state: AppState = {
-      screen: 'sidebar', focus: 'messages',
-      chats: [], selectedChatIndex: 0,
-      chat: { id: '1', title: 'Project', kind: 'group' },
-      messages: [
-        { id: '1', sender: 'Alice', text: 'short' },
-        { id: '2', sender: 'Bob', text: 'very '.repeat(30) + 'long message here' },
-      ],
-    }
-
-    // Bob's message has 33 words → boxes. With 4 content rows per box page,
-    // it may need 2 pages. scrollOffset 0 is the last box page.
-    const shortPage = screenModel({ ...state, scrollOffset: 0 })
-    expect(shortPage.kind).toBe('sidebar')
-    if (shortPage.kind === 'sidebar') {
-      expect(shortPage.panelBox).toBeDefined()
-      if (shortPage.panelBox) {
-        expect(shortPage.panelBox.heading).toContain('Bob')
-      }
-    }
-
-    // Alice's short message is on the page before the box pages
-    const pageCount = messageScrollUnitCount(state.messages)
-    const alicePage = screenModel({ ...state, scrollOffset: pageCount - 1 })
-    expect(alicePage.kind).toBe('sidebar')
-    if (alicePage.kind === 'sidebar') {
-      expect(alicePage.panelBody).toContain('Alice')
-      expect(alicePage.panelBox).toBeUndefined()
-    }
-  })
-
-  it('walks through all pages of a boxed message before moving to the previous message', () => {
-    const state: AppState = {
-      screen: 'sidebar', focus: 'messages',
-      chats: [], selectedChatIndex: 0,
-      chat: { id: '1', title: 'Project', kind: 'group' },
-      messages: [
-        { id: '1', sender: 'Alice', text: 'before' },
-        { id: '2', sender: 'Bob', text: 'very '.repeat(30) + 'long message wrapping across multiple box pages' },
-        { id: '3', sender: 'Carol', text: 'after' },
-      ],
-    }
-
-    const pageCount = messageScrollUnitCount(state.messages)
-    expect(pageCount).toBeGreaterThanOrEqual(3)
-
-    const newestPage = screenModel({ ...state, scrollOffset: 0 })
-    expect(newestPage.kind).toBe('sidebar')
-    if (newestPage.kind === 'sidebar') {
-      expect(newestPage.panelBody).toContain('Carol')
-    }
-
-    const midPage = screenModel({ ...state, scrollOffset: 1 })
-    expect(midPage.kind).toBe('sidebar')
-    if (midPage.kind === 'sidebar') {
-      expect(midPage.panelBox).toBeDefined()
-    }
-
-    const oldestPage = screenModel({ ...state, scrollOffset: pageCount - 1 })
-    expect(oldestPage.kind).toBe('sidebar')
-    if (oldestPage.kind === 'sidebar') {
-      expect(oldestPage.panelBody).toContain('Alice')
-    }
-  })
-
   it('scrolls compact messages continuously, one message per step', () => {
     const state: AppState = {
       screen: 'sidebar', focus: 'messages',
@@ -424,32 +257,6 @@ describe('screenModel', () => {
     })
     expect(model.kind === 'sidebar' && model.panelImage).toEqual({ chatId: '7', messageId: '41', topLine: 1 })
     expect(model.kind === 'sidebar' && model.panelBody).toContain('[sticker]')
-  })
-
-  it('keeps short messages compact and boxes messages over twenty-five words', () => {
-    const shortState: AppState = {
-      screen: 'sidebar', focus: 'messages',
-      chats: [], selectedChatIndex: 0,
-      chat: { id: '1', title: 'Project', kind: 'group' },
-      messages: [{ id: '1', sender: 'Alice', text: 'hello world' }],
-    }
-    const shortModel = screenModel(shortState)
-    expect(shortModel.kind).toBe('sidebar')
-    if (shortModel.kind === 'sidebar') {
-      expect(shortModel.panelBox).toBeUndefined()
-    }
-
-    const longState: AppState = {
-      screen: 'sidebar', focus: 'messages',
-      chats: [], selectedChatIndex: 0,
-      chat: { id: '1', title: 'Project', kind: 'group' },
-      messages: [{ id: '1', sender: 'Alice', text: Array(30).fill('word').join(' ') }],
-    }
-    const longModel = screenModel(longState)
-    expect(longModel.kind).toBe('sidebar')
-    if (longModel.kind === 'sidebar') {
-      expect(longModel.panelBox).toBeDefined()
-    }
   })
 
   it('wraps boxed messages on word boundaries when words fit the row', () => {
@@ -544,26 +351,6 @@ describe('screenModel', () => {
     }
   })
 
-  it('does not double-render boxed topic previews as body text', () => {
-    const state: AppState = {
-      screen: 'sidebar', focus: 'topics',
-      chats: [], selectedChatIndex: 0,
-      chat: { id: '1', title: 'Akira Agents', kind: 'group', isForum: true },
-      topics: [{ id: '10', title: 'Stock-Analyst' }],
-      selectedTopicIndex: 0,
-      previewTopic: { id: '10', title: 'Stock-Analyst' },
-      previewMessages: [{ id: '1', sender: 'Akira', text: 'it after a 7x run from lows '.repeat(8) }],
-    }
-
-    const model = screenModel(state)
-
-    expect(model.kind).toBe('sidebar')
-    if (model.kind === 'sidebar') {
-      expect(model.panelBox).toBeDefined()
-      expect(model.panelBody).toBe('')
-    }
-  })
-
   it('renders the chat list full width with no message preview', () => {
     const chats = Array.from({ length: 12 }, (_, i) => ({
       id: String(i), title: `Chat ${i}`, kind: 'user' as const, isForum: false, lastMessage: 'preview text',
@@ -638,38 +425,6 @@ describe('screenModel', () => {
       // and not the full thread; see the comment on
       // `sidebar.topics` in `model.ts`.
       expect(model.panelFooter).toBe('Loading messages...')
-    }
-  })
-
-  it('does not double-render boxed messages while recording or after sent state', () => {
-    const base = {
-      focus: 'messages' as const,
-      chats: [],
-      selectedChatIndex: 0,
-      chat: { id: '1', title: 'Akira Agents', kind: 'group' as const },
-      messages: [{ id: '1', sender: 'Akira', text: 'it after a 7x run from lows '.repeat(8) }],
-    }
-
-    const recording = screenModel({
-      ...base,
-      screen: 'sidebarRecording',
-      chunks: [],
-      startedAt: 1,
-    })
-    const sent = screenModel({
-      ...base,
-      screen: 'sidebarSent',
-    })
-
-    expect(recording.kind).toBe('sidebar')
-    expect(sent.kind).toBe('sidebar')
-    if (recording.kind === 'sidebar' && sent.kind === 'sidebar') {
-      expect(recording.fullWidth).toBe(true)
-      expect(sent.fullWidth).toBe(true)
-      expect(recording.panelBox).toBeDefined()
-      expect(recording.panelBody).toBe('')
-      expect(sent.panelBox).toBeDefined()
-      expect(sent.panelBody).toBe('')
     }
   })
 

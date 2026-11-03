@@ -7,11 +7,6 @@ const MESSAGE_ROW_BYTE_LIMIT = 120
 const MESSAGE_ROW_CHAR_LIMIT = 44
 // A photo page puts the text in a narrow left column (about 282 px) and the picture on the right.
 const MESSAGE_VISIBLE_ROW_LIMIT = 7
-const MESSAGE_BOX_WIDTH = 42
-const MESSAGE_BOX_CONTENT_WIDTH = MESSAGE_BOX_WIDTH - 4
-const MESSAGE_BOX_CONTENT_ROWS = MESSAGE_VISIBLE_ROW_LIMIT - 4
-const MESSAGE_BOX_PAD = ' '
-const MESSAGE_BOX_WORD_THRESHOLD = 25
 const encoder = new TextEncoder()
 const messagePageCache = new WeakMap<Message[], MessageDisplayPage[]>()
 
@@ -685,11 +680,6 @@ function formatMessageBlocks(message: Message, dayLabel = ''): MessageDisplayBlo
   const sender = sanitizeGlassesText(message.outgoing ? l.senderMe : message.sender || l.senderUnknown)
   const text = sanitizeGlassesText(message.text || '').trim() || l.messageUnsupported
   const time = formatMessageTime(message.sentAt)
-  if (wordCount(text) > MESSAGE_BOX_WORD_THRESHOLD) {
-    // A boxed message sits on a page of its own, so the day goes into its heading instead of a divider row.
-    return formatMessageBox(String(message.id), [dayLabel, time, sender].filter(Boolean).join(' '), text)
-  }
-
   const before = messageHeaderRows(message)
   if (message.media === 'photo' || message.media === 'sticker') {
     // The picture flows with the conversation: one heading row, then blank rows the picture container covers.
@@ -709,7 +699,12 @@ function formatMessageBlocks(message: Message, dayLabel = ''): MessageDisplayBlo
   else if (message.link) rows.push(...linkRows(message.link, MESSAGE_VISIBLE_ROW_LIMIT - used))
   // The divider is part of the day's first message block, so it can never be split from that message.
   if (dayLabel) rows.unshift(`----- ${dayLabel} -----`)
-  return [{ text: rows.join('\n') }]
+  // A message taller than one page is cut into page-sized blocks, so it scrolls like the rest of the thread.
+  const blocks: MessageDisplayBlock[] = []
+  for (let start = 0; start < rows.length; start += MESSAGE_VISIBLE_ROW_LIMIT) {
+    blocks.push({ text: rows.slice(start, start + MESSAGE_VISIBLE_ROW_LIMIT).join('\n') })
+  }
+  return blocks
 }
 
 function clipRow(value: string, indent = ''): string {
@@ -820,40 +815,6 @@ function formatCompactMessageRows(sender: string, text: string) {
   }
   return rows
 }
-function formatMessageBox(messageId: string, sender: string, text: string): MessageDisplayBlock[] {
-  const topBorder = `+${'-'.repeat(MESSAGE_BOX_WIDTH - 2)}+`
-  const midBorder = `+${'-'.repeat(MESSAGE_BOX_WIDTH - 2)}+`
-  const bottomBorder = `+${'-'.repeat(MESSAGE_BOX_WIDTH - 2)}+`
-  const rows = splitBoxRows(text)
-  const pages: MessageDisplayBlock[] = []
-  const partCount = Math.ceil(rows.length / MESSAGE_BOX_CONTENT_ROWS)
-  const boxGroupId = `${messageId}:${sender}:${text}`
-  for (let index = 0; index < rows.length; index += MESSAGE_BOX_CONTENT_ROWS) {
-    const pageRows = rows.slice(index, index + MESSAGE_BOX_CONTENT_ROWS)
-    const partIndex = Math.floor(index / MESSAGE_BOX_CONTENT_ROWS)
-    const pageNumber = rows.length > MESSAGE_BOX_CONTENT_ROWS ? ` ${partIndex + 1}/${partCount}` : ''
-    const heading = trimBoxText(`${sender}${pageNumber}`)
-    const content = pageRows.join(' ')
-    pages.push({
-      text: [
-        topBorder,
-        boxLine(heading),
-        midBorder,
-        ...pageRows.map((row) => boxLine(row)),
-        bottomBorder,
-      ].join('\n'),
-      box: {
-        heading,
-        content,
-      },
-      boxGroupId,
-      boxPartIndex: partIndex,
-      boxPartCount: partCount,
-    })
-  }
-  return pages.reverse()
-}
-
 function sanitizeGlassesText(value: string) {
   const l = getLocale()
   let result = value
@@ -896,24 +857,6 @@ function sanitizeGlassesText(value: string) {
       .trim()
   }
   return result
-}
-
-function boxLine(value: string) {
-  const padding = MESSAGE_BOX_PAD.repeat(Math.max(0, MESSAGE_BOX_CONTENT_WIDTH - value.length))
-  return `| ${value}${padding} |`
-}
-
-function trimBoxText(value: string) {
-  if (value.length <= MESSAGE_BOX_CONTENT_WIDTH) return value
-  return `${value.slice(0, MESSAGE_BOX_CONTENT_WIDTH - 3)}...`
-}
-
-function splitBoxRows(value: string) {
-  return splitDisplayWordRows(value, MESSAGE_BOX_CONTENT_WIDTH, MESSAGE_ROW_BYTE_LIMIT).map(trimBoxText)
-}
-
-function wordCount(value: string) {
-  return value.trim().split(/\s+/).filter(Boolean).length
 }
 
 function formatPage(blocks: MessageDisplayBlock[]): MessageDisplayPage {

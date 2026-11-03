@@ -10,7 +10,7 @@ from typing import Any, AsyncIterator, Literal, Optional, Protocol, Union
 
 from app.config import Settings
 from app.services.imaging import ImagingError, prepare_glasses_image
-from app.services.message_content import forwarded_from, link_info, media_label, poll_info, reply_preview, reply_target_id
+from app.services.message_content import forwarded_from, link_info, media_label, poll_info, reply_preview, reply_target_id, rich_text
 from app.models import (
     ChatSummary,
     FolderSummary,
@@ -429,7 +429,7 @@ def _photo_text(message: Any) -> str:
 
 
 def _message_readable_text(message: Any) -> str:
-    text = str(getattr(message, "message", None) or getattr(message, "raw_text", None) or "").strip()
+    text = str(getattr(message, "message", None) or getattr(message, "raw_text", None) or "").strip() or rich_text(message)
     label = media_label(message)
     if label is None and getattr(message, "action", None) is not None:
         label = "[service]"

@@ -186,7 +186,7 @@ def reply_target_id(message: Any, topic_id: Optional[int] = None) -> Optional[in
 
 def reply_preview(message: Any) -> str:
     """One short line describing a message that is being replied to."""
-    text = " ".join(str(getattr(message, "message", None) or "").split())
+    text = " ".join((str(getattr(message, "message", None) or "") or rich_text(message)).split())
     if not text:
         if type(getattr(message, "media", None)).__name__ == "MessageMediaPhoto":
             text = "[photo]"
@@ -195,3 +195,85 @@ def reply_preview(message: Any) -> str:
         else:
             text = media_label(message) or ""
     return text if len(text) <= PREVIEW_CHARS else text[: PREVIEW_CHARS - 2].rstrip() + ".."
+
+
+# --- Rich messages (Telegram "rich_message": page blocks instead of a plain text body) ---
+
+_SEPARATOR_BLOCKS = {"PageBlockDivider"}
+_SKIPPED_BLOCKS = {"PageBlockAnchor", "PageBlockUnsupported", "PageBlockAuthorDate"}
+
+
+def _rich_inline(node: Any) -> str:
+    """Flatten styled text (bold, code, links...) to plain text; styling is dropped to save glasses rows."""
+    if node is None:
+        return ""
+    if isinstance(node, str):
+        return node
+    kind = type(node).__name__
+    if kind in ("TextEmpty", "TextImage"):
+        return ""
+    texts = getattr(node, "texts", None)
+    if texts is not None:
+        return "".join(_rich_inline(item) for item in texts)
+    return _rich_inline(getattr(node, "text", None))
+
+
+def _rich_lines(block: Any) -> list[str]:
+    kind = type(block).__name__
+    if kind in _SKIPPED_BLOCKS:
+        return []
+    if kind in _SEPARATOR_BLOCKS:
+        return ["-----"]
+    if kind == "PageBlockTable":
+        lines = []
+        title = _rich_inline(getattr(block, "title", None)).strip()
+        if title:
+            lines.append(title)
+        for row in getattr(block, "rows", None) or []:
+            cells = [" ".join(_rich_inline(getattr(cell, "text", None)).split()) for cell in getattr(row, "cells", None) or []]
+            if any(cells):
+                lines.append(" | ".join(cells))
+        return lines
+    if kind in ("PageBlockList", "PageBlockOrderedList"):
+        lines = []
+        for index, item in enumerate(getattr(block, "items", None) or [], start=1):
+            marker = "-"
+            if kind == "PageBlockOrderedList":
+                num = str(getattr(item, "num", "") or index).rstrip(".")
+                marker = f"{num}."
+            inner = getattr(item, "blocks", None)
+            if inner is not None:
+                body = " ".join(line for sub in inner for line in _rich_lines(sub))
+            else:
+                body = _rich_inline(getattr(item, "text", None))
+            body = " ".join(body.split())
+            if body:
+                lines.append(f"{marker} {body}")
+        return lines
+    if kind == "PageBlockBlockquote" or kind == "PageBlockPullquote":
+        text = _rich_inline(getattr(block, "text", None)).strip()
+        return [f"> {line}" for line in text.splitlines() if line.strip()]
+    if kind == "PageBlockDetails":
+        lines = [_rich_inline(getattr(block, "title", None)).strip()]
+        lines += [line for sub in getattr(block, "blocks", None) or [] for line in _rich_lines(sub)]
+        return [line for line in lines if line]
+    if kind == "PageBlockPreformatted":
+        return [line.rstrip() for line in _rich_inline(getattr(block, "text", None)).strip("\n").splitlines()]
+    inner_blocks = getattr(block, "blocks", None)
+    if inner_blocks is not None:
+        return [line for sub in inner_blocks for line in _rich_lines(sub)]
+    text = _rich_inline(getattr(block, "text", None))
+    if text.strip():
+        return [line.rstrip() for line in text.strip().splitlines()]
+    return []
+
+
+def rich_text(message: Any) -> str:
+    """Plain text for a message whose body lives in `rich_message` (empty string when it has none)."""
+    rich = getattr(message, "rich_message", None)
+    if rich is None:
+        return ""
+    lines: list[str] = []
+    for block in getattr(rich, "blocks", None) or []:
+        lines.extend(_rich_lines(block))
+    return "\n".join(lines).strip()
