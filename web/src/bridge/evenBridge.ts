@@ -30,6 +30,8 @@ const IMAGE_CONTAINER_NAME = 'panel-image'
 const POPUP_CONTAINER_ID = 10
 /** Longest the bridge waits for the glasses to answer a page before it sends the next one anyway. */
 const REBUILD_MAX_WAIT_MS = 3000
+/** Longest a picture transfer waits for the page it belongs to to be drawn. */
+const PAGE_SETTLE_MAX_WAIT_MS = 4000
 const POPUP_CONTAINER_NAME = 'popup'
 export const APP_BUILD_VERSION: string = (typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0')
 
@@ -106,6 +108,7 @@ export class EvenHubGlassesBridge implements GlassesBridge {
   private pendingFlushTimer: ReturnType<typeof setTimeout> | undefined
   /** The one-time startup call has been used for a plain text page (see `render`). */
   private startupBootstrapped = false
+  private pageSettledWaiters: Array<() => void> = []
   private audioChain: Promise<void> = Promise.resolve()
   private pageGeneration = 0
   private renderSequence = 0
@@ -345,9 +348,35 @@ export class EvenHubGlassesBridge implements GlassesBridge {
     }
     this.rebuildInFlight = false
     const next = this.pendingFullModel
-    if (!next) return
+    if (!next) {
+      this.releasePageWaiters()
+      return
+    }
     this.pendingFullModel = undefined
     void this.render(next).catch(() => undefined)
+  }
+
+  /**
+   * Resolves once no page is being drawn or waiting to be drawn. Picture pixels must follow the page that holds their
+   * container: sent earlier, they hit the old (tiny) placeholder and the new page then lands with an empty slot.
+   */
+  pageSettled(): Promise<void> {
+    if (!this.rebuildInFlight && !this.pendingFullModel) return Promise.resolve()
+    return new Promise((resolve) => {
+      const done = () => {
+        clearTimeout(timer)
+        this.pageSettledWaiters = this.pageSettledWaiters.filter((waiter) => waiter !== done)
+        resolve()
+      }
+      const timer = setTimeout(done, PAGE_SETTLE_MAX_WAIT_MS)
+      this.pageSettledWaiters.push(done)
+    })
+  }
+
+  private releasePageWaiters() {
+    const waiters = this.pageSettledWaiters
+    this.pageSettledWaiters = []
+    for (const waiter of waiters) waiter()
   }
 
   /**

@@ -22,6 +22,8 @@ export interface GlassesBridge {
   enqueueSidebarPanel?(model: Extract<ScreenModel, { kind: 'sidebar' }>): void
   /** Push photo pixels (a PNG) to the panel image container; resolves true when the glasses accepted it. */
   updateImage?(png: Uint8Array): Promise<boolean>
+  /** Resolves when no full page is being drawn or waiting; pictures are sent after it so they land on their page. */
+  pageSettled?(): Promise<void>
   setAudioEnabled(enabled: boolean): Promise<void>
   getLocalStorage?(key: string): Promise<string>
   setLocalStorage?(key: string, value: string): Promise<boolean>
@@ -1330,6 +1332,7 @@ export class TelegramAppController {
   private async showPanelImage(image: { chatId: string; messageId: string }) {
     if (!this.bridge.updateImage) return
     const photo = await this.loadPhoto(image.chatId, image.messageId)
+    await this.bridge.pageSettled?.()
     const current = this.state
     if (current.screen !== 'sidebar' || current.focus !== 'messages') return
     const shown = screenModel(current)

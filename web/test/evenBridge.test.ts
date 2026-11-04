@@ -402,6 +402,34 @@ describe('EvenHubGlassesBridge', () => {
     expect(JSON.stringify(rebuilds[0])).toContain('event-overlay') // then the interactive layout
   })
 
+  it('reports the page as settled only once the rebuild in flight has been answered', async () => {
+    const answers: Array<(accepted: boolean) => void> = []
+    const bridge = new EvenHubGlassesBridge({
+      async createStartUpPageContainer() { return 0 },
+      rebuildPageContainer() { return new Promise<boolean>((resolve) => answers.push(resolve)) },
+      async textContainerUpgrade() { return true },
+      async audioControl() { return undefined },
+      onEvenHubEvent() { return undefined },
+    } as never)
+    const screen: Extract<ScreenModel, { kind: 'sidebar' }> = {
+      kind: 'sidebar', title: 'Chats', focus: 'sidebar', sidebarTitle: 'Chats', sidebarItems: ['A'], sidebarSelected: 0,
+      panelTitle: 'A', panelBody: 'x', panelFooter: 'Click',
+    }
+    await bridge.render(screen) // startup text page, then the sidebar rebuild goes out and stays unanswered
+    await flushAsync(10)
+    expect(answers).toHaveLength(1)
+
+    let settled = false
+    void bridge.pageSettled().then(() => { settled = true })
+    await flushAsync(10)
+    expect(settled).toBe(false)
+
+    answers[0](true)
+    await flushAsync(10)
+    expect(settled).toBe(true)
+    await expect(bridge.pageSettled()).resolves.toBeUndefined() // nothing in flight any more
+  })
+
   it('sends one full rebuild at a time and only the newest waiting screen after it', async () => {
     const answers: Array<(accepted: boolean) => void> = []
     const sent: string[] = []

@@ -1282,6 +1282,28 @@ describe('TelegramAppController', () => {
     controller.dispose()
   })
 
+  it('sends the picture only after the page that holds its container has been drawn', async () => {
+    const photoMessages: Message[] = [
+      { id: '90', sender: 'Alice', text: 'hello' },
+      { id: '100', sender: 'Alice', text: '[photo]', media: 'photo', sentAt: '2026-05-29T10:00:00Z' },
+    ]
+    const api = fakeApi({ authorized: true, latestMessages: photoMessages })
+    const bridge = fakeBridge()
+    let drawn!: () => void
+    bridge.pageSettled = vi.fn(() => new Promise<void>((resolve) => { drawn = resolve }))
+    const controller = new TelegramAppController(api, bridge)
+
+    await controller.init()
+    await controller.dispatch({ type: 'press' })
+    await vi.waitFor(() => expect(bridge.pageSettled).toHaveBeenCalled())
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(bridge.updateImage).not.toHaveBeenCalled() // the page is still being drawn
+
+    drawn()
+    await vi.waitFor(() => expect(bridge.updateImage).toHaveBeenCalledTimes(1))
+    controller.dispose()
+  })
+
   it('waits for scrolling to pause before sending a photo to the glasses', async () => {
     const photoMessages: Message[] = [
       { id: '90', sender: 'Alice', text: 'hello' },
