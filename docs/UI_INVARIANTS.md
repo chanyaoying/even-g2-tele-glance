@@ -268,10 +268,10 @@ Per-step latencies are split into `stateMs` (input -> matching state event), `ap
 
 ### 4.13 `sidebarRecording` (recording in progress)
 - **state**: `{ screen: 'sidebarRecording', focus: 'messages', chat, topic?, messages, back, chunks: [...Uint8Array], startedAt }`
-- **render**: `{ kind: 'sidebar', title: 'Recording reply', focus: 'panel', fullWidth: true }`
+- **render**: `{ kind: 'sidebar', title: 'REC Recording reply', focus: 'panel', fullWidth: true }`
 - **content**:
   - `panelTitle`: `'Recording'`
-  - `panelBody`: empty or last visible message
+  - `panelBody`: the open thread's visible messages
   - `panelFooter`: `'Release to stop | Double click cancel'`
 - **transitions**:
   - `press` -> `sidebarTranscribing`; `setAudioEnabled(true)` then `setAudioEnabled(false)` observed
@@ -290,9 +290,10 @@ Per-step latencies are split into `stateMs` (input -> matching state event), `ap
 
 ### 4.15 `sidebarConfirm.send` (Send highlighted)
 - **state**: `{ screen: 'sidebarConfirm', focus: 'messages', chat, topic?, messages, transcript, selectedIndex: 0, back }`
-- **render**: `{ kind: 'text', title: 'Confirm reply' }`
-- **body**: contains the transcript followed by `> Send` and `  Cancel`; it MUST NOT contain message-history content
-- **footer**: `'Swipe select | Press confirm'`
+- **render**: `{ kind: 'sidebar', focus: 'panel', fullWidth: true }` with a `popup` (the dialog drawn over the thread)
+- **popup**: `title: 'Confirm reply'`; `body` is the transcript followed by `> Send` and `  Cancel`. The thread stays visible underneath in `panelBody`
+- **glasses**: the popup is not part of the `panelBody` text; check it in `steps/<step>.glasses.png`
+- **footer**: `'Swipe select | Press confirm'` (`panelFooter`)
 - **transitions**:
   - `press` -> `sidebarSending` -> `sidebar.messages` with `state.status === 'Sent'`
   - `swipeUp` / `swipeDown` -> `sidebarConfirm.cancel`
@@ -301,6 +302,7 @@ Per-step latencies are split into `stateMs` (input -> matching state event), `ap
 - **apiCalls**: `sendMessage(chat.id, { text, topicId? })`
 
 ### 4.16 `sidebarConfirm.cancel` (Cancel highlighted)
+Same screen as 4.15 with `> Cancel` / `  Send` in the popup body (`selectedIndex: 1`). The block below describes the following `sidebarSending` screen.
 - **state**: `{ screen: 'sidebarSending', focus: 'messages', chat, topic?, messages, transcript, back }`
 - **render**: `{ kind: 'text', title: 'Sending reply' }`
 - **body**: contains `Sending...` and `state.transcript`

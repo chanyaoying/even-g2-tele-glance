@@ -10,9 +10,12 @@
     "Fixture Forum",
     "Fixture Ops",
     "Fixture Research",
-    "Fixture Archive"
+    "Fixture Archive",
+    "Fixture Media"
   ],
-  "panelBody": "Fixture Ops: Ops message page contains\n  fixture-ops-body for chat index\n  two.\n\nSRE: Ops latency sample message should\n  remain readable.",
+  "panelBody": "Older Fixture: Older fixture content\n  validates up-scroll loading.\nFixture Ops: Ops message page contains\n  fixture-ops-body for chat index\n  two.\nSRE: Ops latency sample message should\n  remain readable.",
   "panelFooter": "Swipe scroll | Hold to record | Double click back",
-  "panelBox": null
+  "panelBox": null,
+  "popup": null,
+  "panelImage": null
 }

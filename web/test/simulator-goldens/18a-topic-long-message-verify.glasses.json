@@ -14,12 +14,9 @@
     "Fixture Topic Five",
     "Fixture Topic Six"
   ],
-  "panelBody": "",
-  "panelFooter": "Older messages | Swipe scroll | Hold to record | Double click back",
-  "panelBox": {
-    "heading": "Topic Three 1/5",
-    "contentLength": 106,
-    "content": "Fixture topic long message body is intended to validate the box rendering path on real G2 hardware and the",
-    "contentExcerpt": "Fixture topic long message body is intended to validate the box rendering path on real G2 hardware and the"
-  }
+  "panelBody": "  formatBoxContent helpers, and\n  includes the unique anchor\n  fixture-long-topic-body-anchor\n  so the harness can confirm the\n  box did not silently drop text\n  past the 999-byte cap. The\n  catalog asserts that the",
+  "panelFooter": "Older messages | 3 newer | Swipe scroll | Hold to record | Double click back",
+  "panelBox": null,
+  "popup": null,
+  "panelImage": null
 }

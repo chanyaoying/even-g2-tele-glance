@@ -1,0 +1,21 @@
+{
+  "kind": "sidebar",
+  "title": "Fixture Media",
+  "sidebarTitle": "Chats",
+  "focus": "panel",
+  "fullWidth": true,
+  "sidebarSelected": 5,
+  "sidebarItems": [
+    "(1) Fixture Alpha",
+    "(4) Fixture Forum",
+    "Fixture Ops",
+    "Fixture Research",
+    "Fixture Archive",
+    "Fixture Media"
+  ],
+  "panelBody": "Fixture Media: Media thread text after the\n  sticker: fixture-media-outro.",
+  "panelFooter": "Swipe scroll | Hold to record | Double click back",
+  "panelBox": null,
+  "popup": null,
+  "panelImage": null
+}

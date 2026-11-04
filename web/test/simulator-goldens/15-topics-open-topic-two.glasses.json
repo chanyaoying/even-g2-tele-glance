@@ -9,12 +9,14 @@
     "Fixture Topic Zero",
     "Fixture Topic One",
     "Fixture Topic Two",
-    "Fixture Topic Three (1)",
+    "(1) Fixture Topic Three",
     "Fixture Topic Four",
     "Fixture Topic Five",
     "Fixture Topic Six"
   ],
-  "panelBody": "Topic Two: Fixture topic two message body\n  includes fixture-topic-two-body.\n\nReviewer: Topic two second message validates\n  rendering distinct content.",
+  "panelBody": "Older Fixture: Older fixture content\n  validates up-scroll loading.\nTopic Two: Fixture topic two message body\n  includes fixture-topic-two-body.\n----- last read -----\nReviewer: Topic two second message validates\n  rendering distinct content.",
   "panelFooter": "Swipe scroll | Hold to record | Double click back",
-  "panelBox": null
+  "panelBox": null,
+  "popup": null,
+  "panelImage": null
 }

@@ -1,7 +1,24 @@
 {
-  "kind": "text",
-  "title": "Confirm reply",
-  "body": "Fixture transcript\n\n> Send\n  Cancel",
-  "footer": "Swipe select | Press confirm",
-  "box": null
+  "kind": "sidebar",
+  "title": "Fixture Alpha",
+  "sidebarTitle": "Chats",
+  "focus": "panel",
+  "fullWidth": true,
+  "sidebarSelected": 0,
+  "sidebarItems": [
+    "Fixture Alpha",
+    "Fixture Forum",
+    "Fixture Ops",
+    "Fixture Research",
+    "Fixture Archive",
+    "Fixture Media"
+  ],
+  "panelBody": "Fixture Alpha: Alpha message page contains\n  fixture-alpha-body for\n  startup testing.\nMe: Alpha outgoing marker for visual\n  validation.",
+  "panelFooter": "Swipe select | Press confirm",
+  "panelBox": null,
+  "popup": {
+    "title": "Confirm reply",
+    "body": "Fixture transcript\n\n> Send\n  Cancel"
+  },
+  "panelImage": null
 }

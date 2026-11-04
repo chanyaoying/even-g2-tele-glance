@@ -1,17 +1,21 @@
 {
   "kind": "sidebar",
-  "title": "Telegram",
+  "title": "Chats",
   "sidebarTitle": "Chats",
-  "focus": "sidebar",
-  "sidebarSelected": 4,
+  "focus": "panel",
+  "fullWidth": true,
+  "sidebarSelected": 5,
   "sidebarItems": [
-    "Fixture Alpha",
-    "Fixture Forum (3)",
+    "(1) Fixture Alpha",
+    "(3) Fixture Forum",
     "Fixture Ops",
     "Fixture Research",
-    "Fixture Archive"
+    "Fixture Archive",
+    "Fixture Media"
   ],
-  "panelBody": "Fixture Long: Short follow-up so pagination\n  logic can detect an older page\n  boundary below.",
+  "panelBody": "  (1) Fixture Alpha\n  (3) Fixture Forum\n  Fixture Ops\n  Fixture Research\n  Fixture Archive\n> Fixture Media",
   "panelFooter": "Swipe chats | Press open",
-  "panelBox": null
+  "panelBox": null,
+  "popup": null,
+  "panelImage": null
 }

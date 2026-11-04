@@ -35,7 +35,16 @@ const fixtureChats: Chat[] = [
     kind: 'group',
     lastMessage: 'Archive preview: older test data.',
   },
+  {
+    id: 'fixture-chat-5',
+    title: 'Fixture Media',
+    kind: 'user',
+    lastMessage: 'Media preview: photo and sticker.',
+  },
 ]
+
+const FIXTURE_PHOTO_PNG = 'iVBORw0KGgoAAAANSUhEUgAAASAAAAB4CAAAAAB3QnByAAAFIElEQVR42u3cX2xTVRwH8O8ZvU+QvZmICgrsX5lTQCYIsqL8EdxzYxNjgstM1IQnE+N8WEZCMBqIJsaY7AFQHzTlWXEMEMaosD/9t/7Z1j9TQBvii2GJD1asD21H3drTc+899w+3v2/C0nP7a885n/x6d7vkwgqg8OLCI4TAyR8uMFLgdxABERABERABPQRA6TBwYTjp9rzRj7ZPv+hD9yTOnHQDSTfSYbZ66EaxAkiHC66hSNINIOnGa0fyyulzh/rRPYkza47kldPnnAmU9wJgYGN9O28eGwyeR8ILnGQAGPJedHx+oFSBvBcdp3qLL2Qen+9e89m7IyNIeOHp991rPnv3mjM/Yqz08/ip4TshVjpQ+scw/yhbKmWYW1casXdOLLLFE++NA2CoGDgHaEUy4cHDK4/2BCpHuxPlRy0xALHWKgOndZDiBwayYMCa+6v/xP86SPErm/YzxQ98HAQUP1t8nyl+AAoDY0BTodxpSwMHnoN8xXMQtjd/eOytEtC/rvuufxjyPrzt/bJUUarM+wDMsFTXNNCVKgJVDJx7Dlo1ePTW6wdHiweie656ogxgGD9aeQ5a+smGB/oWmz/4rAhUMbBBFsoPNkgFevP6bXb8q8BfAAOGPnoXAwxgWHCvUr4DQp8sAxpf++3fyteBIlDFwOJkl0tt1PhGrLDJgVd3mWoHNW0048Qr6XQttRb6qgEAqdpyrQQEzPPs2hoeaK6eXrvKN2xCI/kIVTT6nztYIwMlBWpm3Y0LlBBT3NyoQHFRx046B8k7DTkIaEa4MtZFHSSthZwDFFFRG32WOkhWCzWBQh2kp4McAxRUVR3aRh0kqYUIiIAIiIAIiIAeXiC6km6UDtoVUFVNHzH6qkFABCQ3PWMqaqmDZDWQk4D2XhGubEwgQxpIH1Bura32/fJlwTo1W9ZxJZ3LIZezl5DEKt0d9HtJ6TE7Ce27JFDDzAD6rQLqceeegLQC3VmG9YRtdn9gtG6F8UC3q4Cts4vQQVzgP612u6qBblVHW2+bJnplhPOc+o+LSqBfa7s9aRehQz/WfEbD6UQV0C98u6dsInQY56sf1vL7SAXQQl2/DXZpolfxw8pD2q5nhIGyQoQbTdl/tv40vQC+rxxo/cLgksdTrDOeKAtkhe7e6ZUxm1AHZVQt39DbhzImzaMGKK12Dy2GrTa9zKrFBkApLdsw5LbeVFWwVmuB5rXupU32QufNm0ocaE7HftqlLnOOT9duCdCszi11yFrjrIhfh9lASQn7cstYYVJY0W0iUAJy9rZZ5zskzJ1OFCgu7e1V3Teifx0JoFM6kIE8AOLaVxzX+qpOQzsoJrtH43haw6tips8oBjQDA6Lm5ho5y4gBXUYARQ36VTmDZ1RURyXNqWpSEaAIjEsUovfXRKyYVAQobPB3mgi2CFSFZU8qNKsAUMiEPxyEt9YpMGQRYWCrbqAgTEkIvFtIggbOi216gKZhWoJ4rvoT01ZNXDes4Iap2V7l2JR1U9fLNy6YnKkV65wyb2oNRqYDAVPofjCYtHBuuwIBk3i++GDCirnLk9sYCJjYAdyERZkAdtgdyDqd8vQ7bQ5keW4ALxAQPz8DuwiInwCwm4D4uY4XCYifcWAPAfFzraYRAT0w6iEgfsYADwHxcxXYS0D8XMFLBMTPT5U3vBBQ1VwG9hEQP5eA/aD/eYGbixcZAfEzSkD1QkAEREAEREAEREAEREAUAiIgAiIgAiIgAiIgSkVYgQy4+Q9wgTbdk6cqYAAAAABJRU5ErkJggg=='
+const FIXTURE_STICKER_PNG = 'iVBORw0KGgoAAAANSUhEUgAAASAAAAB4CAAAAAB3QnByAAAC1ElEQVR42u2dwbbDIAhEA6f//8vzNm/ZGmJ1ADtsaxWuQBIT8bokEolEIukqVkURFNXMCqIppZ8VhlNCR6tOJ1tNK4PHHv18OiAEdUC6rpaMx1a3PgAQng+OPH0tDY9x/tcNEObHRYrK1gVPFiLrgycHkdH5WIVeKgLCqvFAVdzb8fnvA2d50OJZJzqRd+TDdCLvyIdJyFvyIRLynnx4hLwpHxoh0mXemvSZAAj7bDGGC3lfPhxC3pgPhZB35sMgtD9JW+PedwNiPVCiKSAwpnh3kHnrACOM4P0DbO9Y3t2Bdo/hRzjQxtG8vQNtHuWVOaWRy1z0UghrRh+3nUdeJgdfOGOfJZ7mQAi0xVR/bXKQRe3BF212ZyHae7HhfGO6zXbxrAjrMqbnRBgCxuEBADsuxNqIAKUAwpXxIRjkQQoxARKguVsAm2zTFBASzNmVpbNCzALOYQUcKC8HWcB2y+eTmKQtYLul89m3ohghdL9aaJyXazUBxezO3rSq+yABEiABEiABEiABqvDgmPGALA8SIAESoPMA8bP0tkVMeZAAlQWkz4BvkhBbTCF2Wg7CARG2DZAdEmHaDpUGaPgBHtZzsKuhB703CdMTDvAd1XNyAiZpg57znJ8dJvcIfnzF2nbXs62fbaM7EKewwIogw8poLQLIFgbZOMC67tUYR8SDqxmQFGC88jhvTcKjLizlXtQIdEaWxasB25UQYJxdzwMfim+US+Kz/6FyYEOg7ui4CePrs/1P3QFCt/kljw8L0Kdx8EkV3OvIqTZJWLcZG4JZDUnVOBkLWzemzK1isKqVUlb+bo3BY+Vo1Vw5S6Mhc54cEcGrdqtqwDUALbWJWnGb9l5sXWVRbkVy1bSvA0inImy37/RzNb608RdOZrl0ts8TU3U6VOCeWeeLffdY8aMn1L29Z9QZh8/WOaqoqXNWawO6hfTrJ/UOMJXRTCKRSCRl5Q8iz76ztle7NgAAAABJRU5ErkJggg=='
 
 const LONG_ALPHA_BODY = [
   'This is a deliberately long fixture message that is intended to exercise the long-message rendering pipeline including word wrapping, multi-line layout, and the page-byte-limit trim path. It is well past the fifty-word boundary so the harness can confirm the text container and panelBox branches handle overflow correctly. The harness must verify that the visible substring is preserved even when the total byte length exceeds the SDK cap. fixture-long-alpha-body-anchor appears near the end so the matcher has a unique string to look for. End of long message.',
@@ -61,6 +70,12 @@ const messagePages = new Map<string, Message[]>([
   [threadKey('fixture-chat-4'), [
     msg(40, 'Fixture Long', LONG_ALPHA_BODY),
     msg(41, 'Fixture Long', 'Short follow-up so pagination logic can detect an older page boundary below.'),
+  ]],
+  [threadKey('fixture-chat-5'), [
+    msg(50, 'Fixture Media', 'Media thread text before the picture: fixture-media-intro.'),
+    { ...msg(51, 'Fixture Media', 'Sunset photo [photo]'), media: 'photo' },
+    { ...msg(52, 'Fixture Media', '[sticker]'), media: 'sticker' },
+    msg(53, 'Fixture Media', 'Media thread text after the sticker: fixture-media-outro.'),
   ]],
   [threadKey('fixture-chat-1', 'fixture-topic-0'), [
     msg(100, 'Forum Bot', 'Topic zero warmup body appears before indexed topic validation.'),
@@ -255,9 +270,10 @@ export class FixtureTelegramApi implements TelegramApi {
     return this.getTopics().map((topic) => ({ ...topic }))
   }
 
-  async getPhoto(): Promise<Photo> {
-    // 1x1 greyscale PNG: fixture runs never reach real glasses pixels.
-    return { width: 20, height: 20, data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==' }
+  async getPhoto(_chatId?: Id, messageId?: Id): Promise<Photo> {
+    // Real 288x120 greyscale pictures (what the backend produces), so simulator runs show actual pixels.
+    await fixtureDelay(60)
+    return { width: 288, height: 120, data: String(messageId) === '52' ? FIXTURE_STICKER_PNG : FIXTURE_PHOTO_PNG }
   }
 
   async listMessages(chatId: Id, options: { topicId?: Id; beforeId?: Id; afterId?: Id; limit?: number } = {}) {

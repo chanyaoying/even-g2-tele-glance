@@ -1,17 +1,21 @@
 {
   "kind": "sidebar",
-  "title": "Telegram",
+  "title": "Chats",
   "sidebarTitle": "Chats",
-  "focus": "sidebar",
+  "focus": "panel",
+  "fullWidth": true,
   "sidebarSelected": 2,
   "sidebarItems": [
     "Fixture Alpha",
     "Fixture Forum",
     "Fixture Ops",
     "Fixture Research",
-    "Fixture Archive"
+    "Fixture Archive",
+    "Fixture Media"
   ],
-  "panelBody": "Fixture Ops: Ops message page contains\n  fixture-ops-body for chat index\n  two.\n\nSRE: Ops latency sample message should\n  remain readable.",
+  "panelBody": "  Fixture Alpha\n  Fixture Forum\n> Fixture Ops\n  Fixture Research\n  Fixture Archive\n  Fixture Media",
   "panelFooter": "Swipe chats | Press open",
-  "panelBox": null
+  "panelBox": null,
+  "popup": null,
+  "panelImage": null
 }

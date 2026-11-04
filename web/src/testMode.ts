@@ -428,6 +428,8 @@ export function summarizeScreenModel(model: ScreenModel): Record<string, unknown
         panelBodyExcerpt: model.panelBody.slice(0, 600),
         panelFooter: model.panelFooter,
         panelBox: model.panelBox ? { heading: model.panelBox.heading, contentLength: model.panelBox.content.length, content: model.panelBox.content, contentExcerpt: model.panelBox.content.slice(0, 400) } : null,
+        popup: model.popup ? { title: model.popup.title, body: model.popup.body } : null,
+        panelImage: model.panelImage ? { messageId: model.panelImage.messageId, topLine: model.panelImage.topLine } : null,
       }
   }
 }

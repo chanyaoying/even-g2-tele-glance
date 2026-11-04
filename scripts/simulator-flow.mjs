@@ -35,6 +35,8 @@ const testHost = process.env.TELEGLANCE_TEST_HOST ?? 'localhost'
 const updateGoldens = Boolean(args['update-goldens'])
 const fastMode = Boolean(args['fast'])
 const skipLatencyCheck = Boolean(args['skip-latency-check'])
+// Software-rendered (Xvfb) simulators are slower than a desktop one: --budget-scale 2 doubles every catalog budgetMs.
+const budgetScale = Number(args['budget-scale'] ?? process.env.TELEGLANCE_BUDGET_SCALE ?? 1)
 const targetLocale = args['locale'] ?? 'en'  // --locale es | fr | all | en
 const runMode = args['mode'] ?? 'fixture'
 const isFixtureMode = runMode === 'fixture'
@@ -154,6 +156,7 @@ function resolveTranscript(defaultText) {
 
 await cleanOldArtifacts('simulator-flow')
 await mkdir(stepDir, { recursive: true })
+await mkdir(framesDir, { recursive: true })
 await mkdir(goldenRoot, { recursive: true })
 catalog = await loadCatalog()
 testConsoleBridge = true
@@ -177,12 +180,17 @@ try {
     simulator = await registerExternalSimulatorHandle(simUrl)
   } else {
     simulator = startProcess('simulator', 'npx', [
-      '@evenrealities/evenhub-simulator@0.7.2',
+      '@evenrealities/evenhub-simulator@0.9.5',
       '--automation-port',
       String(automationPort),
       testUrl,
-    ], { cwd: repoRoot })
-    await waitForHttp(`${simUrl}/api/ping`, 20_000, 'pong')
+    ], {
+      cwd: repoRoot,
+      // Software rendering keeps WebKitGTK working on a headless box (run under `xvfb-run -a`).
+      env: { ...process.env, WEBKIT_DISABLE_DMABUF_RENDERER: '1', LIBGL_ALWAYS_SOFTWARE: '1' },
+    })
+    // The 0.9.x simulator needs ~25 s to start answering on a headless machine.
+    await waitForHttp(`${simUrl}/api/ping`, 90_000, 'pong')
     await clearConsole()
   }
 
@@ -588,8 +596,8 @@ async function executeStep(step, _url) {
     } else {
       failures.push(`${name}: expected to exceed ${budgetMs}ms but only took ${totalMs}ms (the latency-budget negative test is broken)`)
     }
-  } else if (!skipLatencyCheck && totalMs > budgetMs) {
-    failures.push(`${name}: total ${totalMs}ms exceeds budget ${budgetMs}ms (latency budget violated)`)
+  } else if (!skipLatencyCheck && totalMs > budgetMs * budgetScale) {
+    failures.push(`${name}: total ${totalMs}ms exceeds budget ${budgetMs * budgetScale}ms (latency budget violated)`)
   }
   const stepFailed = failures.length > failuresBeforeStep
   console.log(`[flow] ${stepFailed ? 'fail' : 'ok'} ${name}: ${totalMs}ms`)
@@ -643,6 +651,12 @@ function matchesRenderContract(model, expected) {
   for (const key of ['kind', 'title', 'focus', 'fullWidth']) {
     if (expected[key] !== undefined && model[key] !== expected[key]) return false
   }
+  if (expected.panelFooter !== undefined && model.panelFooter !== expected.panelFooter) return false
+  // Popup overlay (reply confirmation): title plus text that must / must not appear in its body.
+  if (expected.popupTitle !== undefined && model.popup?.title !== expected.popupTitle) return false
+  const popupBody = model.popup?.body ?? ''
+  for (const needle of expected.popupBodyContains ?? []) if (!popupBody.includes(needle)) return false
+  for (const needle of expected.popupBodyNotContains ?? []) if (popupBody.includes(needle)) return false
   return true
 }
 async function postInput(action, payload) {
@@ -720,6 +734,10 @@ async function sendTestCommand(command) {
 async function captureStep(name, expectations, extras = {}) {
   const eventStartTime = extras.eventStartTime ?? 0
   const webviewPath = path.join(stepDir, `${name}.webview.png`)
+  const glassesPath = path.join(stepDir, `${name}.glasses.png`)
+  await downloadWithRetry(`${simUrl}/api/screenshot/glasses`, glassesPath, 3).catch((error) => {
+    warnings.push(`${name}: glasses screenshot unavailable: ${error instanceof Error ? error.message : String(error)}`)
+  })
   const webviewCaptured = await downloadWithRetry(`${simUrl}/api/screenshot/webview`, webviewPath, 5).catch((error) => {
     warnings.push(`${name}: webview screenshot unavailable: ${error instanceof Error ? error.message : String(error)}`)
     return false
@@ -1405,6 +1423,8 @@ function startProcess(name, command, commandArgs, options) {
   // handle as dead and remaining steps get SKIPPED with an attributable
   // failure instead of misleading per-step timeouts.
   let consecutiveFailures = 0
+  // Count failures only after the first ping succeeds: the 0.9.x simulator needs ~25 s to start answering.
+  let answeredOnce = false
   const probe = setInterval(() => {
     if (handle.exitCode !== null || handle.signalCode !== null) {
       clearInterval(probe)
@@ -1414,9 +1434,10 @@ function startProcess(name, command, commandArgs, options) {
       .then(async (response) => {
         const text = await response.text().catch(() => '')
         if (response.ok && text.trim() === 'pong') {
+          answeredOnce = true
           consecutiveFailures = 0
         } else {
-          consecutiveFailures += 1
+          if (answeredOnce) consecutiveFailures += 1
           if (consecutiveFailures >= 2 && handle.crashMessage === undefined) {
             handle.crashMessage = `simulator at ${simUrl} stopped responding to /api/ping (Flutter main thread is likely blocked on a hung SDK call); remaining steps will be skipped.`
             failures.push(handle.crashMessage)
@@ -1424,7 +1445,7 @@ function startProcess(name, command, commandArgs, options) {
         }
       })
       .catch(() => {
-        consecutiveFailures += 1
+        if (answeredOnce) consecutiveFailures += 1
         if (consecutiveFailures >= 2 && handle.crashMessage === undefined) {
           handle.crashMessage = `simulator at ${simUrl} stopped responding to /api/ping (Flutter main thread is likely blocked on a hung SDK call); remaining steps will be skipped.`
           failures.push(handle.crashMessage)

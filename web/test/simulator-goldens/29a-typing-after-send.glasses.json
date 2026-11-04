@@ -10,9 +10,12 @@
     "Fixture Forum",
     "Fixture Ops",
     "Fixture Research",
-    "Fixture Archive"
+    "Fixture Archive",
+    "Fixture Media"
   ],
-  "panelBody": "Me: Alpha outgoing marker for visual\n  validation.\n\nMe: Fixture transcript",
+  "panelBody": "Fixture Alpha: Alpha message page contains\n  fixture-alpha-body for\n  startup testing.\nMe: Alpha outgoing marker for visual\n  validation.\nMe: Fixture transcript",
   "panelFooter": "Alice typing…",
-  "panelBox": null
+  "panelBox": null,
+  "popup": null,
+  "panelImage": null
 }

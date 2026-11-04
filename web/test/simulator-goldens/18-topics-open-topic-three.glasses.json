@@ -14,12 +14,9 @@
     "Fixture Topic Five",
     "Fixture Topic Six"
   ],
-  "panelBody": "",
-  "panelFooter": "Older messages | Swipe scroll | Hold to record | Double click back",
-  "panelBox": {
-    "heading": "Topic Three 1/5",
-    "contentLength": 106,
-    "content": "Fixture topic long message body is intended to validate the box rendering path on real G2 hardware and the",
-    "contentExcerpt": "Fixture topic long message body is intended to validate the box rendering path on real G2 hardware and the"
-  }
+  "panelBody": "  heading and content both\n  contain this anchor, and that\n  the visible substring of the\n  first line is preserved.\n----- last read -----\nReviewer: Topic three second message\n  validates double-click back.",
+  "panelFooter": "Swipe scroll | Hold to record | Double click back",
+  "panelBox": null,
+  "popup": null,
+  "panelImage": null
 }

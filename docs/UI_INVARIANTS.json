@@ -398,7 +398,7 @@
         "hidden": true
       },
       "right": {
-        "panelFooterContains": "typing\u2026",
+        "panelFooterContains": "typing…",
         "panelFooterNotContains": "Swipe scroll"
       },
       "transitions": {
@@ -442,7 +442,7 @@
       },
       "render": {
         "kind": "sidebar",
-        "title": "Recording reply",
+        "title": "REC Recording reply",
         "focus": "panel",
         "fullWidth": true
       },
@@ -499,16 +499,18 @@
         "selectedIndex": 0
       },
       "render": {
-        "kind": "text",
-        "title": "Confirm reply",
-        "bodyContains": [
+        "kind": "sidebar",
+        "focus": "panel",
+        "fullWidth": true,
+        "popupTitle": "Confirm reply",
+        "popupBodyContains": [
           "> Send",
           "  Cancel"
         ],
-        "bodyNotContains": [
+        "popupBodyNotContains": [
           "> Cancel"
         ],
-        "footer": "Swipe select | Press confirm"
+        "panelFooter": "Swipe select | Press confirm"
       },
       "transitions": {
         "press": "sidebarSending",
@@ -519,7 +521,17 @@
       "budgetMs": 2000,
       "apiCalls": [
         "sendMessage"
-      ]
+      ],
+      "left": {
+        "sidebarTitle": "",
+        "hidden": true
+      },
+      "right": {
+        "panelBodyContains": {
+          "fromState": "messages[*].text"
+        },
+        "panelFooterDefault": "Swipe select | Press confirm"
+      }
     },
     "sidebarConfirm.cancel": {
       "state": {
@@ -527,13 +539,15 @@
         "selectedIndex": 1
       },
       "render": {
-        "kind": "text",
-        "title": "Confirm reply",
-        "bodyContains": [
+        "kind": "sidebar",
+        "focus": "panel",
+        "fullWidth": true,
+        "popupTitle": "Confirm reply",
+        "popupBodyContains": [
           "> Cancel",
           "  Send"
         ],
-        "bodyNotContains": [
+        "popupBodyNotContains": [
           "> Send"
         ]
       },
@@ -543,7 +557,17 @@
         "swipeDown": "sidebarConfirm.send"
       },
       "budgetMs": 500,
-      "apiCalls": []
+      "apiCalls": [],
+      "left": {
+        "sidebarTitle": "",
+        "hidden": true
+      },
+      "right": {
+        "panelBodyContains": {
+          "fromState": "messages[*].text"
+        },
+        "panelFooterDefault": "Swipe select | Press confirm"
+      }
     },
     "sidebarSending": {
       "state": {
@@ -1076,7 +1100,7 @@
           "scrollOffset": 1
         },
         "renderBodyContains": [
-          "Fixture topic long message body"
+          "first line is preserved"
         ]
       },
       "budgetMs": 1500
@@ -1087,7 +1111,7 @@
       "target": "sidebar.messages.topic",
       "expect": {
         "renderBodyContains": [
-          "Fixture topic long message body"
+          "fixture-long-topic-body-anchor"
         ]
       },
       "budgetMs": 1000
@@ -1160,7 +1184,7 @@
         },
         "renderBodyContains": [
           "Alice",
-          "typing\u2026"
+          "typing…"
         ],
         "renderBodyNotContains": [
           "Swipe scroll",
@@ -1223,7 +1247,7 @@
           "scrollOffset": 1
         },
         "renderBodyContains": [
-          "deliberately long fixture message"
+          "fixture-long-alpha-body-anchor"
         ]
       },
       "apiCalls": [
@@ -1240,7 +1264,7 @@
           "isNewestPage": false
         },
         "renderBodyContains": [
-          "This is a deliberately long fixture message"
+          "fifty-word boundary"
         ]
       },
       "budgetMs": 1500
@@ -1527,14 +1551,14 @@
     {
       "name": "36-newmessage-inject",
       "input": "testNotify",
-      "target": "newMessage.normal",
+      "target": "sidebar.chats",
       "expect": {
         "state": {
-          "screen": "newMessage"
+          "screen": "sidebar",
+          "focus": "chats"
         },
         "renderBodyContains": [
-          "New fixture message",
-          "Fixture Alpha"
+          "(1) Fixture Alpha"
         ]
       },
       "budgetMs": 1500
@@ -1685,7 +1709,7 @@
         },
         "renderBodyContains": [
           "Chats",
-          "Fam\u00edlia",
+          "Família",
           "Fixture Ops"
         ]
       },
@@ -1853,7 +1877,7 @@
         },
         "renderBodyContains": [
           "Chats",
-          "Csal\u00e1d",
+          "Család",
           "Fixture Ops"
         ]
       },
@@ -1877,7 +1901,7 @@
         },
         "renderBodyContains": [
           "Chats",
-          "Gia \u0110\u00ecnh",
+          "Gia Đình",
           "Fixture Ops"
         ]
       },
@@ -1997,7 +2021,7 @@
         },
         "renderBodyContains": [
           "Chats",
-          "Fam\u00edlia",
+          "Família",
           "Fixture Ops"
         ]
       },
@@ -2157,18 +2181,84 @@
     {
       "name": "52-newmessage-topic-inject",
       "input": "testTopicNotify",
-      "target": "newMessage.topic",
+      "target": "sidebar.chats",
       "expect": {
         "state": {
-          "screen": "newMessage"
+          "screen": "sidebar",
+          "focus": "chats"
         },
         "renderBodyContains": [
-          "Fixture Forum",
-          "Fixture Topic One",
-          "New topic reply from Bob"
+          "(4) Fixture Forum"
         ]
       },
       "budgetMs": 3500
+    },
+    {
+      "name": "53-media-open",
+      "input": "pressSequence:down,down,down,down,down,click",
+      "target": "sidebar.messages.normal",
+      "expect": {
+        "state": {
+          "focus": "messages",
+          "selectedChatIndex": 5
+        },
+        "renderBodyContains": [
+          "fixture-media-outro"
+        ]
+      },
+      "budgetMs": 3000
+    },
+    {
+      "name": "53a-media-sticker-page",
+      "input": "pressSequence:up",
+      "target": "sidebar.messages.normal",
+      "expect": {
+        "state": {
+          "focus": "messages",
+          "selectedChatIndex": 5
+        },
+        "renderBodyContains": [
+          "[sticker]"
+        ]
+      },
+      "eventMustEmit": [
+        {
+          "event": "image"
+        }
+      ],
+      "budgetMs": 3000
+    },
+    {
+      "name": "53b-media-photo-page",
+      "input": "pressSequence:up",
+      "target": "sidebar.messages.normal",
+      "expect": {
+        "state": {
+          "focus": "messages",
+          "selectedChatIndex": 5
+        },
+        "renderBodyContains": [
+          "Sunset photo [photo]"
+        ]
+      },
+      "eventMustEmit": [
+        {
+          "event": "image"
+        }
+      ],
+      "budgetMs": 3000
+    },
+    {
+      "name": "53c-media-back",
+      "input": "pressSequence:double_click",
+      "target": "sidebar.chats",
+      "expect": {
+        "state": {
+          "focus": "chats",
+          "selectedChatIndex": 5
+        }
+      },
+      "budgetMs": 1000
     }
   ]
 }

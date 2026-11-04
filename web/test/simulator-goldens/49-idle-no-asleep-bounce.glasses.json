@@ -1,18 +1,21 @@
 {
   "kind": "sidebar",
-  "title": "Fixture Archive",
+  "title": "Fixture Media",
   "sidebarTitle": "Chats",
   "focus": "panel",
   "fullWidth": true,
-  "sidebarSelected": 4,
+  "sidebarSelected": 5,
   "sidebarItems": [
-    "Fixture Alpha",
-    "Fixture Forum (3)",
+    "(1) Fixture Alpha",
+    "(3) Fixture Forum",
     "Fixture Ops",
     "Fixture Research",
-    "Fixture Archive"
+    "Fixture Archive",
+    "Fixture Media"
   ],
-  "panelBody": "Fixture Long: Short follow-up so pagination\n  logic can detect an older page\n  boundary below.",
+  "panelBody": "Fixture Media: Media thread text after the\n  sticker: fixture-media-outro.",
   "panelFooter": "Swipe scroll | Hold to record | Double click back",
-  "panelBox": null
+  "panelBox": null,
+  "popup": null,
+  "panelImage": null
 }

@@ -1,0 +1,24 @@
+{
+  "kind": "sidebar",
+  "title": "Fixture Media",
+  "sidebarTitle": "Chats",
+  "focus": "panel",
+  "fullWidth": true,
+  "sidebarSelected": 5,
+  "sidebarItems": [
+    "(1) Fixture Alpha",
+    "(4) Fixture Forum",
+    "Fixture Ops",
+    "Fixture Research",
+    "Fixture Archive",
+    "Fixture Media"
+  ],
+  "panelBody": "Fixture Media: [sticker]\n \n \n \n \n ",
+  "panelFooter": "Older messages | 1 newer | Swipe scroll | Hold to record | Double click back",
+  "panelBox": null,
+  "popup": null,
+  "panelImage": {
+    "messageId": "52",
+    "topLine": 1
+  }
+}

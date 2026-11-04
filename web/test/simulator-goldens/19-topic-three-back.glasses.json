@@ -15,5 +15,7 @@
   ],
   "panelBody": "Loading messages...",
   "panelFooter": "Loading messages...",
-  "panelBox": null
+  "panelBox": null,
+  "popup": null,
+  "panelImage": null
 }

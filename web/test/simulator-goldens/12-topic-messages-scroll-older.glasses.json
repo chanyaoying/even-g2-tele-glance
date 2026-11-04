@@ -8,13 +8,15 @@
   "sidebarItems": [
     "Fixture Topic Zero",
     "Fixture Topic One",
-    "Fixture Topic Two (1)",
-    "Fixture Topic Three (1)",
+    "(1) Fixture Topic Two",
+    "(1) Fixture Topic Three",
     "Fixture Topic Four",
     "Fixture Topic Five",
     "Fixture Topic Six"
   ],
-  "panelBody": "Older Fixture: Older fixture page before\n  110.\n\nOlder Fixture: Older fixture content\n  validates up-scroll loading.",
-  "panelFooter": "Older messages | Swipe scroll | Hold to record | Double click back",
-  "panelBox": null
+  "panelBody": "Older Fixture: Older fixture page before\n  110.\nOlder Fixture: Older fixture content\n  validates up-scroll loading.\nTopic One: Fixture topic one message body\n  includes fixture-topic-one-body.",
+  "panelFooter": "Older messages | 1 newer | Swipe scroll | Hold to record | Double click back",
+  "panelBox": null,
+  "popup": null,
+  "panelImage": null
 }

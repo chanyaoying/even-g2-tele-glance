@@ -10,9 +10,12 @@
     "Fixture Forum",
     "Fixture Ops",
     "Fixture Research",
-    "Fixture Archive"
+    "Fixture Archive",
+    "Fixture Media"
   ],
-  "panelBody": "Fixture Alpha: Alpha message page contains\n  fixture-alpha-body for\n  startup testing.\n\nMe: Alpha outgoing marker for visual\n  validation.",
+  "panelBody": "Older Fixture: Older fixture content\n  validates up-scroll loading.\nFixture Alpha: Alpha message page contains\n  fixture-alpha-body for\n  startup testing.\nMe: Alpha outgoing marker for visual\n  validation.",
   "panelFooter": "Swipe scroll | Hold to record | Double click back",
-  "panelBox": null
+  "panelBox": null,
+  "popup": null,
+  "panelImage": null
 }

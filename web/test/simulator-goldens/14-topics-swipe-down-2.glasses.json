@@ -7,13 +7,15 @@
   "sidebarItems": [
     "Fixture Topic Zero",
     "Fixture Topic One",
-    "Fixture Topic Two (1)",
-    "Fixture Topic Three (1)",
+    "(1) Fixture Topic Two",
+    "(1) Fixture Topic Three",
     "Fixture Topic Four",
     "Fixture Topic Five",
     "Fixture Topic Six"
   ],
   "panelBody": "Loading messages...",
   "panelFooter": "Loading messages...",
-  "panelBox": null
+  "panelBox": null,
+  "popup": null,
+  "panelImage": null
 }

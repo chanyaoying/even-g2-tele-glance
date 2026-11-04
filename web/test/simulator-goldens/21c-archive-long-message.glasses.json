@@ -10,14 +10,12 @@
     "Fixture Forum",
     "Fixture Ops",
     "Fixture Research",
-    "Fixture Archive"
+    "Fixture Archive",
+    "Fixture Media"
   ],
-  "panelBody": "",
-  "panelFooter": "Older messages | Swipe scroll | Hold to record | Double click back",
-  "panelBox": {
-    "heading": "Fixture Long 1/6",
-    "contentLength": 108,
-    "content": "This is a deliberately long fixture message that is intended to exercise the long-message rendering pipeline",
-    "contentExcerpt": "This is a deliberately long fixture message that is intended to exercise the long-message rendering pipeline"
-  }
+  "panelBody": "  substring is preserved even\n  when the total byte length\n  exceeds the SDK cap.\n  fixture-long-alpha-body-anchor\n  appears near the end so the\n  matcher has a unique string to\n  look for. End of long message.",
+  "panelFooter": "Older messages | 1 newer | Swipe scroll | Hold to record | Double click back",
+  "panelBox": null,
+  "popup": null,
+  "panelImage": null
 }

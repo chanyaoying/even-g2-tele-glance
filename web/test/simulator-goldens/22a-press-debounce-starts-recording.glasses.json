@@ -1,6 +1,6 @@
 {
   "kind": "sidebar",
-  "title": "Recording reply",
+  "title": "REC Recording reply",
   "sidebarTitle": "Chats",
   "focus": "panel",
   "fullWidth": true,
@@ -10,9 +10,12 @@
     "Fixture Forum",
     "Fixture Ops",
     "Fixture Research",
-    "Fixture Archive"
+    "Fixture Archive",
+    "Fixture Media"
   ],
-  "panelBody": "Fixture Alpha: Alpha message page contains\n  fixture-alpha-body for\n  startup testing.\n\nMe: Alpha outgoing marker for visual\n  validation.",
+  "panelBody": "Fixture Alpha: Alpha message page contains\n  fixture-alpha-body for\n  startup testing.\nMe: Alpha outgoing marker for visual\n  validation.",
   "panelFooter": "Release to stop | Double click cancel",
-  "panelBox": null
+  "panelBox": null,
+  "popup": null,
+  "panelImage": null
 }

@@ -13,7 +13,9 @@
     "Fixture Topic Five",
     "Fixture Topic Six"
   ],
-  "panelBody": "Topic Two: Fixture topic two message body\n  includes fixture-topic-two-body.\n\nReviewer: Topic two second message validates\n  rendering distinct content.",
+  "panelBody": "Topic Two: Fixture topic two message body\n  includes fixture-topic-two-body.\nReviewer: Topic two second message validates\n  rendering distinct content.",
   "panelFooter": "TAP TO OPEN TOPIC",
-  "panelBox": null
+  "panelBox": null,
+  "popup": null,
+  "panelImage": null
 }

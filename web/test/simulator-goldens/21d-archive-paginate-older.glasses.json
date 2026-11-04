@@ -10,14 +10,12 @@
     "Fixture Forum",
     "Fixture Ops",
     "Fixture Research",
-    "Fixture Archive"
+    "Fixture Archive",
+    "Fixture Media"
   ],
-  "panelBody": "",
-  "panelFooter": "Older messages | Swipe scroll | Hold to record | Double click back",
-  "panelBox": {
-    "heading": "Fixture Long 1/6",
-    "contentLength": 108,
-    "content": "This is a deliberately long fixture message that is intended to exercise the long-message rendering pipeline",
-    "contentExcerpt": "This is a deliberately long fixture message that is intended to exercise the long-message rendering pipeline"
-  }
+  "panelBody": "  path. It is well past the\n  fifty-word boundary so the\n  harness can confirm the text\n  container and panelBox\n  branches handle overflow\n  correctly. The harness must\n  verify that the visible",
+  "panelFooter": "Older messages | 2 newer | Swipe scroll | Hold to record | Double click back",
+  "panelBox": null,
+  "popup": null,
+  "panelImage": null
 }

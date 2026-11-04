@@ -8,13 +8,15 @@
   "sidebarItems": [
     "Fixture Topic Zero",
     "Fixture Topic One",
-    "Fixture Topic Two (1)",
-    "Fixture Topic Three (1)",
+    "(1) Fixture Topic Two",
+    "(1) Fixture Topic Three",
     "Fixture Topic Four",
     "Fixture Topic Five",
     "Fixture Topic Six"
   ],
-  "panelBody": "Topic One: Fixture topic one message body\n  includes fixture-topic-one-body.\n\nReviewer: Topic one second message validates\n  scrolling without reset.",
+  "panelBody": "Topic One: Fixture topic one message body\n  includes fixture-topic-one-body.\nReviewer: Topic one second message validates\n  scrolling without reset.",
   "panelFooter": "Swipe scroll | Hold to record | Double click back",
-  "panelBox": null
+  "panelBox": null,
+  "popup": null,
+  "panelImage": null
 }
