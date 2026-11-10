@@ -14,7 +14,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from app.config import Settings, get_settings
-from app.dependencies import discard_pending_telegram_service, get_telegram_service, get_transcription_service, validate_backend_auth
+from app.dependencies import (
+    SWEEP_INTERVAL_SECONDS,
+    close_all_telegram_services,
+    discard_pending_telegram_service,
+    forget_telegram_service,
+    get_telegram_service,
+    get_transcription_service,
+    sweep_telegram_services,
+    validate_backend_auth,
+)
 from app.models import (
     AuthStatus,
     ChatSummary,
@@ -90,7 +99,16 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         if app_settings.whisper_preload:
             # Warm the model in the background so the first recording after a restart is not slow.
             _app.state.preload_task = asyncio.create_task(get_transcription_service().preload())
-        yield
+        sweeper = asyncio.create_task(_sweep_services_forever())
+        try:
+            yield
+        finally:
+            sweeper.cancel()
+            try:
+                await sweeper
+            except asyncio.CancelledError:
+                pass
+            await close_all_telegram_services()
 
     api = FastAPI(title="TeleGlance Backend", lifespan=lifespan)
     debug_events: deque[dict] = deque(maxlen=100)
@@ -224,6 +242,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             return {"status": "ok"}
         except (TelegramServiceError, TimeoutError) as exc:
             raise_telegram_http_error(exc)
+        finally:
+            # A logged-out service must not be handed to the next request with the same header.
+            forget_telegram_service(telegram)
 
     @api.get("/api/chats", response_model=list[ChatSummary])
     async def list_chats(
@@ -415,6 +436,15 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
 
 app = create_app()
+
+
+async def _sweep_services_forever() -> None:
+    while True:
+        await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
+        try:
+            await sweep_telegram_services()
+        except Exception:
+            timing_logger.warning("Telegram service sweep failed", exc_info=True)
 
 
 def _login_finished(status: object) -> bool:
