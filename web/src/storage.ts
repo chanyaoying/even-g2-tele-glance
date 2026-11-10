@@ -28,6 +28,22 @@ const EVEN_APP_CONFIG_STORAGE_KEY = 'teleGlance.frontendConfig.v1'
 
 const COOKIE_MAX_AGE_SECONDS = 365 * 24 * 60 * 60
 
+/**
+ * Builds before this one defaulted to a shared testing backend and talked to it with a public test secret.
+ * That default is gone; a URL saved from it is dropped on load so the app asks for the user's own backend
+ * instead of keeping on sending Telegram credentials to a third-party host.
+ */
+const RETIRED_SHARED_BACKEND_ORIGIN = 'https://teleglance.akira-os.net'
+
+/*
+ * Where settings live (accepted risk, see AGENTS.md "Frontend-local Telegram sessions"):
+ * - The Telegram API ID/hash, session string and backend shared secret are stored in plain text in WebView
+ *   localStorage and in the Even app's local storage (EVEN_APP_CONFIG_STORAGE_KEY). Anyone with access to the
+ *   phone's app data, or script injected into this page, can read them. They are never written to cookies.
+ * - Only non-secret strings (backend URL, STT URL, language) are mirrored into cookies, as a fallback for
+ *   WebViews that lose localStorage; those cookies are SameSite=Strict, and Secure on an https origin.
+ */
+
 export type FrontendConfig = {
   apiBaseUrl: string
   telegramApiId: string
@@ -65,7 +81,7 @@ export const DEFAULT_FRONTEND_CONFIG: Omit<FrontendConfig, 'apiBaseUrl'> = {
 
 export function loadFrontendConfig(): FrontendConfig {
   return {
-    apiBaseUrl: defaultApiBaseUrl(),
+    apiBaseUrl: withoutRetiredBackend(defaultApiBaseUrl()),
     telegramApiId: readSensitiveString(TELEGRAM_API_ID_STORAGE_KEY, G2_TELE_TELEGRAM_API_ID_STORAGE_KEY),
     telegramApiHash: readSensitiveString(TELEGRAM_API_HASH_STORAGE_KEY, G2_TELE_TELEGRAM_API_HASH_STORAGE_KEY),
     telegramSession: readSensitiveString(TELEGRAM_SESSION_STORAGE_KEY, G2_TELE_TELEGRAM_SESSION_STORAGE_KEY),
@@ -207,13 +223,29 @@ function readCookie(key: string): string | null {
 function writeCookie(key: string, value: string) {
   try {
     const encodedKey = encodeURIComponent(key)
+    const attributes = `path=/;SameSite=Strict${cookieSecureAttribute()}`
     if (value) {
       const encodedValue = encodeURIComponent(value)
-      document.cookie = `${encodedKey}=${encodedValue};max-age=${COOKIE_MAX_AGE_SECONDS};path=/;SameSite=Lax`
+      document.cookie = `${encodedKey}=${encodedValue};max-age=${COOKIE_MAX_AGE_SECONDS};${attributes}`
     } else {
-      document.cookie = `${encodedKey}=;max-age=0;path=/;SameSite=Lax`
+      document.cookie = `${encodedKey}=;max-age=0;${attributes}`
     }
   } catch { /* cookies unavailable */ }
+}
+
+function cookieSecureAttribute() {
+  try {
+    return window.location.protocol === 'https:' ? ';Secure' : ''
+  } catch {
+    return ''
+  }
+}
+
+function withoutRetiredBackend(url: string) {
+  try {
+    if (url && new URL(url.trim()).origin === RETIRED_SHARED_BACKEND_ORIGIN) return ''
+  } catch { /* not a URL: keep it, Settings shows it for fixing */ }
+  return url
 }
 
 function removeCookie(key: string) {
@@ -275,7 +307,7 @@ function readRaw(key: string, legacyKeys: string[]) {
 }
 function normalizeConfig(config: FrontendConfig): FrontendConfig {
   return {
-    apiBaseUrl: stringValue(config.apiBaseUrl),
+    apiBaseUrl: withoutRetiredBackend(stringValue(config.apiBaseUrl)),
     telegramApiId: stringValue(config.telegramApiId),
     telegramApiHash: stringValue(config.telegramApiHash),
     telegramSession: stringValue(config.telegramSession),

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { isSharedBackendUrl, SHARED_BACKEND_URL } from '../api'
+import { BACKEND_AUTH_REJECTED_MESSAGE, BACKEND_URL_PLACEHOLDER, OFFLINE_STATUS } from '../api'
+import { UPDATING_STATUS } from '../controller/model'
 import { getLocale, LANGUAGE_NAMES } from '../locales/index'
 import { useApp } from '../contexts/AppContext'
 import type { FrontendConfig } from '../storage'
@@ -7,7 +8,12 @@ import type { FrontendConfig } from '../storage'
 export function SettingsScreen({ buildVersion }: { buildVersion: string }) {
   const { state, settings, saveSettings, resetSettings, logoutTelegram, clearCache, testConnection } = useApp()
   const [draft, setDraft] = useState<FrontendConfig>(settings)
-  const [saved, setSaved] = useState(false)
+  /** The user changed a field since the last save; settings restored in the background must not overwrite it. */
+  const [dirty, setDirty] = useState(false)
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'failed'>('idle')
+  const [saveError, setSaveError] = useState<string | null>(null)
+  /** Reset and Disconnect ask for a second tap (window.confirm is not reliable in the Even app WebView). */
+  const [confirming, setConfirming] = useState<'reset' | 'logout' | null>(null)
   const [cacheCleared, setCacheCleared] = useState(false)
   const [isLoggingOut, setIsLoggingOut] = useState(false)
   const [testing, setTesting] = useState(false)
@@ -15,20 +21,46 @@ export function SettingsScreen({ buildVersion }: { buildVersion: string }) {
   const [logoutError, setLogoutError] = useState<string | null>(null)
 
   useEffect(() => {
-    setDraft(settings)
-  }, [settings])
+    if (!dirty) setDraft(settings)
+  }, [settings, dirty])
 
   function update<K extends keyof FrontendConfig>(key: K, value: FrontendConfig[K]) {
     setDraft((current) => ({ ...current, [key]: value }))
-    setSaved(false)
+    setDirty(true)
+    setSaveState('idle')
+    setConfirming(null)
+  }
+
+  async function handleSave() {
+    setSaveState('saving')
+    setSaveError(null)
+    try {
+      await saveSettings(draft)
+      setDirty(false)
+      setSaveState('saved')
+    } catch (error) {
+      setSaveState('failed')
+      setSaveError(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  function handleReset() {
+    if (confirming !== 'reset') {
+      setConfirming('reset')
+      return
+    }
+    setConfirming(null)
+    void resetSettings()
   }
 
   const l = getLocale()
   const hasTelegramCredentials = Boolean(draft.telegramApiId.trim() && draft.telegramApiHash.trim())
   const hasBackendSecret = Boolean(draft.backendSharedSecret.trim())
-  const isSharedBackend = isSharedBackendUrl(draft.apiBaseUrl)
   const hasTelegramSession = Boolean(draft.telegramSession.trim())
-  const isConnected = state.screen !== 'auth' && state.screen !== 'loading' && state.screen !== 'error'
+  // Asleep or a stored list that is still updating / offline / rejected says nothing about the backend link.
+  const status = 'status' in state ? state.status : undefined
+  const isConnected = state.screen !== 'auth' && state.screen !== 'loading' && state.screen !== 'error' && state.screen !== 'asleep'
+    && status !== OFFLINE_STATUS && status !== BACKEND_AUTH_REJECTED_MESSAGE && status !== UPDATING_STATUS
 
   async function handleTestConnection() {
     setTesting(true)
@@ -52,6 +84,11 @@ export function SettingsScreen({ buildVersion }: { buildVersion: string }) {
   }
 
   async function handleLogout() {
+    if (confirming !== 'logout') {
+      setConfirming('logout')
+      return
+    }
+    setConfirming(null)
     setIsLoggingOut(true)
     setLogoutError(null)
     try {
@@ -85,16 +122,16 @@ export function SettingsScreen({ buildVersion }: { buildVersion: string }) {
           </ol>
           <label>
             <span>{l.settingsTelegramApiId}</span>
-            <input inputMode="numeric" value={draft.telegramApiId} onChange={(event) => update('telegramApiId', event.target.value)} placeholder="123456" />
+            <input inputMode="numeric" autoComplete="off" value={draft.telegramApiId} onChange={(event) => update('telegramApiId', event.target.value)} placeholder="123456" />
           </label>
           <label>
             <span>{l.settingsTelegramApiHash}</span>
-            <input value={draft.telegramApiHash} onChange={(event) => update('telegramApiHash', event.target.value)} placeholder="0123456789abcdef0123456789abcdef" />
+            <input type="password" autoComplete="off" autoCapitalize="off" autoCorrect="off" spellCheck={false} value={draft.telegramApiHash} onChange={(event) => update('telegramApiHash', event.target.value)} placeholder="0123456789abcdef0123456789abcdef" />
           </label>
         </details>
-        {logoutError && <p className="field-error">{logoutError}</p>}
+        {logoutError && <p className="field-error" role="alert">{logoutError}</p>}
         <button type="button" className="secondary" disabled={isLoggingOut || (!hasTelegramSession && !isConnected)} onClick={() => void handleLogout()}>
-          {isLoggingOut ? l.settingsDisconnecting : l.settingsDisconnectTelegram}
+          {isLoggingOut ? l.settingsDisconnecting : confirming === 'logout' ? l.settingsConfirmDisconnect : l.settingsDisconnectTelegram}
         </button>
       </section>
 
@@ -120,11 +157,11 @@ scripts/start-backend.sh --reload`}</code></pre>
         </details>
         <label>
           <span>{l.settingsBackendUrl}</span>
-          <input value={draft.apiBaseUrl} onChange={(event) => update('apiBaseUrl', event.target.value)} placeholder={SHARED_BACKEND_URL} />
+          <input value={draft.apiBaseUrl} onChange={(event) => update('apiBaseUrl', event.target.value)} placeholder={BACKEND_URL_PLACEHOLDER} />
         </label>
         <label>
           <span>{l.settingsBackendSecret}</span>
-          <input type="password" value={draft.backendSharedSecret} onChange={(event) => update('backendSharedSecret', event.target.value)} placeholder={isSharedBackend ? l.settingsSharedBackendSecretPlaceholder : l.settingsBackendSecretPlaceholder} />
+          <input type="password" autoComplete="off" autoCapitalize="off" autoCorrect="off" spellCheck={false} value={draft.backendSharedSecret} onChange={(event) => update('backendSharedSecret', event.target.value)} placeholder={l.settingsBackendSecretPlaceholder} />
         </label>
         <button type="button" className="secondary" disabled={testing} onClick={() => void handleTestConnection()}>
           {testing ? l.settingsTesting : l.settingsTestConnection}
@@ -134,13 +171,7 @@ scripts/start-backend.sh --reload`}</code></pre>
             {testLines.map((line) => <li key={line}>{line}</li>)}
           </ul>
         )}
-        {isSharedBackend ? (
-          <p className="testing-banner">
-            <span className="asterisk">*</span> {l.settingsSharedBackendWarning}
-          </p>
-        ) : (
-          <p className="hint">{l.settingsBackendSecretHint}</p>
-        )}
+        <p className="hint">{l.settingsBackendSecretHint}</p>
       </section>
 
       <section className="phone-panel settings-group">
@@ -199,19 +230,17 @@ scripts/start-backend.sh --reload`}</code></pre>
         </dl>
       </section>
 
+      {saveState === 'failed' && <p className="field-error" role="alert">{l.settingsSaveFailed}{saveError ? ` (${saveError})` : ''}</p>}
       <div className="settings-actions">
-        <button type="button" onClick={() => {
-          void saveSettings(draft)
-          setSaved(true)
-        }}>
-          {saved ? l.settingsSaved : l.settingsSave}
+        <button type="button" disabled={saveState === 'saving'} onClick={() => void handleSave()}>
+          {saveState === 'saving' ? l.settingsSaving : saveState === 'saved' ? l.settingsSaved : l.settingsSave}
         </button>
         <button type="button" className="secondary" onClick={() => {
           void clearCache().then(() => setCacheCleared(true))
         }}>
           {cacheCleared ? l.settingsCacheCleared : l.settingsClearCache}
         </button>
-        <button type="button" className="secondary" onClick={resetSettings}>{l.settingsReset}</button>
+        <button type="button" className="secondary" onClick={handleReset}>{confirming === 'reset' ? l.settingsConfirmReset : l.settingsReset}</button>
       </div>
     </main>
   )

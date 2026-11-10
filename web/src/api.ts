@@ -16,7 +16,7 @@ import type {
   TranscriptionResult,
 } from './types'
 import { debugLog, errorText } from './debugLog'
-import { decryptJsonPayload, encryptedTelegramAuthHeader, encryptJsonPayload } from './secureAuth'
+import { decryptJsonPayload, encryptedTelegramAuthHeader, encryptJsonPayload, PROTOCOL_HEADER, PROTOCOL_VERSION } from './secureAuth'
 
 export type ListChatsOptions = { offset?: number; folderId?: Id }
 
@@ -33,7 +33,11 @@ export interface TelegramApi {
   sendMessage(chatId: Id, request: SendMessageRequest): Promise<Message>
   markRead(chatId: Id, request: MarkReadRequest): Promise<void>
   transcribe(wav: Blob, language?: string): Promise<TranscriptionResult>
-  subscribeUpdates(onUpdate: (update: TelegramUpdate | TelegramTypingUpdate) => void, onError?: (error: Event | Error) => void, onReconnect?: () => void): () => void
+  /**
+   * Keep the live update stream open. `onError` fires on every drop (the stream then retries, unless the error
+   * cannot fix itself, such as a 401), `onReconnect` when it comes back after a drop, `onOpen` on every connect.
+   */
+  subscribeUpdates(onUpdate: (update: TelegramUpdate | TelegramTypingUpdate) => void, onError?: (error: Event | Error) => void, onReconnect?: () => void, onOpen?: () => void): () => void
   testConnection(): Promise<ConnectionTestResult>
 }
 
@@ -50,26 +54,18 @@ export type TelegramAuthConfig = {
   sttBaseUrl?: string
 }
 
-export const SHARED_BACKEND_URL = 'https://teleglance.akira-os.net'
-export const SHARED_BACKEND_TEST_SECRET = 'test-secret-token'
 export const BACKEND_URL_PLACEHOLDER = 'http://<BACKEND_URL>:8787'
 
+/**
+ * The Backend URL saved on this phone, or '' when none is: there is no built-in default backend, so an empty
+ * value leads to the "needs setup" flow instead of sending Telegram credentials anywhere.
+ */
 export function defaultApiBaseUrl() {
-  return localApiBaseUrl() ?? SHARED_BACKEND_URL
+  return localApiBaseUrl() ?? ''
 }
 
-export function isSharedBackendUrl(baseUrl: string | undefined) {
-  // Compare parsed origins: a prefix match would also accept look-alikes such as
-  // https://teleglance.akira-os.net.evil.example or https://teleglance.akira-os.net@evil.example.
-  try {
-    return new URL((baseUrl ?? '').trim()).origin === SHARED_BACKEND_URL
-  } catch {
-    return false
-  }
-}
-
-export function effectiveBackendSharedSecret(config: TelegramAuthConfig, baseUrl: string | undefined) {
-  if (isSharedBackendUrl(baseUrl)) return SHARED_BACKEND_TEST_SECRET
+/** The backend shared secret from Settings (`_baseUrl` is unused and only kept for older callers). */
+export function effectiveBackendSharedSecret(config: TelegramAuthConfig, _baseUrl?: string) {
   return config.backendSharedSecret?.trim() ?? ''
 }
 
@@ -83,7 +79,15 @@ const BACKOFF_MAX_MS = 30_000
 export const BACKEND_UNREACHABLE_MESSAGE = 'No connection'
 export const BACKEND_TIMEOUT_MESSAGE = 'Server slow'
 export const TELEGRAM_BUSY_MESSAGE = 'Telegram busy'
+/** Status on the stored chat list while the backend cannot be reached at startup (the app keeps retrying). */
+export const OFFLINE_STATUS = 'Offline'
 const BACKEND_UNREACHABLE_DETAIL = 'Backend is not reachable. Fill Backend URL in Settings and make sure the backend server is running.'
+export const BACKEND_NOT_CONFIGURED_MESSAGE = 'Backend URL is required. Set it in TeleGlance Settings.'
+/** 401: the Telegram session is gone (logged out elsewhere, revoked). Short text for the glasses. */
+export const SESSION_EXPIRED_MESSAGE = 'Signed out'
+/** 401/403: the backend could not read the encrypted auth header (shared secret mismatch or phone clock off). */
+export const BACKEND_AUTH_REJECTED_MESSAGE = 'Backend rejected auth'
+const BACKEND_AUTH_REJECTED_DETAIL = 'The backend could not verify this phone. Check that Backend shared secret in Settings is exactly TELEGLANCE_SHARED_SECRET on the server, and that the phone clock is set automatically.'
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000
 const SEND_REQUEST_TIMEOUT_MS = 20_000
 const TRANSCRIBE_REQUEST_TIMEOUT_MS = 60_000
@@ -91,16 +95,41 @@ const TRANSCRIBE_REQUEST_TIMEOUT_MS = 60_000
 /** Short message (fits the glasses) in `message`; the full technical text for the phone UI is in `detail`. */
 const SLOW_REQUEST_MS = 3000
 
+/** `sessionExpired`: sign in to Telegram again. `backendAuth`: the backend rejected the shared-secret auth. */
+export type ApiErrorKind = 'sessionExpired' | 'backendAuth'
+
 export class ApiError extends Error {
   constructor(
     message: string,
     readonly detail: string = message,
     readonly status?: number,
     readonly retryAfterSeconds?: number,
+    readonly kind?: ApiErrorKind,
   ) {
     super(message)
     this.name = 'ApiError'
   }
+}
+
+export function isSessionExpiredError(error: unknown): error is ApiError {
+  return error instanceof ApiError && error.kind === 'sessionExpired'
+}
+
+export function isBackendAuthError(error: unknown): error is ApiError {
+  return error instanceof ApiError && error.kind === 'backendAuth'
+}
+
+/**
+ * The backend answers 401 both for an expired Telegram session and for an auth header it cannot decrypt or
+ * whose timestamp is outside the window. Only the detail text tells them apart; the auth-header texts all
+ * mention the encryption ("Encrypted auth could not be decrypted", "... timestamp expired", "... nonce ...").
+ */
+function unauthorizedError(status: number, detail: string): ApiError {
+  const authHeaderProblem = status === 403
+    || /encrypt|nonce|shared secret|auth header|timestamp/i.test(detail)
+  return authHeaderProblem
+    ? new ApiError(BACKEND_AUTH_REJECTED_MESSAGE, `${BACKEND_AUTH_REJECTED_DETAIL} (${detail})`, status, undefined, 'backendAuth')
+    : new ApiError(SESSION_EXPIRED_MESSAGE, detail, status, undefined, 'sessionExpired')
 }
 
 export function requestTimeoutMs(path: string, method = 'GET') {
@@ -224,10 +253,10 @@ export class HttpTelegramApi implements TelegramApi {
     const sttBaseUrl = this.sttBaseUrl()
     return this.request('/api/transcribe', { method: 'POST', body: form }, sttBaseUrl, sttBaseUrl === this.baseUrl)
   }
-  subscribeUpdates(onUpdate: (update: TelegramUpdate | TelegramTypingUpdate) => void, onError?: (error: Event | Error) => void, onReconnect?: () => void) {
+  subscribeUpdates(onUpdate: (update: TelegramUpdate | TelegramTypingUpdate) => void, onError?: (error: Event | Error) => void, onReconnect?: () => void, onOpen?: () => void) {
     if (typeof fetch === 'undefined' || typeof AbortController === 'undefined') return () => undefined
     const controller = new AbortController()
-    void this.keepStreamAlive(controller.signal, onUpdate, onError, onReconnect)
+    void this.keepStreamAlive(controller.signal, onUpdate, onError, onReconnect, onOpen)
     return () => controller.abort()
   }
 
@@ -237,6 +266,7 @@ export class HttpTelegramApi implements TelegramApi {
     onUpdate: (update: TelegramUpdate | TelegramTypingUpdate) => void,
     onError?: (error: Event | Error) => void,
     onReconnect?: () => void,
+    onOpen?: () => void,
   ) {
     let failures = 0
     let connections = 0
@@ -247,6 +277,7 @@ export class HttpTelegramApi implements TelegramApi {
           connections += 1
           // A reconnect may have missed events while it was down, so let the caller catch up.
           if (connections > 1) onReconnect?.()
+          onOpen?.()
           debugLog('stream.open', { connections })
         })
       } catch (error) {
@@ -328,6 +359,8 @@ export class HttpTelegramApi implements TelegramApi {
   }
 
   private async requestInner<T>(path: string, init: RequestInit, baseUrl = this.baseUrl, includeTelegramAuth = true): Promise<T> {
+    // Without a Backend URL the request would go to the app's own origin; never send credentials there.
+    if (!baseUrl?.trim()) throw new Error(BACKEND_NOT_CONFIGURED_MESSAGE)
     const ownBackend = baseUrl === this.baseUrl
     if (ownBackend) this.assertBackendNotBackedOff(path)
     const headers = await this.withTelegramHeaders(init.headers, includeTelegramAuth)
@@ -362,6 +395,7 @@ export class HttpTelegramApi implements TelegramApi {
     onUpdate: (update: TelegramUpdate | TelegramTypingUpdate) => void,
     onOpen?: () => void,
   ) {
+    if (!this.baseUrl?.trim()) throw new Error(BACKEND_NOT_CONFIGURED_MESSAGE)
     const headers = await this.withTelegramHeaders(undefined, true)
     // The server sends a keepalive every few seconds; silence means the connection died without telling us.
     const inner = new AbortController()
@@ -425,7 +459,10 @@ export class HttpTelegramApi implements TelegramApi {
           onUpdate(update)
         } else if (eventName === 'error') {
           const payload = JSON.parse(decodedData) as { detail?: string }
-          throw new Error(payload.detail || 'Update stream failed')
+          const detail = payload.detail || 'Update stream failed'
+          // The stream reports a dead Telegram session as an error event, not as an HTTP 401.
+          if (/session has expired/i.test(detail)) throw unauthorizedError(401, detail)
+          throw new Error(detail)
         }
       }
     }
@@ -433,6 +470,8 @@ export class HttpTelegramApi implements TelegramApi {
 
   private async withTelegramHeaders(headers: HeadersInit | undefined, includeTelegramAuth: boolean) {
     const merged = new Headers(headers)
+    // Tells the backend this client uses the per-purpose AADs (see secureAuth.ts).
+    merged.set(PROTOCOL_HEADER, PROTOCOL_VERSION)
     if (!includeTelegramAuth) return merged
     const sharedSecret = this.getEffectiveSharedSecret()
     if (!sharedSecret) {
@@ -482,7 +521,8 @@ export class HttpTelegramApi implements TelegramApi {
   async testConnection(): Promise<ConnectionTestResult> {
     const result: ConnectionTestResult = { health: { ok: false }, session: null }
     try {
-      const response = await fetch(`${this.baseUrl}/health`)
+      if (!this.baseUrl?.trim()) throw new Error(BACKEND_NOT_CONFIGURED_MESSAGE)
+      const response = await fetch(`${this.baseUrl}/health`, { headers: { [PROTOCOL_HEADER]: PROTOCOL_VERSION } })
       result.health = response.ok ? { ok: true } : { ok: false, error: `HTTP ${response.status}` }
     } catch (error) {
       result.health = { ok: false, error: error instanceof Error ? error.message : String(error) }
@@ -516,6 +556,7 @@ function httpError(response: Response, text: string): ApiError {
       ? new ApiError(floodWaitMessage(seconds), detail, 429, seconds)
       : new ApiError(TELEGRAM_BUSY_MESSAGE, detail, 429)
   }
+  if (response.status === 401 || response.status === 403) return unauthorizedError(response.status, detail)
   if (response.status === 502 || response.status === 503) return new ApiError(BACKEND_BUSY_MESSAGE, detail, response.status)
   if (response.status === 504) return new ApiError(BACKEND_TIMEOUT_MESSAGE, detail, 504)
   return new ApiError(detail, detail, response.status)
@@ -547,10 +588,16 @@ const STREAM_RETRY_MAX_MS = 30_000
 /** A stream that lived this long counts as healthy, which resets the retry backoff. */
 const STREAM_HEALTHY_MS = 30_000
 
-/** Missing settings never fix themselves by retrying; everything else (network, restart, 5xx) does. */
-function isUnrecoverableStreamError(error: unknown): boolean {
+/**
+ * Missing settings and rejected auth (401/403: expired session, wrong shared secret) never fix themselves by
+ * retrying; everything else (network, restart, 5xx) does. The caller resubscribes after signing in again.
+ */
+export function isUnrecoverableStreamError(error: unknown): boolean {
+  if (error instanceof ApiError && (error.status === 401 || error.status === 403)) return true
   const message = error instanceof Error ? error.message : ''
-  return message.includes('shared secret is required') || message.includes('Encrypted auth requires')
+  return message.includes('shared secret is required')
+    || message.includes('Encrypted auth requires')
+    || message === BACKEND_NOT_CONFIGURED_MESSAGE
 }
 
 function sleepUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {

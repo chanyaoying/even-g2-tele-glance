@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   clearFrontendConfigFromAppStorage,
+  loadFrontendConfig,
   loadFrontendConfigFromAppStorage,
   saveFrontendConfig,
   saveFrontendConfigToAppStorage,
@@ -66,6 +67,37 @@ describe('frontend settings storage', () => {
       telegramSession: 'string-session-secret',
       backendSharedSecret: 'backend-secret',
     })
+  })
+
+  it('writes the non-secret cookies SameSite=Strict, and Secure on an https origin', () => {
+    for (const [protocol, secure] of [['https:', true], ['http:', false]] as const) {
+      const cookieWrites: string[] = []
+      vi.stubGlobal('window', { localStorage: memoryStorage(), location: { protocol } })
+      vi.stubGlobal('document', {
+        get cookie() { return '' },
+        set cookie(value: string) { cookieWrites.push(value) },
+      })
+      saveFrontendConfig(testConfig())
+      const apiCookie = cookieWrites.find((cookie) => cookie.startsWith('teleGlance.apiBaseUrl='))
+      expect(apiCookie).toContain('SameSite=Strict')
+      expect(apiCookie?.includes(';Secure')).toBe(secure)
+    }
+  })
+
+  it('has no default backend and drops a URL saved from the retired shared testing backend', async () => {
+    const localStorage = memoryStorage()
+    vi.stubGlobal('window', { localStorage })
+    vi.stubGlobal('document', { cookie: '' })
+    expect(loadFrontendConfig().apiBaseUrl).toBe('')
+
+    localStorage.setItem('teleGlance.apiBaseUrl', 'https://teleglance.akira-os.net')
+    expect(loadFrontendConfig().apiBaseUrl).toBe('')
+    const storage = appStorage()
+    await saveFrontendConfigToAppStorage(storage, testConfig({ apiBaseUrl: 'https://teleglance.akira-os.net/' }))
+    expect((await loadFrontendConfigFromAppStorage(storage, testConfig())).apiBaseUrl).toBe('')
+
+    localStorage.setItem('teleGlance.apiBaseUrl', 'http://100.64.0.9:8787')
+    expect(loadFrontendConfig().apiBaseUrl).toBe('http://100.64.0.9:8787')
   })
 
   it('clears the Even app storage config on reset', async () => {

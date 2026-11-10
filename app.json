@@ -15,8 +15,7 @@
         "http://127.0.0.1:8787",
         "http://<BACKEND_URL>:8787",
         "https://my.telegram.org",
-        "https://react.dev/errors/",
-        "https://teleglance.akira-os.net"
+        "https://react.dev/errors/"
       ]
     },
     {

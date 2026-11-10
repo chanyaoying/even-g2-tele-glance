@@ -4,7 +4,6 @@ const FIXED_WHITELIST_ENTRIES = new Set([
   'http://localhost:8787',
   'http://127.0.0.1:8787',
   BACKEND_URL_PLACEHOLDER,
-  'https://teleglance.akira-os.net',
   'https://my.telegram.org',
   'https://react.dev/errors/',
 ])

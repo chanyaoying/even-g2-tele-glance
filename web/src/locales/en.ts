@@ -203,6 +203,20 @@ const en = {
 
   // ── Bridge ──
   bridgeEmptyList: 'Empty',
+
+  // audit-fe-a keys
+  setupRequired: 'Backend URL, Backend shared secret, Telegram API ID and Telegram API hash are required. Fill them in Settings using the setup instructions first.',
+  setupBackendUrlMissing: 'No backend is set. TeleGlance needs your own backend server: enter its URL and shared secret in Settings.',
+  errorBackendAuthRejected: 'The backend rejected this phone\'s auth. Check that Backend shared secret is exactly TELEGLANCE_SHARED_SECRET on the server and that the phone clock is set automatically. Your Telegram login is kept.',
+  authSessionExpired: 'Your Telegram session ended (signed out elsewhere or revoked). Enter your phone number in the phone UI to sign in again.',
+  phoneSendSkipped: 'A reply is already being sent. Wait for it to finish, then try again.',
+  phoneMessagesAria: 'Messages',
+  settingsSaving: 'Saving...',
+  settingsSaveFailed: 'Could not save settings',
+  settingsConfirmReset: 'Tap again to reset all settings',
+  settingsConfirmDisconnect: 'Tap again to disconnect Telegram',
+  statusOffline: 'Offline',
+  statusAuthRejected: 'Backend rejected auth',
 } as const
 
 export default en
