@@ -1,6 +1,6 @@
 import { validateEvenHubPageContainerZOrder } from '@evenrealities/even_hub_sdk'
 import { describe, expect, it, vi } from 'vitest'
-import { EvenHubGlassesBridge } from '../src/bridge/evenBridge'
+import { EvenHubGlassesBridge, sanitizeDebugNoteData, summarizeForDebug, summarizeInputForDebug } from '../src/bridge/evenBridge'
 import type { ScreenModel } from '../src/controller/model'
 
 function flushAsync(ms = 0) {
@@ -842,5 +842,186 @@ describe('EvenHubGlassesBridge photos', () => {
       await flushAsync(30)
       expect(pages.length).toBe(4) // startup + three sidebar attempts
     })
+  })
+})
+
+describe('EvenHubGlassesBridge audit fixes', () => {
+  const sidebar: Extract<ScreenModel, { kind: 'sidebar' }> = {
+    kind: 'sidebar',
+    title: 'Chats',
+    focus: 'panel',
+    fullWidth: true,
+    sidebarTitle: 'Chats',
+    sidebarItems: ['Alice', 'Bob'],
+    sidebarSelected: 0,
+    panelTitle: '',
+    panelBody: '> Alice\n  Bob',
+    panelFooter: 'Swipe chats | Press open',
+  }
+
+  function makeSdk(extra: Record<string, unknown> = {}) {
+    const upgrades: Array<{ containerID: number; content: string }> = []
+    const rebuilds: unknown[] = []
+    const sdk = {
+      async createStartUpPageContainer() { return 0 },
+      rebuildPageContainer: vi.fn(async (container: unknown) => { rebuilds.push(container); return true }),
+      async textContainerUpgrade(update: unknown) {
+        upgrades.push(update as { containerID: number; content: string })
+        return true
+      },
+      async audioControl() { return undefined },
+      onEvenHubEvent() { return undefined },
+      ...extra,
+    }
+    const bridge = new EvenHubGlassesBridge(sdk as never)
+    skipTextBootstrap(bridge)
+    return { bridge, sdk, upgrades, rebuilds }
+  }
+
+  it('applies a list scroll that arrives while a full page is being prepared, once the page is sent', async () => {
+    const { bridge, upgrades, rebuilds } = makeSdk()
+    await bridge.render(sidebar) // startup page
+    await flushAsync(1)
+    let releaseAudio: () => void = () => undefined
+    ;(bridge as unknown as { audioChain: Promise<void> }).audioChain = new Promise<void>((resolve) => { releaseAudio = resolve })
+
+    const rendering = bridge.render({ ...sidebar, title: 'Folder' })
+    await flushAsync(1)
+    // The scroll lands while the rebuild is still waiting to be sent: it used to be dropped.
+    await bridge.renderSidebarPanel({ ...sidebar, title: 'Folder', sidebarSelected: 1, panelBody: '  Alice\n> Bob' })
+    expect(upgrades).toHaveLength(0)
+    expect(bridge.getPartialRenderStats().staleDropped).toBe(0)
+
+    releaseAudio()
+    await rendering
+    expect(rebuilds).toHaveLength(1)
+    await flushAsync(200)
+    const body = upgrades.filter((update) => update.containerID === 6).at(-1)
+    expect(body?.content).toContain('> Bob')
+    // Diffed against nothing, because the page just sent is not yet the bridge's diff base.
+    expect(upgrades.map((update) => update.containerID)).toContain(1)
+  })
+
+  it('still drops a partial update while a non-sidebar page is being prepared', async () => {
+    const { bridge, upgrades } = makeSdk()
+    await bridge.render(sidebar)
+    await flushAsync(1)
+    let releaseAudio: () => void = () => undefined
+    ;(bridge as unknown as { audioChain: Promise<void> }).audioChain = new Promise<void>((resolve) => { releaseAudio = resolve })
+    const rendering = bridge.render({ kind: 'text', title: 'Error', body: 'boom' })
+    await flushAsync(1)
+    await bridge.renderSidebarPanel({ ...sidebar, sidebarSelected: 1 })
+    releaseAudio()
+    await rendering
+    await flushAsync(200)
+    expect(upgrades).toHaveLength(0)
+    expect(bridge.getPartialRenderStats().staleDropped).toBe(1)
+  })
+
+  it('cools down after a picture transfer timed out before the next page or picture', async () => {
+    vi.useFakeTimers()
+    try {
+      const sent: number[] = []
+      const { bridge, sdk } = makeSdk({
+        updateImageRawData: vi.fn((data: { imageData: Uint8Array }) => {
+          sent.push(data.imageData[0])
+          return data.imageData[0] === 1 ? new Promise(() => undefined) : Promise.resolve('success')
+        }),
+      })
+      ;(bridge as unknown as { hasRendered: boolean }).hasRendered = true
+
+      const first = bridge.updateImage(new Uint8Array([1]))
+      await vi.advanceTimersByTimeAsync(8000)
+      expect(await first).toBe(false) // a timeout is not a success
+
+      const second = bridge.updateImage(new Uint8Array([2]))
+      void bridge.render(sidebar)
+      await vi.advanceTimersByTimeAsync(1500)
+      expect(sent).toEqual([1]) // still cooling down
+      expect(sdk.rebuildPageContainer).not.toHaveBeenCalled()
+
+      await vi.advanceTimersByTimeAsync(600)
+      expect(sdk.rebuildPageContainer).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(3500)
+      expect(await second).toBe(true)
+      expect(sent).toEqual([1, 2])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  function slowRefusingBridge() {
+    return makeSdk({
+      rebuildPageContainer: vi.fn(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1600))
+        return false // a slow "refusal" (host timeout): the bridge schedules a same-layout retry
+      }),
+    }).bridge
+  }
+
+  it('cancels the timed-out rebuild retry on dispose', async () => {
+    vi.useFakeTimers()
+    try {
+      const bridge = slowRefusingBridge()
+      await bridge.render(sidebar) // startup page
+      await vi.advanceTimersByTimeAsync(1)
+      void bridge.render(sidebar)
+      await vi.advanceTimersByTimeAsync(1601) // refused after 1.6 s: retry scheduled
+      expect(vi.getTimerCount()).toBe(1)
+      bridge.dispose()
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('cancels the waiting-page flush timer on dispose', async () => {
+    vi.useFakeTimers()
+    try {
+      const bridge = slowRefusingBridge()
+      await bridge.render(sidebar) // startup page
+      await vi.advanceTimersByTimeAsync(1)
+      void bridge.render(sidebar)
+      await vi.advanceTimersByTimeAsync(10)
+      void bridge.render({ ...sidebar, title: 'Queued' }) // waits behind the rebuild in flight
+      expect(vi.getTimerCount()).toBe(2) // the host's answer + the bridge's give-up timer
+      bridge.dispose()
+      expect(vi.getTimerCount()).toBe(1) // only the (simulated) host is still busy
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('debug event privacy', () => {
+  it('keeps only whitelisted event fields and never chat or topic names', () => {
+    const summary = summarizeForDebug({
+      listEvent: { containerID: 8, currentSelectItemIndex: 2, currentSelectItemName: 'Secret Family Chat', eventType: 0 },
+      jsonData: { Event_Type: 'CLICK', CurrentSelect_ItemName: 'Secret Family Chat', text: 'hello there', eventSource: 1 },
+      audioEvent: { audioPcm: new Uint8Array([1, 2, 3, 4]) },
+    })
+    const json = JSON.stringify(summary)
+    expect(json).not.toContain('Secret Family Chat')
+    expect(json).not.toContain('hello there')
+    expect(json).not.toContain('[1,2,3')
+    expect(summary).toMatchObject({
+      listEvent: { containerID: 8, currentSelectItemIndex: 2, eventType: 0, omitted: ['currentSelectItemName'] },
+      jsonData: { Event_Type: 'CLICK', eventSource: 1 },
+      audioEvent: { audioPcm: { type: 'Uint8Array', byteLength: 4 } },
+    })
+  })
+
+  it('reports a mapped gesture without its item name', () => {
+    expect(summarizeInputForDebug({ type: 'press', index: 1, itemName: 'Secret', eventSource: 1 })).toEqual({
+      type: 'press', index: 1, eventSource: 1, hasItemName: true,
+    })
+    expect(summarizeInputForDebug({ type: 'audioChunk', pcm: new Uint8Array(10) })).toEqual({ type: 'audioChunk', byteLength: 10 })
+    expect(summarizeInputForDebug(undefined)).toBeNull()
+  })
+
+  it('drops debug note fields that look like user content', () => {
+    expect(sanitizeDebugNoteData({
+      durationMs: 12, ok: true, error: 'timeout', chatTitle: 'Secret', itemName: 'Secret', transcriptText: 'hi', nested: { a: 1 },
+    })).toEqual({ durationMs: 12, ok: true, error: 'timeout' })
   })
 })
