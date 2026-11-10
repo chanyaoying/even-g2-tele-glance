@@ -90,34 +90,51 @@ export function createInputCoalescer(
   }
 }
 
+/** Gestures that change what is on screen by acting, not by moving: a burst may never swallow one of these. */
+const ACTION_INPUTS = new Set<AppInput['type']>(['press', 'doublePress', 'longPress', 'longPressRelease'])
+/** Longest backlog kept after an SDK/native stall; older entries are dropped rather than replayed. */
+const MAX_PENDING_INPUTS = 4
+
 /**
  * Bound hardware input bursts released together after an SDK/native stall. At most one
- * gesture is dispatched per short window, and the latest gesture replaces earlier pending
- * input instead of replaying a backlog across later screens. Audio chunks bypass this gate
+ * gesture is dispatched per short window. Movement (swipes, list selection, foreground) is
+ * latest-wins: a newer one replaces the movement still waiting, so a swipe burst does not
+ * replay a backlog across later screens. Actions (press, double press, long press and its
+ * release) are never replaced, and a movement waiting before an action is dispatched before
+ * it, so "swipe then press" opens the item the user swiped to. Audio chunks bypass this gate
  * because dropping PCM would corrupt recordings.
  */
 export function createBoundedInputDispatcher(
   onInput: (input: AppInput) => void | Promise<void>,
   dispatchWindowMs = 20,
 ) {
-  let pending: AppInput | undefined
+  const pending: AppInput[] = []
   let timer: ReturnType<typeof setTimeout> | undefined
+
+  function schedule() {
+    timer = setTimeout(() => {
+      timer = undefined
+      const next = pending.shift()
+      if (next) void onInput(next)
+      if (pending.length > 0) schedule()
+    }, dispatchWindowMs)
+    const maybeNodeTimeout = timer as unknown as { unref?: () => void }
+    maybeNodeTimeout.unref?.()
+  }
 
   return (input: AppInput) => {
     if (input.type === 'audioChunk') {
       void onInput(input)
       return
     }
-    pending = input
-    if (timer) return
-    timer = setTimeout(() => {
-      timer = undefined
-      const next = pending
-      pending = undefined
-      if (next) void onInput(next)
-    }, dispatchWindowMs)
-    const maybeNodeTimeout = timer as unknown as { unref?: () => void }
-    maybeNodeTimeout.unref?.()
+    const last = pending.at(-1)
+    if (!ACTION_INPUTS.has(input.type) && last && !ACTION_INPUTS.has(last.type)) {
+      pending[pending.length - 1] = input
+    } else {
+      pending.push(input)
+      if (pending.length > MAX_PENDING_INPUTS) pending.shift()
+    }
+    if (!timer) schedule()
   }
 }
 
@@ -161,10 +178,19 @@ export function mapEvenHubEvent(event: EvenHubEventLike | unknown): AppInput | u
   if (eventTypeEquals(eventType, EvenEventType.longPress, EvenEventTypeName.longPress)) return withEventSource({ type: 'longPress' }, normalizedEventSource)
   if (eventTypeEquals(eventType, EvenEventType.longPressRelease, EvenEventTypeName.longPressRelease)) return withEventSource({ type: 'longPressRelease' }, normalizedEventSource)
   if (eventTypeEquals(eventType, EvenEventType.doubleClick, EvenEventTypeName.doubleClick)) return withEventSource(withOptionalSelection('doublePress', index, itemName), normalizedEventSource)
+  // Protobuf omits a zero enum, so a record without an eventType is a CLICK (0). The exception is a system record that
+  // carries IMU data or an exit reason: per the SDK's Sys_ItemEvent those are IMU reports and exit events, not taps.
+  if (eventType === undefined && !listEvent && !normalized.textEvent && isNonGestureSysRecord(normalized.sysEvent)) return undefined
   if (eventType === undefined || eventTypeEquals(eventType, EvenEventType.click, EvenEventTypeName.click)) return withEventSource(withOptionalSelection('press', index, itemName), normalizedEventSource)
   if (eventTypeEquals(eventType, EvenEventType.scrollTop, EvenEventTypeName.scrollTop)) return withEventSource({ type: 'swipeUp' }, normalizedEventSource)
   if (eventTypeEquals(eventType, EvenEventType.scrollBottom, EvenEventTypeName.scrollBottom)) return withEventSource({ type: 'swipeDown' }, normalizedEventSource)
   return undefined
+}
+
+function isNonGestureSysRecord(record: EventRecord | undefined): boolean {
+  if (!record) return false
+  return pickValue(record, ['imuData', 'IMU_Data', 'imu_data']) !== undefined
+    || pickValue(record, ['systemExitReasonCode', 'SystemExitReasonCode', 'system_exit_reason_code']) !== undefined
 }
 
 function readEventSource(event: EvenHubEventLike | unknown): number | undefined {

@@ -53,6 +53,18 @@ describe('mapEvenHubEvent', () => {
     expect(mapEvenHubEvent({ textEvent: { eventType: '2' } })).toEqual({ type: 'swipeDown' })
   })
 
+  it('maps a system record without an eventType to press (protobuf omits CLICK = 0), but not IMU or exit records', () => {
+    expect(mapEvenHubEvent({ sysEvent: { eventSource: 1 } })).toEqual({ type: 'press', eventSource: 1 })
+    expect(mapEvenHubEvent({ type: 'sys_event', jsonData: { eventSource: 2 } })).toEqual({ type: 'press', eventSource: 2 })
+    expect(mapEvenHubEvent({ sysEvent: { imuData: { x: 1, y: 2, z: 3 } } })).toBeUndefined()
+    expect(mapEvenHubEvent({ type: 'sysEvent', jsonData: { imuData: { x: 1 } } })).toBeUndefined()
+    expect(mapEvenHubEvent({ sysEvent: { systemExitReasonCode: 2 } })).toBeUndefined()
+    expect(mapEvenHubEvent({ sysEvent: { eventType: 8, imuData: { x: 1 } } })).toBeUndefined()
+    // A text or list record without an eventType is still a press.
+    expect(mapEvenHubEvent({ textEvent: { containerID: 2 } })).toEqual({ type: 'press' })
+    expect(mapEvenHubEvent({ listEvent: { eventType: undefined, containerID: 8 } })).toEqual({ type: 'press' })
+  })
+
   it('maps gesture event types from system events like even-toolkit', () => {
     expect(mapEvenHubEvent({ sysEvent: { eventType: 0 } })).toEqual({ type: 'press' })
     expect(mapEvenHubEvent({ sysEvent: { eventType: 3 } })).toEqual({ type: 'doublePress' })
@@ -186,7 +198,38 @@ describe('mapEvenHubEvent', () => {
     vi.useRealTimers()
   })
 
-  it('keeps only the latest gesture from a burst-delivered SDK input batch', () => {
+  it('keeps only the latest swipe from a burst-delivered SDK input batch', () => {
+    vi.useFakeTimers()
+    const onInput = vi.fn()
+    const dispatch = createBoundedInputDispatcher(onInput)
+
+    dispatch({ type: 'swipeDown' })
+    dispatch({ type: 'swipeDown' })
+    dispatch({ type: 'swipeUp' })
+    vi.advanceTimersByTime(100)
+
+    expect(onInput.mock.calls).toEqual([[{ type: 'swipeUp' }]])
+    vi.useRealTimers()
+  })
+
+  it('never lets a burst overwrite a press, and dispatches the swipe before it first', () => {
+    vi.useFakeTimers()
+    const onInput = vi.fn()
+    const dispatch = createBoundedInputDispatcher(onInput)
+
+    dispatch({ type: 'swipeDown' })
+    dispatch({ type: 'swipeDown' })
+    dispatch({ type: 'press', index: 2 })
+    dispatch({ type: 'swipeUp' })
+    vi.advanceTimersByTime(20)
+    expect(onInput.mock.calls).toEqual([[{ type: 'swipeDown' }]])
+    vi.advanceTimersByTime(40)
+
+    expect(onInput.mock.calls).toEqual([[{ type: 'swipeDown' }], [{ type: 'press', index: 2 }], [{ type: 'swipeUp' }]])
+    vi.useRealTimers()
+  })
+
+  it('keeps every action of a burst in order', () => {
     vi.useFakeTimers()
     const onInput = vi.fn()
     const dispatch = createBoundedInputDispatcher(onInput)
@@ -194,10 +237,32 @@ describe('mapEvenHubEvent', () => {
     dispatch({ type: 'press' })
     dispatch({ type: 'swipeDown' })
     dispatch({ type: 'doublePress' })
-    vi.advanceTimersByTime(20)
+    vi.advanceTimersByTime(100)
 
+    expect(onInput.mock.calls.map(([input]) => input.type)).toEqual(['press', 'swipeDown', 'doublePress'])
+    vi.useRealTimers()
+  })
+
+  it('bounds the backlog released after a stall', () => {
+    vi.useFakeTimers()
+    const onInput = vi.fn()
+    const dispatch = createBoundedInputDispatcher(onInput)
+
+    for (let i = 0; i < 10; i++) dispatch({ type: 'press', index: i })
+    vi.advanceTimersByTime(1000)
+
+    expect(onInput.mock.calls.map(([input]) => input.index)).toEqual([6, 7, 8, 9])
+    vi.useRealTimers()
+  })
+
+  it('passes audio chunks straight through', () => {
+    vi.useFakeTimers()
+    const onInput = vi.fn()
+    const dispatch = createBoundedInputDispatcher(onInput)
+    dispatch({ type: 'swipeDown' })
+    dispatch({ type: 'audioChunk', pcm: new Uint8Array(2) })
     expect(onInput).toHaveBeenCalledTimes(1)
-    expect(onInput).toHaveBeenCalledWith({ type: 'doublePress' })
+    expect(onInput.mock.calls[0][0].type).toBe('audioChunk')
     vi.useRealTimers()
   })
 
