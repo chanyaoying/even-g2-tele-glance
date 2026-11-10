@@ -113,8 +113,7 @@ const es: LocaleStrings = {
   // ── Error / auth messages ──
   errorBackendUnreachable:
     'El backend no es accesible. Introduce la URL del backend en Ajustes.',
-  errorBackendTimeout:
-    'La solicitud al backend expiró. El servidor podría estar inaccesible.',
+  errorBackendTimeout: 'La solicitud al backend expiró tras {seconds} s. El servidor podría estar inaccesible o bloqueado. Inténtalo de nuevo o revisa el backend.',
   errorEncryptedAuthMissing:
     'Faltan credenciales de autenticación. Complétalas en Ajustes.',
   errorSharedSecretRequired:
@@ -215,5 +214,17 @@ const es: LocaleStrings = {
 
   // ── Bridge ──
   bridgeEmptyList: 'Vacío',
+  titleFolders: 'Carpetas',
+  folderAllChats: 'Todos los chats',
+  folderSleep: 'Suspender',
+  footerFolderPicker: 'Deslizar elegir | Tocar seleccionar | Doble atrás',
+  statusLoadingMoreChats: 'Cargando más chats...',
+  phoneTwoStepPassword: 'Contraseña de verificación en dos pasos',
+  statusUpdating: 'Actualizando...',
+  statusDidntCatch: 'No se entendió',
+  statusSendFailed: 'Envío fallido',
+  statusTranscriptionFailed: 'Transcripción fallida',
+  statusCouldNotOpenFolder: 'No se pudo abrir la carpeta',
+  footerFetchingChats: 'Obteniendo chats...',
 }
 export default es

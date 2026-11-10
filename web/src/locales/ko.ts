@@ -196,6 +196,18 @@ const ko: LocaleStrings = {
   phoneForwardedFrom: '전달됨:',
   phonePhoto: '사진',
   phoneSticker: '스티커',
+  titleFolders: 'Pol-deo',
+  folderAllChats: 'Modeun chaeting',
+  folderSleep: 'Jamjagi',
+  footerFolderPicker: 'Seuwaipeu seontaek | Nulleo yeolgi | Deobeul dwiro',
+  statusLoadingMoreChats: 'Chaeting deo bulleooneun-jung...',
+  phoneTwoStepPassword: '2dangye injeung bimilbeonho',
+  statusUpdating: 'Eopdeiteu-jung...',
+  statusDidntCatch: 'Jal mot deureosseoyo',
+  statusSendFailed: 'Jeonsong silpae',
+  statusTranscriptionFailed: 'Jeonsa silpae',
+  statusCouldNotOpenFolder: 'Pol-deo-reul yeol su eopseumnida',
+  footerFetchingChats: 'Chaeting gajyeooneun-jung...',
 }
 
 export default ko

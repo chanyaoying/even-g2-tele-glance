@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { formatDayLabel, formatMessageTime, messageScrollUnitCount, nextMessageScrollOffset, screenModel } from '../src/controller/model'
+import { formatDayLabel, formatMessageTime, localizeStatus, messageScrollUnitCount, nextMessageScrollOffset, screenModel } from '../src/controller/model'
 import type { AppState } from '../src/controller/model'
 import type { Message } from '../src/types'
 import { getLocale, setLocale } from '../src/locales'
 import ja from '../src/locales/ja'
 import en from '../src/locales/en'
+import de from '../src/locales/de'
 const encoder = new TextEncoder()
 
 function messageState(messages: Message[], scrollOffset = 0): AppState {
@@ -941,5 +942,45 @@ describe('pixel-width wrapping', () => {
   it('replaces the backtick, which the glasses font cannot draw', () => {
     const model = screenModel(messageState([{ id: '1', sender: 'Al', text: 'use `npm test` now' }], 0))
     expect(model.kind === 'sidebar' ? model.panelBody : '').toContain("'npm test'")
+  })
+
+  it('re-formats a cached thread after the language changes', () => {
+    const original = getLocale()
+    const messages: Message[] = [
+      { id: '1', sender: 'Alice', text: 'old' },
+      { id: '2', sender: 'Bob', text: 'new', firstUnread: true },
+    ]
+    try {
+      const before = screenModel(messageState(messages))
+      expect(before.kind === 'sidebar' ? before.panelBody : '').toContain(en.dividerLastRead)
+      setLocale(de)
+      // Same messages array: the page cache keyed by it must not serve the English divider.
+      const after = screenModel(messageState(messages))
+      expect(after.kind === 'sidebar' ? after.panelBody : '').toContain(de.dividerLastRead)
+      expect(after.kind === 'sidebar' ? after.panelBody : '').not.toContain(en.dividerLastRead)
+    } finally {
+      setLocale(original)
+    }
+  })
+
+  it('localises the controller status strings on the glasses', () => {
+    const original = getLocale()
+    try {
+      setLocale(de)
+      expect(localizeStatus('Updating...')).toBe(de.statusUpdating)
+      expect(localizeStatus("Didn't catch that")).toBe(de.statusDidntCatch)
+      expect(localizeStatus('Send failed')).toBe(de.statusSendFailed)
+      expect(localizeStatus('Transcription failed')).toBe(de.statusTranscriptionFailed)
+      expect(localizeStatus('Could not open folder')).toBe(de.statusCouldNotOpenFolder)
+      expect(localizeStatus('backend said no')).toBe('backend said no')
+      const chats = screenModel({ screen: 'sidebar', focus: 'chats', chats: [{ id: '1', title: 'A', kind: 'user' }], selectedChatIndex: 0, status: 'Updating...' })
+      expect(chats.kind === 'sidebar' ? chats.panelFooter : '').toBe(de.statusUpdating)
+      const error = screenModel({ screen: 'error', message: 'boom' })
+      expect(error.kind === 'text' ? error.body : '').toContain(de.bodyPressToRetry)
+      const auth = screenModel({ screen: 'auth', mode: 'signedOut', message: 'x' })
+      expect(auth.kind === 'text' ? auth.title : '').toBe(de.titleTelegram)
+    } finally {
+      setLocale(original)
+    }
   })
 })

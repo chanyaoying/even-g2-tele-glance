@@ -195,6 +195,18 @@ const ja: LocaleStrings = {
   phoneForwardedFrom: '転送元:',
   phonePhoto: '写真',
   phoneSticker: 'ステッカー',
+  titleFolders: 'Forudā',
+  folderAllChats: 'Subete no chatto',
+  folderSleep: 'Surīpu',
+  footerFolderPicker: 'Suwaipu sentaku | Oshite kettei | Daburu modoru',
+  statusLoadingMoreChats: 'Chatto o sara ni yomikomi-chuu...',
+  phoneTwoStepPassword: 'Nidankai ninshō pasuwādo',
+  statusUpdating: 'Kōshin-chuu...',
+  statusDidntCatch: 'Kikitore-masen deshita',
+  statusSendFailed: 'Sōshin shippai',
+  statusTranscriptionFailed: 'Moji-ka shippai',
+  statusCouldNotOpenFolder: 'Forudā o hirakemasen',
+  footerFetchingChats: 'Chatto shutoku-chuu...',
 }
 
 export default ja

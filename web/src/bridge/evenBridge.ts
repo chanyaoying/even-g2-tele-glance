@@ -10,6 +10,7 @@ import {
   waitForEvenAppBridge,
 } from '@evenrealities/even_hub_sdk'
 import { setDebugSink } from '../debugLog'
+import { getLocale } from '../locales'
 import type { GlassesBridge } from '../controller/appController'
 import { INLINE_IMAGE_HEIGHT, INLINE_IMAGE_WIDTH, MESSAGE_ROW_HEIGHT_PX, type AppInput, type ScreenModel } from '../controller/model'
 import { defaultApiBaseUrl, effectiveBackendSharedSecret, type TelegramAuthConfig } from '../api'
@@ -40,6 +41,13 @@ const REBUILD_MAX_WAIT_MS = 3000
 /** Longest a picture transfer waits for the page it belongs to to be drawn. */
 const PAGE_SETTLE_MAX_WAIT_MS = 4000
 const POPUP_CONTAINER_NAME = 'popup'
+/** Longest a picture transfer may take before the bridge stops waiting for the host's answer. */
+const IMAGE_TRANSFER_TIMEOUT_MS = 8000
+/**
+ * After a transfer timed out the host may still be busy with it, so the next page rebuild or picture waits this long
+ * (rebuilds no longer than `IMAGE_BUSY_MAX_WAIT_MS` in total) instead of hitting a busy link at once.
+ */
+const IMAGE_TIMEOUT_COOLDOWN_MS = 2000
 export const APP_BUILD_VERSION: string = (typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0')
 
 type DispatchContextSnapshot = { inputQuiet: boolean; backgroundWorkActive: boolean }
@@ -68,12 +76,23 @@ let errorReportingInstalled = false
  * An error that escapes the app used to leave no trace at all. With Debug events on, send uncaught errors and
  * unhandled promise rejections to the backend log (`debug-note ... js-error`), with the start of the stack.
  */
+/** The "at ..." frames of an error's stack, without the message line(s) that precede them. */
+function stackFrames(error: Error): string {
+  return String(error.stack ?? '')
+    .split('\n')
+    .filter((line) => /^\s*at\s|@/.test(line))
+    .map((line) => line.trim())
+    .join('\n')
+}
+
 function reportUncaughtErrors() {
   if (errorReportingInstalled || typeof window === 'undefined') return
   errorReportingInstalled = true
+  // The error message and the stack's first line can quote app data (a chat title in a thrown message), so only the
+  // error's type and where it was thrown leave the phone.
   const describe = (value: unknown) => {
-    if (value instanceof Error) return { message: value.message.slice(0, 300), stack: String(value.stack ?? '').slice(0, 600) }
-    return { message: String(value).slice(0, 300) }
+    if (value instanceof Error) return { errorType: value.name.slice(0, 60), where: stackFrames(value).slice(0, 600) }
+    return { errorType: typeof value }
   }
   window.addEventListener('error', (event) => {
     debugNote?.('js-error', { kind: 'error', ...describe(event.error ?? event.message), at: `${event.filename ?? ''}:${event.lineno ?? 0}` })
@@ -113,6 +132,15 @@ export class EvenHubGlassesBridge implements GlassesBridge {
   private rebuildSentAt = 0
   private pendingFullModel: ScreenModel | undefined
   private pendingFlushTimer: ReturnType<typeof setTimeout> | undefined
+  /** The delayed same-layout retry of a timed-out rebuild (see `handleRejectedPage`). */
+  private timeoutRetryTimer: ReturnType<typeof setTimeout> | undefined
+  /** Until when a timed-out picture transfer may still occupy the glasses link (epoch ms; 0 = not cooling down). */
+  private imageCooldownUntil = 0
+  /** Kind of the page `render` is currently preparing; partial updates arriving meanwhile wait for it if it is a sidebar. */
+  private fullRenderKind: ScreenModel['kind'] | undefined
+  /** The next partial update must rewrite every container: a full page was sent since the last diff base was known. */
+  private panelDiffReset = false
+  private disposed = false
   /** The one-time startup call has been used for a plain text page (see `render`). */
   private startupBootstrapped = false
   /** Consecutive timed-out (not refused) rebuilds of the same screen. */
@@ -248,7 +276,7 @@ export class EvenHubGlassesBridge implements GlassesBridge {
       // Send the chat list as text first (it is on the glasses at once), then apply the full layout as a rebuild.
       this.startupBootstrapped = true
       this.pendingFullModel = model
-      model = { kind: 'text', title: model.title, body: model.panelBody.trim() ? model.panelBody : ' ', footer: 'Fetching chats...' }
+      model = { kind: 'text', title: model.title, body: model.panelBody.trim() ? model.panelBody : ' ', footer: getLocale().footerFetchingChats }
     }
     this.rebuildInFlight = true
     this.rebuildSentAt = Date.now()
@@ -269,6 +297,7 @@ export class EvenHubGlassesBridge implements GlassesBridge {
     // inside renderSidebarPanel when it resolves, and we want it to finish
     // naturally rather than leave the SDK in a half-updated state.
     this.fullRenderInFlight = true
+    this.fullRenderKind = model.kind
     this.emitQueueDepth('full-render-start')
     try {
       // Let a pending mic start/stop finish first; rebuilding the page mid-teardown is the
@@ -276,8 +305,13 @@ export class EvenHubGlassesBridge implements GlassesBridge {
       await this.audioChain
       // A page rebuild while pixels are still being sent timed out in the logs (and the link then stalled), so let the
       // transfer finish first; give up waiting if it is itself stuck.
-      if (this.imageSending) {
-        await Promise.race([this.imageSending.catch(() => undefined), new Promise((resolve) => setTimeout(resolve, IMAGE_BUSY_MAX_WAIT_MS))])
+      // A transfer that timed out may still be running on the host side: give it a moment as well.
+      if (this.imageSending || this.imageCooldownMs() > 0) {
+        const busy = (async () => {
+          await this.imageSending?.catch(() => undefined)
+          await this.imageCooldown()
+        })()
+        await Promise.race([busy, sleep(IMAGE_BUSY_MAX_WAIT_MS)])
       }
 
       if (this.hasRendered) {
@@ -292,19 +326,11 @@ export class EvenHubGlassesBridge implements GlassesBridge {
         // within microseconds. The `attempted: true` flag
         // distinguishes the pre-call log.
         logTeleGlanceTest('render', { sequence, generation, model: summarizeScreenModel(model), attempted: true })
-        // Fire-and-forget the SDK call. Detaching the call from the
-        // `await` chain means a hung `rebuildPageContainer` in the
-        // simulator (Flutter main thread blocked) cannot prevent the
-        // bridge from releasing `fullRenderInFlight` and queuing the
-        // next render. The original SDK call is still tracked in the
-        // simulator's HTTP server, but the JS side has moved on.
-        //
-        // On real hardware this is a strict improvement: the SDK call
-        // completes synchronously and the unhandled promise just
-        // sits in the microtask queue. The post-call bookkeeping
-        // (`this.lastSidebarModel = ...` and the completion log) runs
-        // immediately, and any in-flight SDK call from a previous
-        // render is abandoned cleanly.
+        // The SDK call is not awaited, so a hung `rebuildPageContainer` (the simulator's Flutter thread blocks on
+        // some transitions; real hosts take hundreds of ms to seconds) cannot hold `fullRenderInFlight`. The page
+        // stays "in flight" (`rebuildInFlight`) until the host answers or `REBUILD_MAX_WAIT_MS` passes; newer
+        // screens wait in `pendingFullModel` and the bookkeeping (`lastSidebarModel`, the completion log, retries
+        // on refusal) runs in the answer handlers below.
         const rebuildStartedAt = Date.now()
         this.sdk.rebuildPageContainer(container).then(
           (accepted) => {
@@ -366,7 +392,10 @@ export class EvenHubGlassesBridge implements GlassesBridge {
       throw error
     } finally {
       this.fullRenderInFlight = false
+      this.fullRenderKind = undefined
       this.emitQueueDepth('full-render-end')
+      // A list scroll that arrived while this page was being prepared was held back; apply it now.
+      if (this.pendingPanelModel && !this.panelRenderInFlight) this.schedulePanelFlush()
     }
   }
 
@@ -423,7 +452,9 @@ export class EvenHubGlassesBridge implements GlassesBridge {
     if (durationMs >= TIMEOUT_REFUSAL_MS && this.timeoutRetries < MAX_TIMEOUT_RETRIES) {
       this.timeoutRetries += 1
       debugNote?.('page-retry', { attempt: this.timeoutRetries, tier: this.layoutTier, durationMs })
-      setTimeout(() => {
+      if (this.timeoutRetryTimer) clearTimeout(this.timeoutRetryTimer)
+      this.timeoutRetryTimer = setTimeout(() => {
+        this.timeoutRetryTimer = undefined
         if (generation === this.pageGeneration) void this.render(model).catch(() => undefined)
       }, TIMEOUT_RETRY_DELAY_MS)
       return
@@ -455,6 +486,14 @@ export class EvenHubGlassesBridge implements GlassesBridge {
       return
     }
     if (this.fullRenderInFlight) {
+      if (this.fullRenderKind === 'sidebar') {
+        // The page being prepared has the same containers: keep this (newer) list state and apply it once the page is
+        // sent, instead of losing the scroll. A model queued meanwhile is newer still and wins.
+        if (!this.pendingPanelModel) this.pendingPanelModel = { model, generation: this.pageGeneration }
+        this.panelDiffReset = true
+        logTeleGlanceTest('render.partial.deferred', { generation: this.pageGeneration, reason: 'full-render-in-flight' })
+        return
+      }
       this.stalePartialRenderDropped += 1
       logTeleGlanceTest('render.partial.stale', {
         expectedGeneration: expectedGeneration ?? 'none',
@@ -484,7 +523,9 @@ export class EvenHubGlassesBridge implements GlassesBridge {
       await this.render(model)
       return
     }
-    const updates = buildSidebarPanelUpdates(model, this.lastSidebarModel)
+    // After a full page went out the glasses may show it before `lastSidebarModel` catches up, so diff against nothing.
+    const updates = buildSidebarPanelUpdates(model, this.panelDiffReset ? undefined : this.lastSidebarModel)
+    this.panelDiffReset = false
     logTeleGlanceTest('bridge', { method: 'textContainerUpgrade', args: { sequence, generation: this.pageGeneration, count: updates.length, hasPanelBox: Boolean(model.panelBox) } })
     logTeleGlanceTest('render', { sequence, generation: this.pageGeneration, partial: true, model: summarizeScreenModel(model), attempted: true })
     for (const update of updates) {
@@ -504,14 +545,13 @@ export class EvenHubGlassesBridge implements GlassesBridge {
    *
    * Instead, this method:
    *   1. Stores the latest model in `pendingPanelModel`, overwriting any earlier queued model.
-   *   2. Schedules a microtask flush if none is pending.
-   *   3. While a flush is in flight, marks `panelRenderQueuedAfter` so the next idle tick
-   *      re-renders once the in-flight call resolves.
+   *   2. (Re)starts the `panelRenderIdleMs` timer, so the flush runs once scrolling pauses.
+   *   3. While a flush is in flight, marks `panelRenderQueuedAfter`; the in-flight flush schedules
+   *      the next one when it finishes.
    *   4. Counts both `partialRenderDispatched` and `partialRenderDropped` so the test
    *      harness can verify coalescing.
    *
-   * The returned promise resolves when the queue has accepted the model, NOT when the
-   * native render finishes. Callers must not `await` this for synchronous input handling.
+   * It returns synchronously once the model is queued; the native render happens later.
    */
   enqueueSidebarPanel(model: Extract<ScreenModel, { kind: 'sidebar' }>): void {
     this.partialRenderDispatched += 1
@@ -586,19 +626,27 @@ export class EvenHubGlassesBridge implements GlassesBridge {
       this.emitQueueDepth('flush-end')
       if (this.pendingPanelModel) {
         this.panelRenderQueuedAfter = false
-        this.panelRenderTimer = setTimeout(() => {
-          this.panelRenderTimer = undefined
-          void this.flushPanelQueue()
-        }, this.panelRenderIdleMs)
-        const maybeNodeTimeout = this.panelRenderTimer as unknown as { unref?: () => void }
-        maybeNodeTimeout.unref?.()
+        // While a full page is being prepared, `render` flushes the held model when it is done.
+        if (!this.fullRenderInFlight) this.schedulePanelFlush()
       } else if (this.panelRenderQueuedAfter) {
         this.panelRenderQueuedAfter = false
       }
     }
   }
 
+  private schedulePanelFlush() {
+    if (this.disposed) return
+    if (this.panelRenderTimer) clearTimeout(this.panelRenderTimer)
+    this.panelRenderTimer = setTimeout(() => {
+      this.panelRenderTimer = undefined
+      void this.flushPanelQueue()
+    }, this.panelRenderIdleMs)
+    const maybeNodeTimeout = this.panelRenderTimer as unknown as { unref?: () => void }
+    maybeNodeTimeout.unref?.()
+  }
+
   dispose() {
+    this.disposed = true
     if (this.listenerToken && activeEventListenerToken === this.listenerToken) {
       activeEventListenerToken = undefined
     }
@@ -606,6 +654,17 @@ export class EvenHubGlassesBridge implements GlassesBridge {
       clearTimeout(this.panelRenderTimer)
       this.panelRenderTimer = undefined
     }
+    if (this.pendingFlushTimer) {
+      clearTimeout(this.pendingFlushTimer)
+      this.pendingFlushTimer = undefined
+    }
+    if (this.timeoutRetryTimer) {
+      clearTimeout(this.timeoutRetryTimer)
+      this.timeoutRetryTimer = undefined
+    }
+    this.pendingFullModel = undefined
+    this.pendingImage = undefined
+    this.releasePageWaiters()
     this.pendingPanelModel = undefined
     this.lastSidebarModel = undefined
     this.panelRenderInFlight = false
@@ -639,22 +698,28 @@ export class EvenHubGlassesBridge implements GlassesBridge {
         // Never send pixels while a page is being drawn or waiting to be: the host times such transfers out.
         await this.pageSettled()
         while (this.pendingImage) {
+          // A previous transfer timed out: the host may still be working on it, so do not start another at once.
+          await this.imageCooldown()
           const next = this.pendingImage
+          if (!next) break
           this.pendingImage = undefined
           const startedAt = Date.now()
+          let timedOut = false
           const result = await withTimeout(
             this.sdk.updateImageRawData!(new ImageRawDataUpdate({
               containerID: IMAGE_CONTAINER_ID,
               containerName: IMAGE_CONTAINER_NAME,
               imageData: next,
             })),
-            8000,
+            IMAGE_TRANSFER_TIMEOUT_MS,
             'updateImageRawData',
+            () => { timedOut = true },
           )
-          ok = isImageSuccess(result)
+          if (timedOut) this.imageCooldownUntil = Date.now() + IMAGE_TIMEOUT_COOLDOWN_MS
+          ok = !timedOut && isImageSuccess(result)
           const durationMs = Date.now() - startedAt
-          logTeleGlanceTest('image', { bytes: next.byteLength, result: String(result), ok, durationMs })
-          debugNote?.('image-transfer', { bytes: next.byteLength, result: String(result), ok, durationMs })
+          logTeleGlanceTest('image', { bytes: next.byteLength, result: String(result), ok, durationMs, timedOut })
+          debugNote?.('image-transfer', { bytes: next.byteLength, result: String(result), ok, durationMs, timedOut })
         }
       } catch {
         ok = false
@@ -665,6 +730,15 @@ export class EvenHubGlassesBridge implements GlassesBridge {
     }
     this.imageSending = run()
     return this.imageSending
+  }
+
+  private imageCooldownMs() {
+    return Math.max(0, this.imageCooldownUntil - Date.now())
+  }
+
+  private async imageCooldown() {
+    const remaining = this.imageCooldownMs()
+    if (remaining > 0) await sleep(remaining)
   }
 
   async setAudioEnabled(enabled: boolean) {
@@ -1219,7 +1293,7 @@ function formatBoxContent(boxedBody: BoxedBody) {
 }
 
 function formatListAsText(model: Extract<ScreenModel, { kind: 'list' }>) {
-  const items = model.items.length > 0 ? model.items : ['Empty']
+  const items = model.items.length > 0 ? model.items : [getLocale().bridgeEmptyList]
   const visible = visibleListWindow(items, model.selectedIndex, 8)
   const lines = [
     model.title,
@@ -1259,7 +1333,7 @@ async function postDebugNote(note: string, data: Record<string, unknown>, authCo
     const effectiveConfig = config ? { ...config, backendSharedSecret: sharedSecret } : undefined
     const encryptedAuth = effectiveConfig ? await encryptedTelegramAuthHeader(effectiveConfig) : null
     if (!encryptedAuth || !sharedSecret) return
-    const body = JSON.stringify({ source: 'even-hub', buildVersion: APP_BUILD_VERSION, raw: { event: note, ...data }, mapped: null, note })
+    const body = JSON.stringify({ source: 'even-hub', buildVersion: APP_BUILD_VERSION, raw: { event: note, ...sanitizeDebugNoteData(data) }, mapped: null, note })
     const encryptedPayload = await encryptJsonPayload(body, sharedSecret)
     await fetch(`${defaultApiBaseUrl()}/api/debug/events`, {
       method: 'POST',
@@ -1282,7 +1356,7 @@ async function logHardwareEvent(raw: unknown, mapped: AppInput | undefined, auth
       source: 'even-hub',
       buildVersion: APP_BUILD_VERSION,
       raw: summarizeForDebug(raw),
-      mapped: mapped ?? null,
+      mapped: summarizeInputForDebug(mapped),
     })
     const encryptedPayload = await encryptJsonPayload(body, sharedSecret)
     await fetch(`${defaultApiBaseUrl()}/api/debug/events`, {
@@ -1295,19 +1369,71 @@ async function logHardwareEvent(raw: unknown, mapped: AppInput | undefined, auth
   }
 }
 
-function summarizeForDebug(value: unknown): unknown {
-  if (value instanceof Uint8Array) return { type: 'Uint8Array', byteLength: value.byteLength, preview: Array.from(value.slice(0, 16)) }
+/**
+ * Event fields that may leave the phone in debug logs: gesture kind, list position, input source, container ids and
+ * system codes. Everything else (notably `currentSelectItemName`, which carries chat and topic titles, and any text)
+ * is dropped; only the dropped key names are kept so a new SDK field is noticed.
+ */
+const DEBUG_EVENT_FIELDS = new Set([
+  'type', 'eventtype', 'event', 'action', 'eventsource', 'sourcetype', 'source',
+  'containerid', 'containername', 'currentselectitemindex', 'currentselectindex', 'selectedindex', 'selectindex', 'index',
+  'systemexitreasoncode', 'x', 'y', 'z',
+])
+/** Wrappers whose content is summarised with the same whitelist. */
+const DEBUG_EVENT_WRAPPERS = new Set(['listevent', 'textevent', 'sysevent', 'audioevent', 'jsondata', 'data', 'imudata'])
+
+function debugKey(key: string) {
+  return key.replace(/[^a-zA-Z0-9]/g, '').toLowerCase()
+}
+
+/** Privacy-safe summary of a raw Even Hub event for the test log and the Debug events upload. */
+export function summarizeForDebug(value: unknown, depth = 0): unknown {
+  if (value instanceof Uint8Array) return { type: 'Uint8Array', byteLength: value.byteLength }
   if (value instanceof ArrayBuffer) return { type: 'ArrayBuffer', byteLength: value.byteLength }
-  if (Array.isArray(value)) return value.slice(0, 20).map(summarizeForDebug)
+  if (Array.isArray(value)) return { type: 'Array', length: value.length }
+  if (typeof value === 'string') return value.slice(0, 40)
   if (typeof value !== 'object' || value === null) return value
+  if (depth > 3) return '[nested]'
 
   const output: Record<string, unknown> = {}
+  const omitted: string[] = []
   for (const [key, item] of Object.entries(value)) {
-    if (key.toLowerCase().includes('audiopcm')) {
-      output[key] = summarizeForDebug(item)
-      continue
+    const normalized = debugKey(key)
+    if (normalized.includes('audiopcm')) {
+      output[key] = summarizeForDebug(item, depth + 1)
+    } else if (DEBUG_EVENT_WRAPPERS.has(normalized) && typeof item === 'object' && item !== null) {
+      output[key] = summarizeForDebug(item, depth + 1)
+    } else if (DEBUG_EVENT_FIELDS.has(normalized) && (typeof item !== 'object' || item === null)) {
+      output[key] = summarizeForDebug(item, depth + 1)
+    } else {
+      omitted.push(key.slice(0, 40))
     }
-    output[key] = summarizeForDebug(item)
+  }
+  if (omitted.length > 0) output.omitted = omitted.slice(0, 20)
+  return output
+}
+
+/** A mapped gesture for the Debug events upload: the kind, position and source, never the selected item's name. */
+export function summarizeInputForDebug(input: AppInput | undefined): Record<string, unknown> | null {
+  if (!input) return null
+  if (input.type === 'audioChunk') return { type: input.type, byteLength: input.pcm.byteLength }
+  const output: Record<string, unknown> = { type: input.type }
+  if ('index' in input && input.index !== undefined) output.index = input.index
+  if ('eventSource' in input && input.eventSource !== undefined) output.eventSource = input.eventSource
+  if ('itemName' in input && input.itemName !== undefined) output.hasItemName = true
+  return output
+}
+
+/** Keys of a debug note that look like they carry user content (names, titles, message text) are dropped. */
+const DEBUG_NOTE_BLOCKED_KEY = /name|title|text|body|transcript|caption|preview|phone|secret|hash|token|stack/i
+
+/** Debug note data restricted to scalars under keys that do not look like user content; strings are capped. */
+export function sanitizeDebugNoteData(data: Record<string, unknown>): Record<string, unknown> {
+  const output: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(data)) {
+    if (DEBUG_NOTE_BLOCKED_KEY.test(key)) continue
+    if (typeof value === 'string') output[key] = value.slice(0, 600)
+    else if (typeof value === 'number' || typeof value === 'boolean' || value === null || value === undefined) output[key] = value
   }
   return output
 }
@@ -1335,17 +1461,22 @@ function fillToContainer(content: string) {
  * The timeout value is well above normal hardware latency (real G2 calls
  * complete in 50-200ms) and well below the test step budgets (1-2s).
  */
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T | undefined> {
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string, onTimeout?: () => void): Promise<T | undefined> {
   let timer: ReturnType<typeof setTimeout> | undefined
   const timeout = new Promise<undefined>((resolve) => {
     timer = setTimeout(() => {
       logTeleGlanceTest('bridge.timeout', { method: label, timeoutMs: ms })
+      onTimeout?.()
       resolve(undefined)
     }, ms)
   })
   return Promise.race([promise, timeout]).finally(() => {
     if (timer) clearTimeout(timer)
   })
+}
+
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms))
 }
 
 /** The SDK reports success as `success`, 0 or true depending on the host build. */
