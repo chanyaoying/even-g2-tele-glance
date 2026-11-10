@@ -618,3 +618,18 @@ def test_a_failed_reply_lookup_keeps_the_message_with_a_bare_reply_marker():
     asyncio.run(attach_replies(lookup, raws, summaries))
     assert summaries[0].reply_to.message_id == 7
     assert summaries[0].reply_to.sender is None
+
+
+def test_oversize_static_sticker_is_refused_before_download():
+    import pytest
+    from app.services.imaging import MAX_SOURCE_BYTES
+    from app.services.telegram import TelegramServiceError
+
+    message = _sticker_message(52, "image/webp")
+    message.file = SimpleNamespace(size=MAX_SOURCE_BYTES + 1)
+    client = _PhotoClient(message, b"")
+    service = _photo_service(client)
+
+    with pytest.raises(TelegramServiceError, match="too large"):
+        asyncio.run(service.get_photo(1, 52))
+    assert client.downloads == 0

@@ -47,3 +47,35 @@ def test_bad_input_raises_a_clean_error():
         prepare_glasses_image(b"not an image")
     with pytest.raises(ImagingError):
         prepare_glasses_image(b"")
+
+
+def png(size, mode="1"):
+    buffer = io.BytesIO()
+    Image.new(mode, size).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+@pytest.mark.parametrize("size", [(5000, 4000), (6000, 6000)])  # warning range, and over twice the cap
+def test_small_files_declaring_huge_canvases_are_refused(size):
+    with pytest.raises(ImagingError, match="too large"):
+        prepare_glasses_image(png(size))
+
+
+def test_large_photo_is_shrunk_before_full_size_conversion():
+    import time
+
+    started = time.perf_counter()
+    out, width, height = prepare_glasses_image(jpeg((4000, 3000)))
+    assert (width, height) == (288, 120)
+    assert time.perf_counter() - started < 2
+
+
+def test_transparent_sticker_still_lands_on_black():
+    buffer = io.BytesIO()
+    sticker = Image.new("RGBA", (512, 512), (255, 255, 255, 0))
+    sticker.paste((255, 255, 255, 255), (156, 156, 356, 356))
+    sticker.save(buffer, format="WEBP", lossless=True)
+    out, _, _ = prepare_glasses_image(buffer.getvalue())
+    decoded = Image.open(io.BytesIO(out))
+    assert decoded.getpixel((144, 60)) > 200  # the opaque centre
+    assert decoded.getpixel((90, 5)) == 0  # transparent corner is black, not the hidden white

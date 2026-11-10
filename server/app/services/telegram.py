@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Literal, Optional, Protocol, Union
 
 from app.config import Settings
-from app.services.imaging import ImagingError, prepare_glasses_image
+from app.services.imaging import MAX_SOURCE_BYTES, ImagingError, prepare_glasses_image
 from app.services.message_content import forwarded_from, link_info, media_label, poll_info, reply_preview, reply_target_id, rich_text, service_text
 from app.models import (
     ChatSummary,
@@ -1345,7 +1345,10 @@ class TelethonTelegramService:
             if message is None or not (_is_photo_message(message) or _is_sticker_message(message)):
                 raise TelegramServiceError("Telegram message has no photo")
             if _is_sticker_message(message) and _sticker_is_static(message):
-                # A static sticker is itself a small WebP picture: use the real file.
+                # A static sticker is itself a small WebP picture: use the real file, unless it is not small.
+                size = getattr(getattr(message, "file", None), "size", None)
+                if isinstance(size, int) and size > MAX_SOURCE_BYTES:
+                    raise TelegramServiceError("image is too large")
                 raw = await asyncio.wait_for(client.download_media(message, file=bytes), timeout=40)
             else:
                 # thumb=-1 is the largest size Telegram offers (photo, or the still preview of an animated sticker).

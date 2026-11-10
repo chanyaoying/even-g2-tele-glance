@@ -2,8 +2,11 @@
 
 import io
 import logging
+import warnings
 
 MAX_SOURCE_BYTES = 12 * 1024 * 1024
+# A small file can still declare a huge canvas (decompression bomb); refuse anything above ~16 megapixels.
+MAX_SOURCE_PIXELS = 16_000_000
 logger = logging.getLogger(__name__)
 
 
@@ -22,17 +25,36 @@ def prepare_glasses_image(raw: bytes, max_width: int = 288, max_height: int = 12
     except ImportError as exc:
         raise ImagingError("Pillow is not installed. Install server requirements.") from exc
 
+    Image.MAX_IMAGE_PIXELS = MAX_SOURCE_PIXELS
     try:
-        with Image.open(io.BytesIO(raw)) as source:
-            oriented = ImageOps.exif_transpose(source)
-            if oriented.mode in ("RGBA", "LA", "PA") or "transparency" in oriented.info:
-                # Stickers are cut-outs: put them on black (the display's "off") instead of letting the
-                # colour hidden under transparent pixels decide the background.
-                rgba = oriented.convert("RGBA")
-                backdrop = Image.new("RGBA", rgba.size, (0, 0, 0, 255))
-                image = Image.alpha_composite(backdrop, rgba).convert("L")
-            else:
-                image = oriented.convert("L")
+        with warnings.catch_warnings():
+            # Pillow only warns between MAX_IMAGE_PIXELS and twice that; treat the warning as a refusal too.
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(raw)) as source:
+                if source.width * source.height > MAX_SOURCE_PIXELS:
+                    raise ImagingError("image is too large")
+                # JPEG can decode at 1/2..1/8 scale directly: far less memory and time for big photos.
+                # The box is square because an EXIF rotation may swap width and height.
+                side = max(max_width, max_height)
+                source.draft("L", (side, side))
+                oriented = ImageOps.exif_transpose(source)
+                transparent = oriented.mode in ("RGBA", "LA", "PA") or "transparency" in oriented.info
+                if transparent or oriented.mode == "P":
+                    # Palette images only resize with nearest-neighbour; expand them first.
+                    oriented = oriented.convert("RGBA" if transparent else "RGB")
+                # Shrink before the per-pixel work below, which then touches ~35k pixels instead of millions.
+                oriented.thumbnail((max_width, max_height), Image.LANCZOS)
+                if transparent:
+                    # Stickers are cut-outs: put them on black (the display's "off") instead of letting the
+                    # colour hidden under transparent pixels decide the background.
+                    backdrop = Image.new("RGBA", oriented.size, (0, 0, 0, 255))
+                    image = Image.alpha_composite(backdrop, oriented).convert("L")
+                else:
+                    image = oriented.convert("L")
+    except ImagingError:
+        raise
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise ImagingError("image is too large") from exc
     except Exception as exc:  # Pillow raises many unrelated types for bad input
         logger.info("image decode failed: %s: %s", exc.__class__.__name__, exc)
         raise ImagingError("image could not be decoded") from exc
