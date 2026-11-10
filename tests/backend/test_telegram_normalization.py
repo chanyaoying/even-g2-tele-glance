@@ -633,3 +633,101 @@ def test_oversize_static_sticker_is_refused_before_download():
     with pytest.raises(TelegramServiceError, match="too large"):
         asyncio.run(service.get_photo(1, 52))
     assert client.downloads == 0
+
+
+def _size(kind, type_, w, h, **extra):
+    return _make(kind, {"type": type_, "w": w, "h": h, **extra})
+
+
+def test_pick_photo_thumb_uses_the_smallest_size_that_still_fills_the_glasses_frame():
+    from app.services.telegram_normalize import pick_photo_thumb
+
+    photo = SimpleNamespace(sizes=[
+        _make("PhotoStrippedSize", {"type": "i", "bytes": b"x"}),
+        _size("PhotoSize", "s", 90, 45, size=1_000),
+        _size("PhotoSize", "m", 320, 160, size=12_000),
+        _size("PhotoSize", "x", 800, 400, size=60_000),
+        _size("PhotoSizeProgressive", "y", 1280, 640, sizes=[10_000, 200_000]),
+    ])
+
+    # 1280x640 fitted into 288x120 is 240x120: "m" (320x160) covers it, "s" does not.
+    assert pick_photo_thumb(photo, 288, 120) == "m"
+
+
+def test_pick_photo_thumb_handles_tall_pictures_and_missing_sizes():
+    from app.services.telegram_normalize import pick_photo_thumb
+
+    tall = SimpleNamespace(sizes=[
+        _size("PhotoSize", "s", 50, 90, size=1_000),
+        _size("PhotoSize", "m", 180, 320, size=12_000),
+        _size("PhotoSize", "x", 450, 800, size=60_000),
+    ])
+    # 450x800 fitted into 288x120 is 68x120: "m" covers it.
+    assert pick_photo_thumb(tall, 288, 120) == "m"
+    # Nothing with dimensions: fall back to Telethon's largest.
+    assert pick_photo_thumb(SimpleNamespace(sizes=[]), 288, 120) == -1
+    assert pick_photo_thumb(None, 288, 120) == -1
+
+
+def test_get_photo_downloads_a_right_sized_thumbnail():
+    pil = __import__("pytest").importorskip("PIL.Image")
+    import io
+
+    buffer = io.BytesIO()
+    pil.new("RGB", (320, 160), (200, 40, 40)).save(buffer, format="JPEG")
+    media = MessageMediaPhoto()
+    media.photo = SimpleNamespace(sizes=[
+        _size("PhotoSize", "m", 320, 160, size=12_000),
+        _size("PhotoSizeProgressive", "y", 1280, 640, sizes=[10_000, 200_000]),
+    ])
+    message = RichMessage(id=60, message="", raw_text="", media=media, date=datetime(2026, 1, 1, tzinfo=timezone.utc))
+
+    class Client(_PhotoClient):
+        async def download_media(self, message, file=None, thumb=None):
+            self.downloads += 1
+            self.thumb = thumb
+            return self.payload
+
+    client = Client(message, buffer.getvalue())
+    asyncio.run(_photo_service(client).get_photo(1, 60))
+
+    assert client.thumb == "m"
+
+
+def test_photo_downloads_are_shared_and_run_one_at_a_time():
+    pil = __import__("pytest").importorskip("PIL.Image")
+    import io
+
+    buffer = io.BytesIO()
+    pil.new("RGB", (100, 50), (200, 40, 40)).save(buffer, format="JPEG")
+
+    class Client:
+        def __init__(self):
+            self.downloads = 0
+            self.active = 0
+            self.peak = 0
+
+        async def get_messages(self, entity, ids=None):
+            return RichMessage(id=ids, message="", raw_text="", media=MessageMediaPhoto(), date=datetime(2026, 1, 1, tzinfo=timezone.utc))
+
+        async def download_media(self, message, file=None, thumb=None):
+            self.downloads += 1
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+            await asyncio.sleep(0.01)
+            self.active -= 1
+            return buffer.getvalue()
+
+    client = Client()
+    service = _photo_service(client)
+
+    async def scenario():
+        return await asyncio.gather(
+            service.get_photo(1, 70), service.get_photo(1, 70), service.get_photo(1, 71), service.get_photo(1, 72),
+        )
+
+    results = asyncio.run(scenario())
+
+    assert results[0] is results[1]
+    assert client.downloads == 3  # the duplicate request shared the first download
+    assert client.peak == 1  # big file transfers must not crowd out chat-list and message calls

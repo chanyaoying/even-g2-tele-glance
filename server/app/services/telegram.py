@@ -36,6 +36,7 @@ from app.services.telegram_normalize import (  # noqa: F401  (re-exported for ex
     normalize_message,
     normalize_topic,
     normalize_update_message,
+    pick_photo_thumb,
     ReplyPreviewCache,
 )
 from app.models import (
@@ -242,6 +243,9 @@ FOLDER_LOOKAHEAD = 60
 # A refresh of page one only needs the top of the list; the deeper cached chats are kept.
 HEAD_REFRESH = 40
 PHOTO_CACHE_SIZE = 128
+# File transfers share the account's one MTProto connection with every other call; more than one at a time
+# starves the chat list and message requests (they then hit their timeouts and return 504).
+PHOTO_DOWNLOAD_CONCURRENCY = 1
 UPDATE_QUEUE_SIZE = 50
 ENTITY_CACHE_SIZE = 1000
 USER_NAME_CACHE_SIZE = 2000
@@ -307,6 +311,8 @@ class TelethonTelegramService:
         self._updates_registered = False
         self._entity_cache: _LruDict = _LruDict(ENTITY_CACHE_SIZE)
         self._photo_cache: OrderedDict = OrderedDict()
+        self._photo_requests: dict = {}
+        self._photo_download_slots = asyncio.Semaphore(PHOTO_DOWNLOAD_CONCURRENCY)
         self._reply_cache = ReplyPreviewCache()
         self._chat_requests: dict = {}
         self._dialog_lock = asyncio.Lock()
@@ -964,6 +970,21 @@ class TelethonTelegramService:
         if cached is not None:
             self._photo_cache.move_to_end(key)
             return cached
+        # A picture asked for twice at once (prefetch, then shown) is downloaded once.
+        task = self._photo_requests.get(key)
+        if task is None:
+            task = asyncio.ensure_future(self._get_photo_uncoalesced(key, chat_id, message_id, max_width, max_height))
+            self._photo_requests[key] = task
+
+            def finished(done: "asyncio.Future[Any]", key=key) -> None:
+                self._photo_requests.pop(key, None)
+                if not done.cancelled():
+                    done.exception()
+
+            task.add_done_callback(finished)
+        return await asyncio.shield(task)
+
+    async def _get_photo_uncoalesced(self, key: tuple, chat_id: int, message_id: int, max_width: int, max_height: int) -> PhotoResponse:
         try:
             client = await self._get_client()
             entity = await self._get_entity(chat_id)
@@ -975,10 +996,16 @@ class TelethonTelegramService:
                 size = getattr(getattr(message, "file", None), "size", None)
                 if isinstance(size, int) and size > MAX_SOURCE_BYTES:
                     raise TelegramServiceError("image is too large")
-                raw = await asyncio.wait_for(client.download_media(message, file=bytes), timeout=40)
+                thumb = None  # the sticker file itself
+            elif _is_sticker_message(message):
+                thumb = -1  # the largest still preview of an animated sticker (they are small)
             else:
-                # thumb=-1 is the largest size Telegram offers (photo, or the still preview of an animated sticker).
-                raw = await asyncio.wait_for(client.download_media(message, file=bytes, thumb=-1), timeout=40)
+                thumb = pick_photo_thumb(getattr(message.media, "photo", None), max_width, max_height)
+            async with self._photo_download_slots:
+                if thumb is None:
+                    raw = await asyncio.wait_for(client.download_media(message, file=bytes), timeout=40)
+                else:
+                    raw = await asyncio.wait_for(client.download_media(message, file=bytes, thumb=thumb), timeout=40)
             png, width, height = await asyncio.to_thread(prepare_glasses_image, raw or b"", max_width, max_height)
         except ImagingError as exc:
             raise TelegramServiceError(str(exc)) from exc

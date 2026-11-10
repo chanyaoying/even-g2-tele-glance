@@ -6,7 +6,7 @@ easy to test on their own. app.services.telegram re-exports them for existing ca
 import logging
 from collections import OrderedDict
 from datetime import datetime, timezone
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, Union
 
 from app.models import ChatSummary, MessageSummary, ReplyInfo, TelegramUpdate, TopicSummary, TypingUpdate
 from app.services.message_content import forwarded_from, link_info, media_label, poll_info, reply_preview, reply_target_id, rich_text, service_text
@@ -411,3 +411,34 @@ def is_expired(expires: Any) -> bool:
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
     return expires_at <= now
+
+
+# Placeholder sizes with no real pixels to download (a blurred inline preview, an SVG outline).
+_NON_DOWNLOAD_SIZES = {"PhotoStrippedSize", "PhotoPathSize", "PhotoSizeEmpty"}
+
+
+def pick_photo_thumb(photo: Any, max_width: int, max_height: int) -> Union[str, int]:
+    """The smallest stored size of a photo that still fills the glasses frame once fitted into it.
+
+    Telegram keeps each photo at several sizes (up to 2560 px). The glasses show at most max_width x max_height,
+    so downloading the largest wastes seconds and ties up the account's connection. Returns the size's type
+    letter for Telethon's ``thumb=``, or -1 (Telethon's largest) when no size states its dimensions.
+    """
+    candidates = []
+    for size in getattr(photo, "sizes", None) or []:
+        if type(size).__name__ in _NON_DOWNLOAD_SIZES:
+            continue
+        w, h, kind = getattr(size, "w", None), getattr(size, "h", None), getattr(size, "type", None)
+        if isinstance(w, int) and isinstance(h, int) and w > 0 and h > 0 and isinstance(kind, str):
+            candidates.append((w * h, w, h, kind))
+    if not candidates:
+        return -1
+    candidates.sort()
+    _, largest_w, largest_h, largest_kind = candidates[-1]
+    scale = min(1.0, max_width / largest_w, max_height / largest_h)
+    # A few pixels short is invisible after the 16-level greyscale step; it saves a much bigger download.
+    need_w, need_h = largest_w * scale * 0.95, largest_h * scale * 0.95
+    for _, w, h, kind in candidates:
+        if w >= need_w and h >= need_h:
+            return kind
+    return largest_kind
