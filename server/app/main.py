@@ -47,7 +47,7 @@ from app.models import (
     TypingUpdate,
 )
 from app.services.audio import pcm16le_to_wav
-from app.services.secure_auth import SecureAuthError, decrypt_payload, encrypt_payload
+from app.services.secure_auth import PROTO_HEADER, SecureAuthError, decrypt_payload, encrypt_payload, payload_aads
 from app.services.telegram import (
     TelegramRateLimitError,
     TelegramService,
@@ -125,6 +125,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         shared_secret = app_settings.teleglance_shared_secret
         encrypted_auth = request.headers.get("X-TeleGlance-Auth")
         should_encrypt = bool(shared_secret and encrypted_auth and request.url.path.startswith("/api/"))
+        request_aad, response_aad = payload_aads(request.headers.get(PROTO_HEADER))
 
         if should_encrypt and _requires_encrypted_body(request):
             try:
@@ -134,7 +135,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     encrypted_body = envelope.get("encryptedPayload") if isinstance(envelope, dict) else None
                     if not isinstance(encrypted_body, str):
                         return JSONResponse({"detail": "Encrypted JSON request body is required"}, status_code=400)
-                    decrypted = decrypt_payload(encrypted_body, shared_secret)
+                    decrypted = decrypt_payload(encrypted_body, shared_secret, request_aad)
                     request = _replace_request_body(request, decrypted)
             except SecureAuthError as exc:
                 return JSONResponse({"detail": str(exc)}, status_code=400)  # fixed messages, no internals
@@ -155,7 +156,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         body = b""
         async for chunk in response.body_iterator:
             body += chunk
-        encrypted = encrypt_payload(body, shared_secret)
+        encrypted = encrypt_payload(body, shared_secret, response_aad)
         headers = dict(response.headers)
         headers.pop("content-length", None)
         headers["X-TeleGlance-Encrypted"] = "1"
@@ -328,11 +329,12 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         telegram: TelegramService = Depends(get_telegram_service),
     ) -> StreamingResponse:
         encrypt_events = bool(app_settings.teleglance_shared_secret and request.headers.get("X-TeleGlance-Auth"))
+        _request_aad, event_aad = payload_aads(request.headers.get(PROTO_HEADER))
 
         def event_data(payload: str) -> str:
             if not encrypt_events:
                 return payload
-            encrypted = encrypt_payload(payload.encode("utf-8"), app_settings.teleglance_shared_secret or "")
+            encrypted = encrypt_payload(payload.encode("utf-8"), app_settings.teleglance_shared_secret or "", event_aad)
             return json.dumps({"encryptedPayload": encrypted})
 
         async def events():

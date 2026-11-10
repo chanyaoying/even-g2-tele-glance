@@ -1,13 +1,32 @@
+"""Shared-secret encryption between the phone and the backend (AES-256-GCM, key = PBKDF2 of the secret).
+
+Wire protocol. Every value is "v1.<base64url nonce>.<base64url ciphertext+tag>" with a fresh 12-byte nonce.
+The additional authenticated data (AAD) names what the ciphertext is for, so a ciphertext made for one
+purpose cannot be replayed as another (e.g. a captured response pasted in as a request body):
+
+  purpose                                     proto 1 (no header)    proto 2 (`X-TeleGlance-Proto: 2`)
+  X-TeleGlance-Auth header (credentials, ts)  teleglance-auth-v1     teleglance-auth-v1
+  request body {"encryptedPayload": ...}      teleglance-auth-v1     teleglance-req-v1
+  JSON response body and SSE event `data:`    teleglance-auth-v1     teleglance-resp-v1
+
+A request opts in to proto 2 by sending `X-TeleGlance-Proto: 2`; the backend then decrypts its body only
+with the request AAD and encrypts its response (or its SSE events) only with the response AAD. Requests
+without the header keep proto 1, so older phone builds keep working; drop proto 1 once they are gone.
+"""
 import base64
 from functools import lru_cache
 import json
 import os
 import time
-from typing import Any
+from typing import Any, Optional
 
 
 AUTH_HEADER_PREFIX = "v1."
 AUTH_AAD = b"teleglance-auth-v1"
+REQUEST_AAD = b"teleglance-req-v1"
+RESPONSE_AAD = b"teleglance-resp-v1"
+PROTO_HEADER = "X-TeleGlance-Proto"
+PROTO_DISTINCT_AADS = "2"
 AUTH_SALT = b"TeleGlance encrypted auth v1"
 AUTH_MAX_AGE_SECONDS = 120
 AUTH_REPLAY_TTL_SECONDS = 300
@@ -52,7 +71,14 @@ def decrypt_auth_header(header_value: str, shared_secret: str) -> dict[str, Any]
     return payload
 
 
-def encrypt_payload(plaintext: bytes, shared_secret: str) -> str:
+def payload_aads(proto: Optional[str]) -> tuple[bytes, bytes]:
+    """(request body AAD, response AAD) for a request's X-TeleGlance-Proto header value."""
+    if (proto or "").strip() == PROTO_DISTINCT_AADS:
+        return REQUEST_AAD, RESPONSE_AAD
+    return AUTH_AAD, AUTH_AAD
+
+
+def encrypt_payload(plaintext: bytes, shared_secret: str, aad: bytes = AUTH_AAD) -> str:
     if not shared_secret.strip():
         raise SecureAuthError("Encrypted payload requires TELEGLANCE_SHARED_SECRET on the backend")
     try:
@@ -61,11 +87,11 @@ def encrypt_payload(plaintext: bytes, shared_secret: str) -> str:
         raise SecureAuthError("Install server requirements to enable encrypted auth") from exc
 
     nonce = os.urandom(12)
-    ciphertext = AESGCM(_derive_key(shared_secret)).encrypt(nonce, plaintext, AUTH_AAD)
+    ciphertext = AESGCM(_derive_key(shared_secret)).encrypt(nonce, plaintext, aad)
     return f"v1.{_base64url_encode(nonce)}.{_base64url_encode(ciphertext)}"
 
 
-def decrypt_payload(encrypted_payload: str, shared_secret: str) -> bytes:
+def decrypt_payload(encrypted_payload: str, shared_secret: str, aad: bytes = AUTH_AAD) -> bytes:
     if not shared_secret.strip():
         raise SecureAuthError("Encrypted payload requires TELEGLANCE_SHARED_SECRET on the backend")
     if not encrypted_payload.startswith(AUTH_HEADER_PREFIX):
@@ -78,7 +104,7 @@ def decrypt_payload(encrypted_payload: str, shared_secret: str) -> bytes:
         raise SecureAuthError("Malformed encrypted payload") from exc
     try:
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-        return AESGCM(_derive_key(shared_secret)).decrypt(nonce, ciphertext, AUTH_AAD)
+        return AESGCM(_derive_key(shared_secret)).decrypt(nonce, ciphertext, aad)
     except ImportError as exc:
         raise SecureAuthError("Install server requirements to enable encrypted auth") from exc
     except Exception as exc:

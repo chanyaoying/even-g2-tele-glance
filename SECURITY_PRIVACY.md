@@ -144,6 +144,23 @@ frontend no longer carries a public shared-backend default.
 - Encrypted JSON envelopes: every `/api/...` request and response body
   passes through `encrypt_payload`/`decrypt_payload` when the auth
   header is present and the secret is set. `Content-Type` must be JSON.
+- Purpose-bound AADs (protocol 2). The AES-GCM additional authenticated
+  data names what a ciphertext is for, so a ciphertext captured in one role
+  (say, a response) cannot be replayed in another (as a request body):
+
+  | Purpose | Proto 1 (no header) | Proto 2 (`X-TeleGlance-Proto: 2`) |
+  | --- | --- | --- |
+  | `X-TeleGlance-Auth` header | `teleglance-auth-v1` | `teleglance-auth-v1` |
+  | Request body `{"encryptedPayload"}` | `teleglance-auth-v1` | `teleglance-req-v1` |
+  | JSON response body and SSE event `data:` | `teleglance-auth-v1` | `teleglance-resp-v1` |
+
+  A request opts in by sending `X-TeleGlance-Proto: 2`; the backend then
+  accepts its body only under the request AAD (a proto-1 body is refused
+  with 400) and seals the response, or every event of an `/api/updates`
+  stream, only under the response AAD. Requests without the header keep
+  proto 1 so older phone builds work; proto 1 should be removed once no
+  such builds remain. The protocol is described in
+  `server/app/services/secure_auth.py`.
 - CORS: the server `expose_headers` includes `X-TeleGlance-Encrypted` so
   the browser-side `fetch` can tell an encrypted body apart from a
   plain error string.
