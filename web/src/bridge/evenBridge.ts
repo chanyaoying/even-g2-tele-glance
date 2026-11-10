@@ -9,6 +9,7 @@ import {
   TextContainerUpgrade,
   waitForEvenAppBridge,
 } from '@evenrealities/even_hub_sdk'
+import { setDebugSink } from '../debugLog'
 import type { GlassesBridge } from '../controller/appController'
 import { INLINE_IMAGE_HEIGHT, INLINE_IMAGE_WIDTH, MESSAGE_ROW_HEIGHT_PX, type AppInput, type ScreenModel } from '../controller/model'
 import { defaultApiBaseUrl, effectiveBackendSharedSecret, type TelegramAuthConfig } from '../api'
@@ -28,6 +29,12 @@ const encoder = new TextEncoder()
 const IMAGE_CONTAINER_ID = 9
 const IMAGE_CONTAINER_NAME = 'panel-image'
 const POPUP_CONTAINER_ID = 10
+/** A rebuild the host answered `false` to after at least this long timed out; it was not a refusal of the layout. */
+const TIMEOUT_REFUSAL_MS = 1500
+const MAX_TIMEOUT_RETRIES = 2
+const TIMEOUT_RETRY_DELAY_MS = 1000
+/** Longest a page rebuild waits for a picture transfer that is still running. */
+const IMAGE_BUSY_MAX_WAIT_MS = 3000
 /** Longest the bridge waits for the glasses to answer a page before it sends the next one anyway. */
 const REBUILD_MAX_WAIT_MS = 3000
 /** Longest a picture transfer waits for the page it belongs to to be drawn. */
@@ -108,6 +115,12 @@ export class EvenHubGlassesBridge implements GlassesBridge {
   private pendingFlushTimer: ReturnType<typeof setTimeout> | undefined
   /** The one-time startup call has been used for a plain text page (see `render`). */
   private startupBootstrapped = false
+  /** Consecutive timed-out (not refused) rebuilds of the same screen. */
+  private timeoutRetries = 0
+  /** The glasses show the plain text startup page (stored chat list) and the interactive layout has not landed yet. */
+  private onBootstrapPage = false
+  /** Newest list state seen while the interactive layout was being sent; applied once it lands. */
+  private selectionAfterRebuild: Extract<ScreenModel, { kind: 'sidebar' }> | undefined
   private pageSettledWaiters: Array<() => void> = []
   private audioChain: Promise<void> = Promise.resolve()
   private pageGeneration = 0
@@ -145,6 +158,7 @@ export class EvenHubGlassesBridge implements GlassesBridge {
           void postDebugNote(note, data, options.authConfig)
         }
       : undefined
+    setDebugSink(debugNote)
     reportUncaughtErrors()
     const listenerToken = Symbol('even-hub-listener')
     activeEventListenerToken = listenerToken
@@ -234,7 +248,7 @@ export class EvenHubGlassesBridge implements GlassesBridge {
       // Send the chat list as text first (it is on the glasses at once), then apply the full layout as a rebuild.
       this.startupBootstrapped = true
       this.pendingFullModel = model
-      model = { kind: 'text', title: model.title, body: model.panelBody.trim() ? model.panelBody : ' ' }
+      model = { kind: 'text', title: model.title, body: model.panelBody.trim() ? model.panelBody : ' ', footer: 'Fetching chats...' }
     }
     this.rebuildInFlight = true
     this.rebuildSentAt = Date.now()
@@ -260,6 +274,11 @@ export class EvenHubGlassesBridge implements GlassesBridge {
       // Let a pending mic start/stop finish first; rebuilding the page mid-teardown is the
       // suspected cause of crashes right after cancelling a recording.
       await this.audioChain
+      // A page rebuild while pixels are still being sent timed out in the logs (and the link then stalled), so let the
+      // transfer finish first; give up waiting if it is itself stuck.
+      if (this.imageSending) {
+        await Promise.race([this.imageSending.catch(() => undefined), new Promise((resolve) => setTimeout(resolve, IMAGE_BUSY_MAX_WAIT_MS))])
+      }
 
       if (this.hasRendered) {
         const container = buildPage(model, RebuildPageContainer, this.layoutTier)
@@ -290,15 +309,22 @@ export class EvenHubGlassesBridge implements GlassesBridge {
         this.sdk.rebuildPageContainer(container).then(
           (accepted) => {
             this.rebuildFinished()
-            debugNote?.('page-rebuild', { durationMs: Date.now() - rebuildStartedAt, accepted, withImage: model.kind === 'sidebar' && Boolean(model.panelImage) })
+            debugNote?.('page-rebuild', { durationMs: Date.now() - rebuildStartedAt, accepted, withImage: model.kind === 'sidebar' && Boolean(model.panelImage), tier: this.layoutTier, imageBusy: Boolean(this.imageSending) })
             // The host answers `false` when it refuses a page. Ignoring that left the glasses on the previous
             // screen while the phone moved on, so fall back to a simpler layout and try again.
             if (accepted === false) {
-              this.handleRejectedPage(model, generation, 'rebuildPageContainer', false)
+              this.handleRejectedPage(model, generation, 'rebuildPageContainer', false, Date.now() - rebuildStartedAt)
               return
             }
+            this.timeoutRetries = 0
             this.lastSidebarModel = model.kind === 'sidebar' ? model : undefined
             logTeleGlanceTest('render', { sequence, generation, model: summarizeScreenModel(model) })
+            if (this.onBootstrapPage) {
+              this.onBootstrapPage = false
+              const newer = this.selectionAfterRebuild
+              this.selectionAfterRebuild = undefined
+              if (newer && model.kind === 'sidebar') this.enqueueSidebarPanel(newer) // the user scrolled while the layout was being sent
+            }
           },
           () => {
             this.rebuildFinished()
@@ -314,14 +340,18 @@ export class EvenHubGlassesBridge implements GlassesBridge {
         const container = buildPage(model, CreateStartUpPageContainer, this.layoutTier)
         logTeleGlanceTest('bridge', { method: 'createStartUpPageContainer', args: { sequence, generation, hasPanelBox: model.kind === 'sidebar' ? Boolean(model.panelBox) : false } })
         logTeleGlanceTest('render', { sequence, generation, model: summarizeScreenModel(model), attempted: true })
+        const startupStartedAt = Date.now()
         this.sdk.createStartUpPageContainer(container).then(
           (result) => {
             this.rebuildFinished()
             if (typeof result === 'number' && result !== 0) {
+              debugNote?.('startup-page', { accepted: false, result: String(result), durationMs: Date.now() - startupStartedAt })
               this.handleRejectedPage(model, generation, 'createStartUpPageContainer', result)
               return
             }
             this.hasRendered = true
+            this.onBootstrapPage = this.startupBootstrapped && model.kind === 'text'
+            debugNote?.('startup-page', { accepted: true, bootstrap: this.onBootstrapPage, durationMs: Date.now() - startupStartedAt })
             this.lastSidebarModel = model.kind === 'sidebar' ? model : undefined
             logTeleGlanceTest('render', { sequence, generation, model: summarizeScreenModel(model) })
           },
@@ -383,10 +413,23 @@ export class EvenHubGlassesBridge implements GlassesBridge {
    * The host refused a page. Log it, step down to a simpler sidebar layout and render the same screen again, unless a
    * newer render has already replaced it. After the simplest layout there is nothing left to try.
    */
-  private handleRejectedPage(model: ScreenModel, generation: number, method: string, result: unknown) {
+  private handleRejectedPage(model: ScreenModel, generation: number, method: string, result: unknown, durationMs = 0) {
     logTeleGlanceTest('render.rejected', { generation, method, result: String(result), tier: this.layoutTier })
-    if (model.kind !== 'sidebar' || this.layoutTier >= 2) return
+    if (model.kind !== 'sidebar') return
     if (generation !== this.pageGeneration) return
+    // Every "refusal" seen on the glasses took ~2.1 s: the host timed out because its link was busy (a startup page or
+    // a picture transfer still going), it did not reject the layout. Wait and send the same layout again instead of
+    // stepping down to a poorer one; only a quick refusal, or repeated timeouts, change the layout.
+    if (durationMs >= TIMEOUT_REFUSAL_MS && this.timeoutRetries < MAX_TIMEOUT_RETRIES) {
+      this.timeoutRetries += 1
+      debugNote?.('page-retry', { attempt: this.timeoutRetries, tier: this.layoutTier, durationMs })
+      setTimeout(() => {
+        if (generation === this.pageGeneration) void this.render(model).catch(() => undefined)
+      }, TIMEOUT_RETRY_DELAY_MS)
+      return
+    }
+    this.timeoutRetries = 0
+    if (this.layoutTier >= 2) return
     this.layoutTier = (this.layoutTier + 1) as LayoutTier
     void this.render(model).catch(() => undefined)
   }
@@ -421,6 +464,22 @@ export class EvenHubGlassesBridge implements GlassesBridge {
       return
     }
     const sequence = ++this.renderSequence
+    if (this.onBootstrapPage && typeof this.sdk.textContainerUpgrade === 'function') {
+      // The glasses still show the text startup page: scroll the list in its body, and keep the interactive page that
+      // is about to replace it in step with the selection.
+      if (this.pendingFullModel) this.pendingFullModel = model
+      this.selectionAfterRebuild = this.rebuildInFlight ? model : undefined
+      if (this.rebuildInFlight) return
+      const content = trimForContainer(model.panelBody.trim() ? model.panelBody : ' ', 999)
+      await withTimeout(this.sdk.textContainerUpgrade(new TextContainerUpgrade({
+        containerID: 2,
+        containerName: 'body',
+        content,
+        contentOffset: 0,
+        contentLength: content.length,
+      })), 1000, 'textContainerUpgrade')
+      return
+    }
     if (!this.hasRendered || typeof this.sdk.textContainerUpgrade !== 'function') {
       await this.render(model)
       return
@@ -577,6 +636,8 @@ export class EvenHubGlassesBridge implements GlassesBridge {
     const run = async (): Promise<boolean> => {
       let ok = false
       try {
+        // Never send pixels while a page is being drawn or waiting to be: the host times such transfers out.
+        await this.pageSettled()
         while (this.pendingImage) {
           const next = this.pendingImage
           this.pendingImage = undefined
@@ -759,7 +820,8 @@ function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Cont
     yPosition: 38,
     // With a photo the text moves into a narrow left column and the picture takes the right side.
     width: fullWidth ? 572 : 404,
-    height: fullWidth ? 188 : 206,
+    // Seven rows of 27 px plus padding: a shorter container cut the descenders off the seventh row.
+    height: fullWidth ? 200 : 206,
     borderWidth: 0,
     borderColor: 8,
     paddingLength: 4,
@@ -802,7 +864,7 @@ function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Cont
         containerName: IMAGE_CONTAINER_NAME,
         xPosition: 8,
         // Sits over the blank rows the message text leaves for it (body top 38 + padding 4 + rows above).
-        yPosition: Math.min(226 - INLINE_IMAGE_HEIGHT, 38 + 4 + model.panelImage.topLine * MESSAGE_ROW_HEIGHT_PX + 3),
+        yPosition: Math.min(238 - INLINE_IMAGE_HEIGHT, 38 + 4 + model.panelImage.topLine * MESSAGE_ROW_HEIGHT_PX + 3),
         width: INLINE_IMAGE_WIDTH,
         height: INLINE_IMAGE_HEIGHT,
         ...z(8),

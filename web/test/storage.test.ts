@@ -37,6 +37,7 @@ describe('frontend settings storage', () => {
       chatPollMs: 10000,
       messagePollMs: 8000,
       recordingMinDurationMs: 900,
+      fontWidthPercent: 100,
     })
 
     expect(localStorage.getItem('teleGlance.telegramApiHash')).toBe('hash-secret')
@@ -91,6 +92,7 @@ function testConfig(overrides: Partial<FrontendConfig> = {}): FrontendConfig {
     chatPollMs: 10000,
     messagePollMs: 8000,
     recordingMinDurationMs: 900,
+    fontWidthPercent: 100,
     ...overrides,
   }
 }

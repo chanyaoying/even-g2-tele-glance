@@ -6,6 +6,7 @@ import { backToMessages, DIDNT_CATCH_STATUS, UPDATING_STATUS } from './model'
 import type { AppInput, AppState, RecoverableState, ScreenModel } from './model'
 import { anchorMessageId, messageScrollUnitCount, nextMessageScrollOffset, offsetForAnchorMessage, screenModel, unreadScrollOffset } from './model'
 import { isTeleGlanceFixtureMode, logLifecycleEvent, logRecordingEvent, logStateWork, logTeleGlanceTest, nowMs } from '../testMode'
+import { debugLog, errorText } from '../debugLog'
 import { consumeInjectedAudioChunks } from '../fixtureApi'
 import type { Photo } from '../types'
 import type { PersistentCache } from '../cache/persistentCache'
@@ -420,7 +421,10 @@ export class TelegramAppController {
   }
 
   async dispatch(input: AppInput) {
-    if (input.type !== 'audioChunk') this.noteUserInput()
+    if (input.type !== 'audioChunk') {
+      this.noteUserInput()
+      debugLog('input', { type: input.type, screen: this.state.screen, focus: 'focus' in this.state ? this.state.focus : undefined })
+    }
     // Track swipe timing globally so the chat/topic-list auto-press path can suppress
     // selection-only events that the native list fires immediately after a scroll.
     if (input.type === 'swipeUp' || input.type === 'swipeDown') {
@@ -448,9 +452,10 @@ export class TelegramAppController {
     if (input.type === 'longPress' || input.type === 'longPressRelease') {
       const here = this.state
       const inMessages = here.screen === 'sidebar' && here.focus === 'messages'
-      if (!inMessages && here.screen !== 'sidebarRecording') return // hold gestures only mean something here
+      if (!inMessages && here.screen !== 'sidebarRecording') { debugLog('hold.ignored', { type: input.type, screen: here.screen }); return } // hold gestures only mean something here
       this.lastHoldEventAt = Date.now()
     } else if (input.type === 'press' && Date.now() - this.lastHoldEventAt < HOLD_PRESS_GUARD_MS && (this.state.screen === 'sidebarRecording' || (this.state.screen === 'sidebar' && this.state.focus === 'messages'))) {
+      debugLog('press.dropped-near-hold', { screen: this.state.screen })
       return // some firmware also reports a click around a hold; never let it start/stop a recording
     }
 
@@ -872,6 +877,7 @@ export class TelegramAppController {
       // Hold to record: start now, skipping the double-click wait.
       this.cancelPendingMessagePress()
       this.holdRecording = true
+      debugLog('hold.start', {})
       await this.startRecordingFromMessages(state, sidebarContext(state))
       return
     }
@@ -1024,6 +1030,12 @@ export class TelegramAppController {
     if (input.type === 'press' && !isTeleGlanceFixtureMode()) return // stop is by releasing the hold
     if (input.type !== 'press' && input.type !== 'longPressRelease') return
     this.holdRecording = false
+    debugLog('record.stop', {
+      via: input.type,
+      bytes: state.chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0),
+      chunks: state.chunks.length,
+      heldMs: Date.now() - state.startedAt,
+    })
     await this.setState({ ...backToMessages(state), screen: 'sidebarTranscribing' as const })
     if (isTeleGlanceFixtureMode()) {
       const total = state.chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0)
@@ -1033,6 +1045,7 @@ export class TelegramAppController {
     void this.bridge.setAudioEnabled(false).catch(() => undefined)
     const didntCatch = () => this.setState(backToMessages(state, { status: DIDNT_CATCH_STATUS }))
     if (!hasRecordableAudio(state.chunks)) {
+      debugLog('record.unusable', { chunks: state.chunks.length })
       if (isTeleGlanceFixtureMode()) logRecordingEvent('transcribe.end', { transcript: '', rejected: true })
       await didntCatch()
       return
@@ -1042,9 +1055,12 @@ export class TelegramAppController {
       await this.setState({ ...backToMessages(state), screen: 'sidebarTranscribing' as const })
       let transcript: string
       try {
+        const startedAt = Date.now()
         const result = await this.api.transcribe(wav, this.runtimeConfig.language)
         transcript = result.text.trim()
+        debugLog('transcribe', { ok: true, chars: transcript.length, durationMs: Date.now() - startedAt })
       } catch (error) {
+        debugLog('transcribe', { ok: false, error: errorText(error) })
         // The server rejects near-silent audio: that is "nothing heard", not a failure of the app.
         if (error instanceof Error && /silent/i.test(error.message)) {
           if (isTeleGlanceFixtureMode()) logRecordingEvent('transcribe.end', { transcript: '', rejected: true })
@@ -1103,7 +1119,7 @@ export class TelegramAppController {
         sent = await this.sendWithDuplicateCheck(state, state.transcript)
       } catch (error) {
         // Back to the thread with a short status; the duplicate guard keeps a retry from sending twice.
-        void error
+        debugLog('send', { ok: false, error: errorText(error) })
         await this.setState(backToMessages(state, { status: SEND_FAILED_STATUS }))
         return
       }
@@ -1147,6 +1163,7 @@ export class TelegramAppController {
     try {
       const sent = await this.api.sendMessage(thread.chat.id, { text, topicId: topicThreadId(thread.topic) })
       this.failedSend = undefined
+      debugLog('send', { ok: true, chars: text.length })
       return sent
     } catch (error) {
       this.failedSend = { key, startedAt }
@@ -1992,6 +2009,7 @@ export class TelegramAppController {
     try {
       await operation()
     } catch (error) {
+      debugLog('error-screen', { error: errorText(error), screen: this.state.screen })
       await this.bridge.setAudioEnabled(false).catch(() => undefined)
       this.errorRetry = retry
       await this.setState({
@@ -2014,6 +2032,7 @@ export class TelegramAppController {
   private async setState(state: AppState) {
     const finish = this.timeSyncWork('setState')
     const prev = this.state
+    if (prev.screen !== state.screen) debugLog('screen', { from: prev.screen, to: state.screen })
     this.applyState(state, true)
     // Partial updates may only change text content. A focus transition changes
     // which container captures input, so it requires a full page rebuild.

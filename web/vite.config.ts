@@ -12,6 +12,8 @@ type FixtureCommand =
   | { kind: 'setNextTranscript'; value: string | null }
   | { kind: 'setInjectedNotification'; chatId: string; message: string; topicId?: string | null }
   | { kind: 'injectAudioChunks'; pcmBase64: string }
+  | { kind: 'probeText'; body: string }
+  | { kind: 'probeMessage'; text: string; sender?: string; fontWidthPercent?: number }
   | { kind: 'reset' }
   | { kind: 'drainEvents' }
   | { kind: 'injectTyping'; chatId: string; topicId?: string | null; userName: string }

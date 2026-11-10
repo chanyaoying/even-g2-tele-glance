@@ -49,6 +49,8 @@ export type Message = {
   outgoing?: boolean
   /** "photo" or "sticker" when the message carries a picture the glasses can show inline. */
   media?: string | null
+  /** Join/leave/pin/title-change notice: `text` is a full sentence, shown as a divider row with no sender. */
+  service?: boolean
   /** Set locally on the oldest unread message when a thread is opened; drives the "last read" divider. */
   firstUnread?: boolean
   /** The message this one replies to (sender and a short preview of it). */

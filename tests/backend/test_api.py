@@ -476,3 +476,22 @@ async def test_updates_stream_cleans_up_when_the_client_goes_away(app, fake_serv
             pass
 
     await asyncio.wait_for(closed.wait(), timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_debug_events_are_appended_to_the_log_file(fake_services, tmp_path, monkeypatch):
+    log_path = tmp_path / "logs" / "debug-events.jsonl"
+    monkeypatch.setenv("DEBUG_LOG_PATH", str(log_path))
+    app = secure_test_app(fake_services)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/debug/events",
+            headers=auth_headers(json_body=True),
+            json=encrypted_json_body({"source": "even-hub", "buildVersion": "test", "raw": {"event": "send", "ok": False}, "mapped": None, "note": "send"}),
+        )
+
+    assert response.status_code == 200
+    lines = log_path.read_text().splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["raw"] == {"event": "send", "ok": False}

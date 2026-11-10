@@ -7,6 +7,7 @@ services:
     env_file: .env
     environment:
       HF_HOME: /models
+      DEBUG_LOG_PATH: /logs/debug-events.jsonl
     networks:
       - homelab
     ports:
@@ -15,6 +16,7 @@ services:
       - "127.0.0.1:${BACKEND_PORT:-8788}:8787"
     volumes:
       - whisper-models:/models
+      - ./logs:/logs
 
 networks:
   # The network Caddy lives on (homelab compose project).

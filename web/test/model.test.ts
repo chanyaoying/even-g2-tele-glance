@@ -699,7 +699,7 @@ describe('photo messages', () => {
   it('shows a photo inline between its neighbouring messages, leaving blank rows for the picture', () => {
     const messages: Message[] = [
       { id: '1', sender: 'Bob', text: 'before' },
-      photoMessage('2', 'look at this lovely sunset over the bay [photo]'),
+      photoMessage('2', 'look at this sunset [photo]'),
       { id: '3', sender: 'Bob', text: 'after' },
     ]
 
@@ -722,6 +722,40 @@ describe('photo messages', () => {
     expect(older.panelBody.split('\n')[0]).toContain('before')
 
     expect(sidebarAt(messages, 2).panelImage).toBeUndefined()
+  })
+
+  it('keeps a two-row caption and its picture on one page, without truncating anything', () => {
+    const caption = 'look at this lovely sunset over the bay near the old harbour wall'
+    const model = sidebarAt([photoMessage('1', `${caption} [photo]`)], 0)
+    const rows = model.panelBody.split('\n')
+    expect(rows.length).toBe(7)
+    expect(model.panelImage).toEqual({ chatId: '1', messageId: '1', topLine: 2 })
+    const text = rows.slice(0, 2).join(' ').replace(/\s+/g, ' ')
+    expect(text).toContain('harbour wall')
+    expect(text).toContain('[photo]')
+    expect(text).not.toContain('..')
+    expect(rows.slice(2).every((row) => row.trim() === '')).toBe(true)
+  })
+
+  it('reads a longer caption as text pages and shows the picture on the last page', () => {
+    const caption = Array.from({ length: 40 }, (_, i) => `word${i}`).join(' ')
+    const messages = [photoMessage('1', `${caption} [photo]`)]
+    const units = messageScrollUnitCount(messages)
+    expect(units).toBeGreaterThan(1)
+    const all: string[] = []
+    for (let offset = 0; offset < units; offset += 1) {
+      const model = sidebarAt(messages, offset)
+      all.push(model.panelBody)
+      expect(model.panelBody.split('\n').length).toBeLessThanOrEqual(7)
+      if (offset === 0) expect(model.panelImage).toEqual({ chatId: '1', messageId: '1', topLine: 2 })
+      else expect(model.panelImage).toBeUndefined() // earlier pages are plain text, 7 rows each
+    }
+    const newest = all[0].split('\n')
+    expect(newest.slice(2).every((row) => row.trim() === '')).toBe(true)
+    expect(newest[1]).toContain('[photo]')
+    const joined = all.join(' ')
+    for (let i = 0; i < 40; i += 1) expect(joined).toContain(`word${i}`)
+    expect(joined).not.toContain('..')
   })
 
   it('scrolls through photo pages one step at a time', () => {
@@ -826,5 +860,86 @@ describe('backToMessages and send errors', () => {
     const base = messageState([]) as Extract<AppState, { screen: 'sidebar'; focus: 'messages' }>
     const model = screenModel({ ...base, screen: 'sidebarConfirm', transcript: 'hello', selectedIndex: 0, sendError: 'Send failed: timeout' } as AppState)
     expect(JSON.stringify(model)).toContain('Send failed: timeout')
+  })
+})
+
+describe('emoji and service messages on the glasses', () => {
+  it('turns common emoji into text and the rest into [emoji]', async () => {
+    const { emojiToText } = await import('../src/controller/model')
+    expect(emojiToText('ok 👍')).toBe('ok :+1:')
+    expect(emojiToText('😂😂😂')).toBe(':joy: :joy: :joy:')
+    expect(emojiToText('🦄')).toBe('[emoji]')
+    expect(emojiToText('❤️')).toBe(':<3:')
+    expect(emojiToText('🦄🦄 hi')).toBe('[emoji] hi')
+    expect(emojiToText('👍🏽')).toBe(':+1:')
+    expect(emojiToText('plain text')).toBe('plain text')
+    expect(emojiToText('© 2026 ™')).toBe('© 2026 ™')
+  })
+
+  it('shows a service message as one divider row with the full sentence', () => {
+    const state = {
+      screen: 'sidebar', focus: 'messages', chats: [], selectedChatIndex: 0,
+      chat: { id: 1, title: 'G', kind: 'group', unreadCount: 0 }, topic: undefined, back: 'chats',
+      messages: [{ id: 1, sender: 'Alice', text: 'Alice added Bob', service: true }],
+      newerPages: [], isNewestPage: true, scrollOffset: 0,
+    } as unknown as AppState
+    const model = screenModel(state)
+    expect(model.kind === 'sidebar' ? model.panelBody : '').toContain('-- Alice added Bob --')
+  })
+})
+
+describe('message line width', () => {
+  it('wraps message rows at the configured width and restores', async () => {
+    const { setMessageRowChars } = await import('../src/controller/model')
+    const message: Message = { id: '1', sender: 'Alice', text: Array.from({ length: 30 }, (_, i) => `word${i}`).join(' ') }
+    const longest = (width: number) => {
+      setMessageRowChars(width)
+      const model = screenModel(messageState([message], 0))
+      if (model.kind !== 'sidebar') throw new Error('expected sidebar')
+      return Math.max(...model.panelBody.split('\n').map((row) => row.length))
+    }
+    try {
+      expect(longest(44)).toBeLessThanOrEqual(44)
+      const wide = longest(60)
+      expect(wide).toBeGreaterThan(44)
+      expect(wide).toBeLessThanOrEqual(60)
+    } finally {
+      setMessageRowChars(44)
+    }
+  })
+})
+
+describe('pixel-width wrapping', () => {
+  it('fills rows to the screen edge by measured glyph width, whatever the letters', async () => {
+    const { setGlassesFontWidthPercent, glassesTextWidthPx } = await import('../src/controller/model')
+    const narrow: Message = { id: '1', sender: 'Alice', text: Array.from({ length: 24 }, () => 'illit').join(' ') }
+    const wide: Message = { id: '2', sender: 'Alice', text: Array.from({ length: 12 }, () => 'WMWMW').join(' ') }
+    const rowsOf = (message: Message) => {
+      const model = screenModel(messageState([message], 0))
+      if (model.kind !== 'sidebar') throw new Error('expected sidebar')
+      return model.panelBody.split('\n')
+    }
+    try {
+      setGlassesFontWidthPercent(100)
+      for (const message of [narrow, wide]) {
+        const rows = rowsOf(message)
+        for (const row of rows) expect(glassesTextWidthPx(row)).toBeLessThanOrEqual(556)
+        for (const row of rows.slice(0, -1)) expect(glassesTextWidthPx(row)).toBeGreaterThan(556 * 0.8) // full rows
+      }
+      // narrow letters get many more characters per row than wide ones
+      expect(Math.max(...rowsOf(narrow).map((row) => row.length))).toBeGreaterThan(Math.max(...rowsOf(wide).map((row) => row.length)))
+      // a wider real font (correction 125%) wraps earlier
+      const before = rowsOf(narrow).length
+      setGlassesFontWidthPercent(125)
+      expect(rowsOf(narrow).length).toBeGreaterThanOrEqual(before)
+      for (const row of rowsOf(narrow)) expect(glassesTextWidthPx(row)).toBeLessThanOrEqual(556)
+    } finally {
+      setGlassesFontWidthPercent(undefined)
+    }
+  })
+
+  it('replaces the backtick, which the glasses font cannot draw', () => {
+    const model = screenModel(messageState([{ id: '1', sender: 'Al', text: 'use `npm test` now' }], 0))
+    expect(model.kind === 'sidebar' ? model.panelBody : '').toContain("'npm test'")
   })
 })

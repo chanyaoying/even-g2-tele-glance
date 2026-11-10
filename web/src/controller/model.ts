@@ -1,14 +1,62 @@
 import { isTeleGlanceFixtureMode } from '../testMode'
 import type { Chat, Id, Message, Topic } from '../types'
 import { getLocale } from '../locales'
+import { GLASSES_DEFAULT_GLYPH_WIDTH, GLASSES_GLYPH_WIDTHS, GLASSES_ROW_PITCH_PX } from '../glassesFont'
 
 const TEXT_CONTAINER_BYTE_LIMIT = 999
 const MESSAGE_ROW_BYTE_LIMIT = 120
-const MESSAGE_ROW_CHAR_LIMIT = 44
+/** Characters per message row in character mode (unit tests and the simulator fixture flow). */
+let MESSAGE_ROW_CHAR_LIMIT = 44
+/**
+ * Pixel mode (the real app): rows are wrapped by their measured width in the glasses font instead of by character
+ * count, so lines use the whole screen whatever the letters are. `fontScale` corrects the measured widths if the
+ * real glasses font turns out wider (>1) or narrower (<1) than the simulator's; undefined = character mode.
+ */
+const ROW_TEXT_WIDTH_PX = 556
+let fontScale: number | undefined
+export function setGlassesFontWidthPercent(percent: number | undefined) {
+  const next = percent === undefined ? undefined : Math.max(70, Math.min(150, Math.round(percent) || 100)) / 100
+  if (next === fontScale) return
+  fontScale = next
+  resetMessageCaches()
+}
+export function setMessageRowChars(chars: number) {
+  const next = Math.max(36, Math.min(80, Math.round(chars) || 44))
+  if (next === MESSAGE_ROW_CHAR_LIMIT) return
+  MESSAGE_ROW_CHAR_LIMIT = next
+  resetMessageCaches()
+}
+function resetMessageCaches() {
+  messagePageCache = new WeakMap()
+  messageBlocksCache = new WeakMap()
+  perMessageBlocks = new WeakMap()
+}
+/** Estimated width in px of `value` on the glasses (pixel mode), from the simulator-measured glyph advances. */
+export function glassesTextWidthPx(value: string): number {
+  let total = 0
+  for (const char of value) total += GLASSES_GLYPH_WIDTHS[char] ?? GLASSES_DEFAULT_GLYPH_WIDTH
+  return total * (fontScale ?? 1)
+}
+/** Whether `candidate` fits one row after a prefix that already takes `prefixPx`. */
+function rowFits(candidate: string, maxChars: number, maxBytes: number, prefixPx: number): boolean {
+  if (utf8ByteLength(candidate) > maxBytes) return false
+  if (fontScale === undefined) return candidate.length <= maxChars
+  return prefixPx + glassesTextWidthPx(candidate) <= ROW_TEXT_WIDTH_PX
+}
+/** Cut `value` to one row after a prefix of `prefixPx` (character mode: `maxChars` characters), ending in ".." if cut. */
+function clipToRow(value: string, maxChars: number, prefixPx: number): string {
+  if (rowFits(value, maxChars, Number.MAX_SAFE_INTEGER, prefixPx)) return value
+  let out = ''
+  for (const char of value) {
+    if (!rowFits(`${out}${char}..`, maxChars, Number.MAX_SAFE_INTEGER, prefixPx)) break
+    out += char
+  }
+  return `${out}..`
+}
 // A photo page puts the text in a narrow left column (about 282 px) and the picture on the right.
 const MESSAGE_VISIBLE_ROW_LIMIT = 7
 const encoder = new TextEncoder()
-const messagePageCache = new WeakMap<Message[], MessageDisplayPage[]>()
+let messagePageCache = new WeakMap<Message[], MessageDisplayPage[]>()
 
 /**
  * One user-visible input gesture. `eventSource` carries the raw
@@ -58,7 +106,8 @@ export type PanelImage = {
 export const INLINE_IMAGE_GAP_ROWS = 5
 export const INLINE_IMAGE_HEIGHT = 120
 export const INLINE_IMAGE_WIDTH = 288
-export const MESSAGE_ROW_HEIGHT_PX = 26
+/** Measured in the simulator's glasses framebuffer (the probe in scripts/simulator-flow.mjs); the real glasses are unverified. */
+export const MESSAGE_ROW_HEIGHT_PX = GLASSES_ROW_PITCH_PX
 
 /** A dialog drawn over the page (a bordered container stacked above everything else). */
 export type PopupOverlay = {
@@ -378,7 +427,6 @@ export function screenModel(state: AppState): ScreenModel {
   }
 }
 const CHAT_LIST_VISIBLE_ROWS = 7
-const CHAT_LIST_ROW_CHARS = 44
 
 function formatFullWidthChatList(labels: string[], selected: number): string {
   if (labels.length === 0) return ' '
@@ -386,7 +434,7 @@ function formatFullWidthChatList(labels: string[], selected: number): string {
   const start = Math.max(0, Math.min(clamped - Math.floor(CHAT_LIST_VISIBLE_ROWS / 2), labels.length - CHAT_LIST_VISIBLE_ROWS))
   const body = labels
     .slice(start, start + CHAT_LIST_VISIBLE_ROWS)
-    .map((label, i) => `${start + i === clamped ? '> ' : '  '}${label.slice(0, CHAT_LIST_ROW_CHARS)}`)
+    .map((label, i) => `${start + i === clamped ? '> ' : '  '}${clipToRow(label, MESSAGE_ROW_CHAR_LIMIT - 2, glassesTextWidthPx('> '))}`)
     .join('\n')
   return trimUtf8Bytes(body, TEXT_CONTAINER_BYTE_LIMIT)
 }
@@ -592,10 +640,10 @@ type MessageDisplayPage = {
   boxPartCount?: number
 }
 
-const messageBlocksCache = new WeakMap<Message[], MessageDisplayBlock[]>()
+let messageBlocksCache = new WeakMap<Message[], MessageDisplayBlock[]>()
 // Formatting one message is pure in (message, day label, locale), so keep the result with the message
 // object: loading an older page then only formats the new messages, not the whole loaded thread again.
-const perMessageBlocks = new WeakMap<Message, { locale: unknown; byDay: Map<string, MessageDisplayBlock[]> }>()
+let perMessageBlocks = new WeakMap<Message, { locale: unknown; byDay: Map<string, MessageDisplayBlock[]> }>()
 
 function blocksForMessage(message: Message, dayLabel: string): MessageDisplayBlock[] {
   const locale = getLocale()
@@ -680,15 +728,34 @@ function formatMessageBlocks(message: Message, dayLabel = ''): MessageDisplayBlo
   const sender = sanitizeGlassesText(message.outgoing ? l.senderMe : message.sender || l.senderUnknown)
   const text = sanitizeGlassesText(message.text || '').trim() || l.messageUnsupported
   const time = formatMessageTime(message.sentAt)
+  if (message.service) {
+    // Join/leave/pin notices: one centred-looking divider row with the full sentence, no sender or time.
+    const rows = splitDisplayWordRows(text, MESSAGE_ROW_CHAR_LIMIT - 6, MESSAGE_ROW_BYTE_LIMIT - 6, glassesTextWidthPx('-- ') + glassesTextWidthPx(' --'))
+      .map((row, index, all) => (all.length === 1 ? `-- ${row} --` : index === 0 ? `-- ${row}` : `   ${row}`))
+    if (dayLabel) rows.unshift(`----- ${dayLabel} -----`)
+    return [{ text: rows.slice(0, MESSAGE_VISIBLE_ROW_LIMIT).join('\n') }]
+  }
   const before = messageHeaderRows(message)
   if (message.media === 'photo' || message.media === 'sticker') {
-    // The picture flows with the conversation: one heading row, then blank rows the picture container covers.
-    const heading = inlineImageHeading(`${time ? `${time} ` : ''}${sender}: `, text)
-    const rows = [heading, ...Array.from({ length: INLINE_IMAGE_GAP_ROWS }, () => ' ')]
-    // A page holds 7 rows: day divider + heading + gap already fills it, so the extra header row only fits without one.
-    if (!dayLabel && before.length > 0) rows.unshift(before[0])
-    if (dayLabel) rows.unshift(`----- ${dayLabel} -----`)
-    return [{ text: rows.join('\n'), imageMessageId: String(message.id), imageGapLine: rows.length - INLINE_IMAGE_GAP_ROWS }]
+    // The picture flows with the conversation. A page holds 7 rows and the picture needs 5 blank ones, so only 2 text
+    // rows fit beside it. The whole caption is kept: the caption reads as ordinary text pages and the picture appears
+    // on the last page, beside the final 2 caption rows (a short caption is just one page with its picture).
+    const captionRows = formatCompactMessageRows(time ? `${time} ${sender}` : sender, text)
+    const lead: string[] = []
+    if (dayLabel) lead.push(`----- ${dayLabel} -----`)
+    else if (before.length > 0) lead.push(before[0])
+    const allRows = [...lead, ...captionRows]
+    const beside = MESSAGE_VISIBLE_ROW_LIMIT - INLINE_IMAGE_GAP_ROWS
+    // Never leave a lone divider/header row on a page of its own: keep one more caption row with it.
+    const keep = allRows.length <= beside ? allRows.length : allRows.length - beside <= lead.length ? allRows.length - lead.length - 1 : beside
+    const textRows = allRows.slice(0, allRows.length - keep)
+    const pictureRows = [...allRows.slice(allRows.length - keep), ...Array.from({ length: INLINE_IMAGE_GAP_ROWS }, () => ' ')]
+    const blocks: MessageDisplayBlock[] = []
+    for (let start = 0; start < textRows.length; start += MESSAGE_VISIBLE_ROW_LIMIT) {
+      blocks.push({ text: textRows.slice(start, start + MESSAGE_VISIBLE_ROW_LIMIT).join('\n') })
+    }
+    blocks.push({ text: pictureRows.join('\n'), imageMessageId: String(message.id), imageGapLine: pictureRows.length - INLINE_IMAGE_GAP_ROWS })
+    return blocks
   }
 
   const rows = formatCompactMessageRows(time ? `${time} ${sender}` : sender, message.poll ? `Poll: ${text}` : text)
@@ -709,8 +776,7 @@ function formatMessageBlocks(message: Message, dayLabel = ''): MessageDisplayBlo
 
 function clipRow(value: string, indent = ''): string {
   const clean = sanitizeGlassesText(value).replace(/\s+/g, ' ').trim()
-  const room = MESSAGE_ROW_CHAR_LIMIT - indent.length
-  return indent + (clean.length <= room ? clean : `${clean.slice(0, Math.max(0, room - 2))}..`)
+  return indent + clipToRow(clean, MESSAGE_ROW_CHAR_LIMIT - indent.length, glassesTextWidthPx(indent))
 }
 
 /** "Fwd: Bob" and "> Alice: quoted text" rows shown above a message (each exactly one row). */
@@ -750,7 +816,7 @@ function pollRows(poll: NonNullable<Message['poll']>, room: number): string[] {
     const suffix = option.percent != null ? ` ${option.percent}%` : ''
     const room = MESSAGE_ROW_CHAR_LIMIT - 2 - mark.length - 1 - suffix.length
     const label = sanitizeGlassesText(option.text).replace(/\s+/g, ' ').trim()
-    const clipped = label.length <= room ? label : `${label.slice(0, Math.max(0, room - 2))}..`
+    const clipped = clipToRow(label, room, glassesTextWidthPx(`  ${mark} ${suffix}`))
     return `  ${mark} ${clipped}${suffix}`
   })
   if (shown.length < poll.options.length) rows.push(`  +${poll.options.length - shown.length} more`)
@@ -792,29 +858,51 @@ export function formatDayLabel(sentAt: string | null | undefined, now: Date = ne
 }
 
 /** One row: "14:32 Alice: caption [photo]", shortening the caption (never the [photo]/[sticker] tag) to fit. */
-function inlineImageHeading(prefix: string, text: string): string {
-  const match = text.match(/^([\s\S]*?)\s*(\[(?:photo|sticker)\])$/)
-  const caption = (match ? match[1] : text).trim()
-  const tag = match ? match[2] : ''
-  const room = MESSAGE_ROW_CHAR_LIMIT - prefix.length - (tag ? tag.length + 1 : 0)
-  const shown = caption.length <= room ? caption : room > 2 ? `${caption.slice(0, room - 2)}..` : ''
-  return [`${prefix}${shown}`.trimEnd(), tag].filter(Boolean).join(' ').slice(0, MESSAGE_ROW_CHAR_LIMIT)
-}
-
 function formatCompactMessageRows(sender: string, text: string) {
   const firstPrefix = `${sender}: `
   const firstRows = splitDisplayWordRows(
     text,
     Math.max(1, MESSAGE_ROW_CHAR_LIMIT - firstPrefix.length),
     Math.max(1, MESSAGE_ROW_BYTE_LIMIT - utf8ByteLength(firstPrefix)),
+    glassesTextWidthPx(firstPrefix),
   )
   const [firstRow = '', ...rest] = firstRows
   const rows = [`${firstPrefix}${firstRow}`]
   for (const row of rest) {
-    rows.push(...splitDisplayWordRows(row, MESSAGE_ROW_CHAR_LIMIT - 2, MESSAGE_ROW_BYTE_LIMIT - 2).map((part) => `  ${part}`))
+    rows.push(...splitDisplayWordRows(row, MESSAGE_ROW_CHAR_LIMIT - 2, MESSAGE_ROW_BYTE_LIMIT - 2, glassesTextWidthPx('  ')).map((part) => `  ${part}`))
   }
   return rows
 }
+/**
+ * The glasses font has no emoji. Common ones become a short text equivalent (":+1:", ":<3:"), every other one
+ * becomes "[emoji]" (a run of them collapses to one), so a message is never blank or silently missing something.
+ */
+const EMOJI_TEXT: Record<string, string> = {
+  '😀': 'grin', '😃': 'grin', '😄': 'grin', '😁': 'grin', '😆': 'laugh', '😂': 'joy', '🤣': 'rofl', '😊': 'smile', '🙂': 'smile', '😉': 'wink',
+  '😍': 'heart_eyes', '🥰': 'love', '😘': 'kiss', '😎': 'cool', '🤔': 'thinking', '😐': 'neutral', '😢': 'cry', '😭': 'sob', '😞': 'sad', '🙁': 'sad', '☹': 'sad',
+  '😡': 'angry', '😠': 'angry', '😮': 'open_mouth', '😱': 'scream', '😴': 'zzz', '😅': 'sweat_smile', '🙃': 'upside_down', '😜': 'wink_tongue', '😛': 'tongue', '🤗': 'hug',
+  '👍': '+1', '👎': '-1', '👌': 'ok', '🙏': 'pray', '👏': 'clap', '🙌': 'raised_hands', '💪': 'muscle', '👋': 'wave', '✌': 'peace',
+  '❤': '<3', '♥': '<3', '💕': '<3', '💖': '<3', '💗': '<3', '💙': '<3', '💚': '<3', '💛': '<3', '🧡': '<3', '💜': '<3', '🖤': '<3', '💔': '</3',
+  '🔥': 'fire', '✨': 'sparkles', '⭐': 'star', '🌟': 'star', '🎉': 'tada', '🎂': 'cake', '💯': '100', '✅': 'check', '✔': 'check',
+  '❌': 'x', '❎': 'x', '👀': 'eyes', '🤝': 'handshake', '☀': 'sun', '🌙': 'moon', '☕': 'coffee', '🍕': 'pizza', '🍺': 'beer', '🎁': 'gift',
+  '😳': 'flushed', '🤦': 'facepalm', '🤷': 'shrug', '😇': 'angel', '😈': 'devil', '🤩': 'star_struck', '🥳': 'party', '🤞': 'crossed_fingers',
+}
+const EMOJI_RE = /(?:\p{Extended_Pictographic}|\p{Regional_Indicator})(?:\ufe0f|\u{1f3fb}-\u{1f3ff}|[\u{1f3fb}-\u{1f3ff}])*(?:\u200d(?:\p{Extended_Pictographic})(?:\ufe0f|[\u{1f3fb}-\u{1f3ff}])*)*/gu
+
+export function emojiToText(value: string): string {
+  let sawEmoji = false
+  const replaced = value.replace(EMOJI_RE, (match) => {
+    const base = Array.from(match)[0] ?? ''
+    // (c), (r), (tm) and similar old symbols are pictographic too but are ordinary text.
+    if ((base.codePointAt(0) ?? 0) < 0x2300) return match
+    sawEmoji = true
+    const name = EMOJI_TEXT[base]
+    return ` ${name ? `:${name}:` : '[emoji]'} `
+  })
+  if (!sawEmoji) return value
+  return replaced.replace(/(\[emoji\]\s*){2,}/g, '[emoji] ').replace(/[ \t]{2,}/g, ' ').replace(/^ | $/g, '')
+}
+
 function sanitizeGlassesText(value: string) {
   const l = getLocale()
   let result = value
@@ -824,8 +912,10 @@ function sanitizeGlassesText(value: string) {
     // Heavy exclamation (U+2757) and warning sign (U+26A0) emit LVGL `glyph dsc. not found`
     // warnings on the Even Hub simulator. Strip them rather than render unsupported glyphs.
     .replace(/[\u{2757}\u{26a0}]/gu, '')
-    .replace(/[\u{1f000}-\u{1faff}]/gu, '')
+  result = emojiToText(result)
     .replace(/\ufe0f/g, '')
+    // The glasses font has no backtick (LVGL: glyph not found), so use the apostrophe.
+    .replace(/`/g, "'")
   // CJK character set stripping — the Even Hub firmware only supports basic Latin
   // glyphs. UI strings are already in Rōmaji/Romaja/Pīnyīn for ja/ko/zh locales,
   // but Telegram message content and chat/topic names may still carry CJK characters
@@ -904,7 +994,7 @@ function trimUtf8Bytes(value: string, maxBytes: number) {
   return `${output}${suffix}`
 }
 
-function splitDisplayRows(value: string, prefix: string, maxChars = MESSAGE_ROW_CHAR_LIMIT, maxBytes = MESSAGE_ROW_BYTE_LIMIT) {
+function splitDisplayRows(value: string, prefix: string, maxChars = MESSAGE_ROW_CHAR_LIMIT, maxBytes = MESSAGE_ROW_BYTE_LIMIT, prefixPx = 0) {
   if (value.length === 0) return ['']
   const chunks: string[] = []
   let chunk = ''
@@ -912,7 +1002,7 @@ function splitDisplayRows(value: string, prefix: string, maxChars = MESSAGE_ROW_
   const charLimit = Math.max(1, maxChars - prefix.length)
   for (const char of value) {
     const candidate = chunk + char
-    if (chunk.length > 0 && (candidate.length > charLimit || utf8ByteLength(candidate) > byteLimit)) {
+    if (chunk.length > 0 && !rowFits(candidate, charLimit, byteLimit, prefixPx)) {
       chunks.push(chunk)
       chunk = char
       continue
@@ -923,36 +1013,32 @@ function splitDisplayRows(value: string, prefix: string, maxChars = MESSAGE_ROW_
   return chunks
 }
 
-function splitDisplayWordRows(value: string, maxChars: number, maxBytes: number) {
+function splitDisplayWordRows(value: string, maxChars: number, maxBytes: number, prefixPx = 0) {
   const words = value.trim().split(/\s+/).filter(Boolean)
   if (words.length === 0) return ['']
   const rows: string[] = []
   let row = ''
+  const startRowWith = (word: string) => {
+    if (rowFits(word, maxChars, maxBytes, prefixPx)) {
+      row = word
+      return
+    }
+    const chunks = splitDisplayRows(word, '', maxChars, maxBytes, prefixPx)
+    rows.push(...chunks.slice(0, -1))
+    row = chunks[chunks.length - 1] ?? ''
+  }
   for (const word of words) {
     if (row.length === 0) {
-      if (word.length <= maxChars && utf8ByteLength(word) <= maxBytes) {
-        row = word
-      } else {
-        const chunks = splitDisplayRows(word, '', maxChars, maxBytes)
-        rows.push(...chunks.slice(0, -1))
-        row = chunks[chunks.length - 1] ?? ''
-      }
+      startRowWith(word)
       continue
     }
-
     const candidate = `${row} ${word}`
-    if (candidate.length <= maxChars && utf8ByteLength(candidate) <= maxBytes) {
+    if (rowFits(candidate, maxChars, maxBytes, prefixPx)) {
       row = candidate
       continue
     }
     rows.push(row)
-    if (word.length <= maxChars && utf8ByteLength(word) <= maxBytes) {
-      row = word
-    } else {
-      const chunks = splitDisplayRows(word, '', maxChars, maxBytes)
-      rows.push(...chunks.slice(0, -1))
-      row = chunks[chunks.length - 1] ?? ''
-    }
+    startRowWith(word)
   }
   if (row.length > 0) rows.push(row)
   return rows

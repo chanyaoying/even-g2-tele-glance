@@ -100,6 +100,7 @@ class MessageSummary(ApiModel):
     text: str
     sent_at: Optional[datetime] = None
     outgoing: bool = False
+    service: bool = False  # join/leave/pin/title-change notices; text is a full sentence
     media: Optional[str] = None  # "photo" or "sticker" when the message carries a picture the glasses can show
     reply_to: Optional[ReplyInfo] = None
     forwarded_from: Optional[str] = None

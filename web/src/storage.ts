@@ -4,6 +4,7 @@ const DEBUG_EVENTS_STORAGE_KEY = 'teleGlance.debugEventsEnabled'
 const CHAT_POLL_STORAGE_KEY = 'teleGlance.chatPollMs'
 const MESSAGE_POLL_STORAGE_KEY = 'teleGlance.messagePollMs'
 const RECORDING_MIN_STORAGE_KEY = 'teleGlance.recordingMinDurationMs'
+const FONT_WIDTH_STORAGE_KEY = 'teleGlance.fontWidthPercent'
 const STT_BASE_URL_STORAGE_KEY = 'teleGlance.sttBaseUrl'
 const LANGUAGE_STORAGE_KEY = 'teleGlance.language'
 const BACKEND_SHARED_SECRET_STORAGE_KEY = 'teleGlance.backendSharedSecret'
@@ -37,6 +38,8 @@ export type FrontendConfig = {
   chatPollMs: number
   messagePollMs: number
   recordingMinDurationMs: number
+  /** Correction (%) to the measured glasses font width: raise if lines wrap twice on the glasses, lower if they stop short. */
+  fontWidthPercent: number
   sttBaseUrl: string
   backendSharedSecret: string
 }
@@ -55,6 +58,7 @@ export const DEFAULT_FRONTEND_CONFIG: Omit<FrontendConfig, 'apiBaseUrl'> = {
   chatPollMs: 10000,
   messagePollMs: 8000,
   recordingMinDurationMs: 900,
+  fontWidthPercent: 100,
   sttBaseUrl: '',
   backendSharedSecret: '',
 }
@@ -70,6 +74,7 @@ export function loadFrontendConfig(): FrontendConfig {
     chatPollMs: readNumber(CHAT_POLL_STORAGE_KEY, DEFAULT_FRONTEND_CONFIG.chatPollMs, 1000, 60000, G2_TELE_CHAT_POLL_STORAGE_KEY, LEGACY_CHAT_POLL_STORAGE_KEY),
     messagePollMs: readNumber(MESSAGE_POLL_STORAGE_KEY, DEFAULT_FRONTEND_CONFIG.messagePollMs, 1000, 60000, G2_TELE_MESSAGE_POLL_STORAGE_KEY, LEGACY_MESSAGE_POLL_STORAGE_KEY),
     recordingMinDurationMs: readNumber(RECORDING_MIN_STORAGE_KEY, DEFAULT_FRONTEND_CONFIG.recordingMinDurationMs, 0, 5000, G2_TELE_RECORDING_MIN_STORAGE_KEY, LEGACY_RECORDING_MIN_STORAGE_KEY),
+    fontWidthPercent: readNumber(FONT_WIDTH_STORAGE_KEY, DEFAULT_FRONTEND_CONFIG.fontWidthPercent, 70, 150),
     sttBaseUrl: readString(STT_BASE_URL_STORAGE_KEY, G2_TELE_STT_BASE_URL_STORAGE_KEY),
     backendSharedSecret: readSensitiveString(BACKEND_SHARED_SECRET_STORAGE_KEY, G2_TELE_BACKEND_SHARED_SECRET_STORAGE_KEY),
   }
@@ -105,6 +110,7 @@ export function saveFrontendConfig(config: FrontendConfig) {
   safeLsSetItem(CHAT_POLL_STORAGE_KEY, String(normalized.chatPollMs))
   safeLsSetItem(MESSAGE_POLL_STORAGE_KEY, String(normalized.messagePollMs))
   safeLsSetItem(RECORDING_MIN_STORAGE_KEY, String(normalized.recordingMinDurationMs))
+  safeLsSetItem(FONT_WIDTH_STORAGE_KEY, String(normalized.fontWidthPercent))
   writeString(STT_BASE_URL_STORAGE_KEY, normalized.sttBaseUrl)
   writeSensitiveString(BACKEND_SHARED_SECRET_STORAGE_KEY, normalized.backendSharedSecret)
 }
@@ -138,6 +144,7 @@ export function resetFrontendConfig() {
   safeLsRemoveItem(CHAT_POLL_STORAGE_KEY)
   safeLsRemoveItem(MESSAGE_POLL_STORAGE_KEY)
   safeLsRemoveItem(RECORDING_MIN_STORAGE_KEY)
+  safeLsRemoveItem(FONT_WIDTH_STORAGE_KEY)
   safeLsRemoveItem(STT_BASE_URL_STORAGE_KEY)
   safeLsRemoveItem(BACKEND_SHARED_SECRET_STORAGE_KEY)
   safeLsRemoveItem(G2_TELE_TELEGRAM_API_ID_STORAGE_KEY)
@@ -277,6 +284,7 @@ function normalizeConfig(config: FrontendConfig): FrontendConfig {
     chatPollMs: clamp(numberValue(config.chatPollMs), 1000, 60000),
     messagePollMs: clamp(numberValue(config.messagePollMs), 1000, 60000),
     recordingMinDurationMs: clamp(numberValue(config.recordingMinDurationMs), 0, 5000),
+    fontWidthPercent: clamp(numberValue(config.fontWidthPercent) || DEFAULT_FRONTEND_CONFIG.fontWidthPercent, 70, 150),
     sttBaseUrl: stringValue(config.sttBaseUrl),
     backendSharedSecret: stringValue(config.backendSharedSecret),
   }

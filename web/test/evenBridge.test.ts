@@ -402,6 +402,35 @@ describe('EvenHubGlassesBridge', () => {
     expect(JSON.stringify(rebuilds[0])).toContain('event-overlay') // then the interactive layout
   })
 
+  it('shows a Fetching chats footer and scrolls the stored list while the interactive layout is still being sent', async () => {
+    const startup: unknown[] = []
+    const upgrades: Array<{ containerName?: string; content?: string }> = []
+    const answers: Array<(accepted: boolean) => void> = []
+    const bridge = new EvenHubGlassesBridge({
+      async createStartUpPageContainer(container: unknown) { startup.push(container); return 0 },
+      rebuildPageContainer() { return new Promise<boolean>((resolve) => answers.push(resolve)) },
+      async textContainerUpgrade(update: { containerName?: string; content?: string }) { upgrades.push(update); return true },
+      async audioControl() { return undefined },
+      onEvenHubEvent() { return undefined },
+    } as never)
+    const model = (selected: number) => ({
+      kind: 'sidebar' as const, title: 'Chats', focus: 'sidebar' as const, sidebarTitle: 'Chats', sidebarItems: ['Alice', 'Bob'], sidebarSelected: selected,
+      panelTitle: '', panelBody: selected === 0 ? '> Alice\n  Bob' : '  Alice\n> Bob', panelFooter: 'Swipe',
+    })
+    await bridge.render(model(0))
+    await flushAsync(10)
+    expect(JSON.stringify(startup[0])).toContain('Fetching chats...')
+
+    // The rebuild is in flight (unanswered): a swipe must not be lost.
+    await bridge.renderSidebarPanel(model(1))
+    expect(upgrades).toHaveLength(0)
+    answers[0](true)
+    await flushAsync(10)
+    // After the layout lands, the newer selection is applied to it.
+    await flushAsync(200)
+    expect(upgrades.some((update) => update.content?.includes('> Bob'))).toBe(true)
+  })
+
   it('reports the page as settled only once the rebuild in flight has been answered', async () => {
     const answers: Array<(accepted: boolean) => void> = []
     const bridge = new EvenHubGlassesBridge({
@@ -634,9 +663,11 @@ describe('EvenHubGlassesBridge photos', () => {
     })
 
     const first = bridge.updateImage(new Uint8Array([1]))
+    await flushAsync(1)
+    expect(sent).toEqual([[1]])
     bridge.updateImage(new Uint8Array([2]))
     const last = bridge.updateImage(new Uint8Array([3]))
-    expect(sent).toEqual([[1]]) // the second transfer waits for the first
+    expect(sent).toEqual([[1]]) // the next transfer waits for the first
 
     release('success')
     await flushAsync(5)
@@ -645,6 +676,34 @@ describe('EvenHubGlassesBridge photos', () => {
 
     expect(sent).toEqual([[1], [3]]) // [2] was superseded before it was sent
   })
+
+  it('retries a timed-out rebuild with the same layout instead of stepping down', async () => {
+    const pages: unknown[] = []
+    let calls = 0
+    const bridge = new EvenHubGlassesBridge({
+      async createStartUpPageContainer() { return 0 },
+      async rebuildPageContainer(container: unknown) {
+        pages.push(container)
+        calls += 1
+        if (calls === 1) await new Promise((resolve) => setTimeout(resolve, 1600)) // host timed out ...
+        return calls !== 1 // ... and answered "refused"
+      },
+      async textContainerUpgrade() { return true },
+      async audioControl() { return undefined },
+      onEvenHubEvent() { return undefined },
+    } as never)
+    skipTextBootstrap(bridge)
+    const model = {
+      kind: 'sidebar' as const, title: 'T', focus: 'panel' as const, sidebarTitle: 'S', sidebarItems: ['a'], sidebarSelected: 0,
+      panelTitle: '', panelBody: 'body', panelFooter: 'f', popup: { title: 'Confirm', body: 'Send?' },
+    }
+    await bridge.render(model) // startup call
+    await bridge.render(model) // rebuild that times out
+    await flushAsync(1700)
+    await flushAsync(1200)
+    expect(calls).toBe(2)
+    expect((bridge as unknown as { layoutTier: number }).layoutTier).toBe(0)
+  }, 10000)
 
   it('reports whether the glasses accepted the image', async () => {
     const { bridge } = makeBridge({ updateImageRawData: vi.fn(async () => 'imageToGray4Failed') })

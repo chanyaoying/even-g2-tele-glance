@@ -15,6 +15,7 @@ import type {
   TelegramTypingUpdate,
   TranscriptionResult,
 } from './types'
+import { debugLog, errorText } from './debugLog'
 import { decryptJsonPayload, encryptedTelegramAuthHeader, encryptJsonPayload } from './secureAuth'
 
 export type ListChatsOptions = { offset?: number; folderId?: Id }
@@ -88,6 +89,8 @@ const SEND_REQUEST_TIMEOUT_MS = 20_000
 const TRANSCRIBE_REQUEST_TIMEOUT_MS = 60_000
 
 /** Short message (fits the glasses) in `message`; the full technical text for the phone UI is in `detail`. */
+const SLOW_REQUEST_MS = 3000
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -244,9 +247,11 @@ export class HttpTelegramApi implements TelegramApi {
           connections += 1
           // A reconnect may have missed events while it was down, so let the caller catch up.
           if (connections > 1) onReconnect?.()
+          debugLog('stream.open', { connections })
         })
       } catch (error) {
         if (signal.aborted) return
+        debugLog('stream.error', { error: errorText(error), upMs: Date.now() - startedAt })
         if (isUnrecoverableStreamError(error)) {
           onError?.(error instanceof Error ? error : new Error('Update stream failed'))
           return
@@ -310,6 +315,19 @@ export class HttpTelegramApi implements TelegramApi {
   }
 
   private async request<T>(path: string, init: RequestInit, baseUrl = this.baseUrl, includeTelegramAuth = true): Promise<T> {
+    const startedAt = Date.now()
+    try {
+      const result = await this.requestInner<T>(path, init, baseUrl, includeTelegramAuth)
+      const durationMs = Date.now() - startedAt
+      if (durationMs >= SLOW_REQUEST_MS) debugLog('api.slow', { method: init.method ?? 'GET', path: path.split('?')[0], durationMs })
+      return result
+    } catch (error) {
+      debugLog('api.error', { method: init.method ?? 'GET', path: path.split('?')[0], durationMs: Date.now() - startedAt, error: errorText(error) })
+      throw error
+    }
+  }
+
+  private async requestInner<T>(path: string, init: RequestInit, baseUrl = this.baseUrl, includeTelegramAuth = true): Promise<T> {
     const ownBackend = baseUrl === this.baseUrl
     if (ownBackend) this.assertBackendNotBackedOff(path)
     const headers = await this.withTelegramHeaders(init.headers, includeTelegramAuth)

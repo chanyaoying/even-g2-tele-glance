@@ -4,6 +4,8 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import json
 import logging
+import logging.handlers
+import os
 import time
 from typing import Optional
 
@@ -44,6 +46,24 @@ STREAM_KEEPALIVE_SECONDS = 15.0
 timing_logger = logging.getLogger("uvicorn.error")
 
 
+def _debug_file_logger() -> Optional[logging.Logger]:
+    """Append every phone debug event to a rotating JSONL file (DEBUG_LOG_PATH; unset or unwritable = off)."""
+    path = os.environ.get("DEBUG_LOG_PATH", "").strip()
+    if not path:
+        return None
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        handler = logging.handlers.RotatingFileHandler(path, maxBytes=5_000_000, backupCount=3, encoding="utf-8")
+    except OSError:
+        return None
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger = logging.getLogger("teleglance.debug-events")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    logger.handlers = [handler]
+    return logger
+
+
 def raise_telegram_http_error(exc: Exception) -> None:
     if isinstance(exc, TelegramSessionExpiredError):
         raise HTTPException(status_code=401, detail=str(exc)) from exc
@@ -65,6 +85,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
     api = FastAPI(title="TeleGlance Backend", lifespan=lifespan)
     debug_events: deque[dict] = deque(maxlen=100)
+    debug_file_logger = _debug_file_logger()
     api.add_middleware(
         CORSMiddleware,
         allow_origins=app_settings.backend_cors_origins,
@@ -136,6 +157,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             # Timing notes from the phone (picture transfer, page rebuild) also go to the log for easy reading.
             timing_logger.info("debug-note %s", event.get("raw"))
         debug_events.append(event)
+        if debug_file_logger is not None:
+            debug_file_logger.info(json.dumps(event, default=str, separators=(",", ":")))
         return {"count": len(debug_events)}
 
     @api.get("/api/debug/events", dependencies=[Depends(require_app_backend_auth)])

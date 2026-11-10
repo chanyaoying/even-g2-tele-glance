@@ -10,7 +10,7 @@ from typing import Any, AsyncIterator, Literal, Optional, Protocol, Union
 
 from app.config import Settings
 from app.services.imaging import ImagingError, prepare_glasses_image
-from app.services.message_content import forwarded_from, link_info, media_label, poll_info, reply_preview, reply_target_id, rich_text
+from app.services.message_content import forwarded_from, link_info, media_label, poll_info, reply_preview, reply_target_id, rich_text, service_text
 from app.models import (
     ChatSummary,
     FolderSummary,
@@ -291,7 +291,10 @@ def normalize_message(message: Any, entities_by_peer: Optional[dict[int, Any]] =
     media = "photo" if _is_photo_message(message) else "sticker" if _is_sticker_message(message) else None
     poll = poll_info(message)
     link = link_info(message)
-    if media == "photo":
+    service = getattr(message, "action", None) is not None and not (getattr(message, "message", None) or "")
+    if service:
+        text = service_text(message, sender_name)
+    elif media == "photo":
         text = _photo_text(message)
     elif media == "sticker":
         text = "[sticker]"
@@ -306,6 +309,7 @@ def normalize_message(message: Any, entities_by_peer: Optional[dict[int, Any]] =
         sent_at=getattr(message, "date", None),
         outgoing=bool(getattr(message, "out", False)),
         media=media,
+        service=service,
         forwarded_from=forwarded_from(message),
         poll=poll,
         link=link,
@@ -431,8 +435,9 @@ def _photo_text(message: Any) -> str:
 def _message_readable_text(message: Any) -> str:
     text = str(getattr(message, "message", None) or getattr(message, "raw_text", None) or "").strip() or rich_text(message)
     label = media_label(message)
-    if label is None and getattr(message, "action", None) is not None:
-        label = "[service]"
+    if label is None and not text and getattr(message, "action", None) is not None:
+        sender = getattr(message, "sender", None)
+        return service_text(message, _display_name(sender) if sender is not None else None)
     if label is None:
         return text
     return f"{text} {label}" if text else label

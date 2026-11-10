@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { effectiveBackendSharedSecret, HttpTelegramApi, type ConnectionTestResult, type TelegramApi } from '../api'
 import { EvenHubGlassesBridge } from '../bridge/evenBridge'
 import { TelegramAppController, type ControllerRuntimeConfig, type GlassesBridge } from '../controller/appController'
+import { screenModel, setGlassesFontWidthPercent } from '../controller/model'
 import type { AppInput, AppState, ScreenModel } from '../controller/model'
 import { FixtureTelegramApi, bindFixtureApi, bindFixtureCommandHandler, setFixtureLocale } from '../fixtureApi'
 import { InstrumentedTelegramApi } from '../instrumentedApi'
@@ -82,6 +83,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         settingsRef.current = restoredSettings
         setSettings(restoredSettings)
         setLocale(localeFromCode(restoredSettings.language))
+        // The real app wraps by measured glyph width; the simulator fixture flow keeps character wrapping (goldens).
+        if (!fixtureMode) setGlassesFontWidthPercent(restoredSettings.fontWidthPercent)
         if (!fixtureMode) {
           saveFrontendConfig(restoredSettings)
           // Not awaited: the settings were just read from this same storage, so the first screen need not wait for the write.
@@ -144,6 +147,27 @@ export function AppProvider({ children }: { children: ReactNode }) {
             if (command.kind === 'reinitialize') {
               await createdController.init()
             }
+            if (command.kind === 'probeText' || command.kind === 'probeMessage') {
+              // Glyph/fill probe for the simulator harness (scripts/simulator-flow.mjs --probe): draw one page of
+              // text exactly as a message thread would, so the glasses framebuffer can be measured.
+              if (command.kind === 'probeMessage') setGlassesFontWidthPercent(Number(command.fontWidthPercent ?? 100))
+              const body = command.kind === 'probeText'
+                ? String(command.body ?? '')
+                : (() => {
+                    const model = screenModel({
+                      screen: 'sidebar', focus: 'messages', chats: [], selectedChatIndex: 0,
+                      chat: { id: 'probe', title: 'Probe', kind: 'group', unreadCount: 0 }, back: 'chats',
+                      messages: [{ id: 'p1', sender: String(command.sender ?? 'Alice'), text: String(command.text ?? '') }],
+                      newerPages: [], isNewestPage: true, scrollOffset: 0,
+                    } as unknown as AppState)
+                    return model.kind === 'sidebar' ? model.panelBody : ''
+                  })()
+              if (command.kind === 'probeMessage') setGlassesFontWidthPercent(undefined)
+              await glasses?.render({
+                kind: 'sidebar', title: 'probe', focus: 'panel', sidebarTitle: '', sidebarItems: [], sidebarSelected: 0,
+                panelTitle: '', panelBody: body, panelFooter: ' ', fullWidth: true,
+              })
+            }
             if (command.kind === 'injectAudioChunks') {
               const base64 = command.pcmBase64 as string
               const pcm = Uint8Array.from(atob(base64), (character) => character.charCodeAt(0))
@@ -205,6 +229,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
     await saveFrontendConfigToAppStorage(appStorageRef.current, next)
     setSettings(next)
     controllerRef.current?.updateRuntimeConfig(runtimeConfig(next))
+    if (next.fontWidthPercent !== previous.fontWidthPercent && !isTeleGlanceFixtureMode()) {
+      setGlassesFontWidthPercent(next.fontWidthPercent)
+      controllerRef.current?.rebuildGlasses()
+    }
     // Apply locale immediately so both the phone React UI and the glasses
     // screen-model rendering switch to the new language without a page reload.
     if (next.language !== previous.language) {

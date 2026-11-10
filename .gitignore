@@ -62,3 +62,6 @@ even-terminal-*.log
 
 .codegraph/
 .claude/worktrees/
+
+# Phone debug event log (written by the backend container)
+logs/

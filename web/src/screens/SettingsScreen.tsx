@@ -156,6 +156,11 @@ scripts/start-backend.sh --reload`}</code></pre>
         </label>
         <p className="hint">{l.settingsDebugEventsHint}</p>
         <label>
+          <span>Glasses font width correction (%)</span>
+          <input type="number" min="70" max="150" step="1" value={draft.fontWidthPercent} onChange={(event) => update('fontWidthPercent', Number(event.target.value))} />
+        </label>
+        <p className="hint">Text lines are filled to the screen edge using the glasses font measured in the simulator. If lines wrap twice on the glasses, raise this a little (e.g. 110); if they stop short of the right edge, lower it. Default 100.</p>
+        <label>
           <span>{l.settingsRecMinDuration}</span>
           <input type="number" min="0" max="5000" step="100" value={draft.recordingMinDurationMs} onChange={(event) => update('recordingMinDurationMs', Number(event.target.value))} />
         </label>

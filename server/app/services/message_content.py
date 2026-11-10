@@ -277,3 +277,86 @@ def rich_text(message: Any) -> str:
     for block in getattr(rich, "blocks", None) or []:
         lines.extend(_rich_lines(block))
     return "\n".join(lines).strip()
+
+
+def _names(entities: Any, fallback_ids: Any = None) -> str:
+    """Comma-joined display names of the users a service action is about."""
+    names = []
+    for entity in entities or []:
+        title = getattr(entity, "title", None)
+        first = str(getattr(entity, "first_name", "") or "").strip()
+        last = str(getattr(entity, "last_name", "") or "").strip()
+        username = getattr(entity, "username", None)
+        name = str(title) if title else f"{first} {last}".strip() or (f"@{username}" if username else "")
+        if name:
+            names.append(name)
+    if not names and fallback_ids:
+        count = len(list(fallback_ids))
+        return f"{count} member{'s' if count != 1 else ''}"
+    return ", ".join(names)
+
+
+def _humanize_action(kind: str) -> str:
+    words = "".join(f" {c.lower()}" if c.isupper() else c for c in kind.removeprefix("MessageAction")).strip()
+    return words or "service message"
+
+
+def service_text(message: Any, actor: Optional[str]) -> str:
+    """Plain-English sentence for a Telegram service message (joins, pins, title changes, calls...)."""
+    action = getattr(message, "action", None)
+    kind = type(action).__name__
+    who = actor or "Someone"
+    others = _names(getattr(message, "action_entities", None), getattr(action, "users", None))
+    title = str(getattr(action, "title", "") or "").strip()
+    if kind == "MessageActionChatAddUser":
+        if others and actor and others == actor:
+            return f"{who} joined the group"
+        return f"{who} added {others}" if others else f"{who} added members"
+    if kind == "MessageActionChatDeleteUser":
+        if not others or others == actor:
+            return f"{who} left the group"
+        return f"{who} removed {others}"
+    if kind in ("MessageActionChatJoinedByLink", "MessageActionChatJoinedByRequest"):
+        return f"{who} joined the group"
+    if kind == "MessageActionChatCreate":
+        return f"{who} created the group {title}".strip()
+    if kind == "MessageActionChannelCreate":
+        return f"{who} created the channel {title}".strip()
+    if kind == "MessageActionChatEditTitle":
+        return f"{who} changed the group name to {title}".strip()
+    if kind == "MessageActionChatEditPhoto":
+        return f"{who} changed the group photo"
+    if kind == "MessageActionChatDeletePhoto":
+        return f"{who} removed the group photo"
+    if kind == "MessageActionPinMessage":
+        return f"{who} pinned a message"
+    if kind == "MessageActionHistoryClear":
+        return "History was cleared"
+    if kind == "MessageActionScreenshotTaken":
+        return f"{who} took a screenshot"
+    if kind == "MessageActionContactSignUp":
+        return f"{who} joined Telegram"
+    if kind in ("MessageActionChatMigrateTo", "MessageActionChannelMigrateFrom"):
+        return "Group upgraded to a supergroup"
+    if kind == "MessageActionTopicCreate":
+        return f"{who} created the topic {title}".strip()
+    if kind == "MessageActionTopicEdit":
+        if getattr(action, "closed", None) is True:
+            return f"{who} closed the topic"
+        if getattr(action, "closed", None) is False:
+            return f"{who} reopened the topic"
+        return f"{who} renamed the topic to {title}".strip() if title else f"{who} edited the topic"
+    if kind == "MessageActionPhoneCall":
+        video = "video call" if getattr(action, "video", False) else "call"
+        duration = format_duration(getattr(action, "duration", None))
+        return f"{who} {video}, {duration}" if duration else f"Missed {video} from {who}"
+    if kind in ("MessageActionGroupCall", "MessageActionGroupCallScheduled"):
+        return f"{who} started a voice chat"
+    if kind == "MessageActionInviteToGroupCall":
+        return f"{who} invited {others} to the voice chat" if others else f"{who} invited members to the voice chat"
+    if kind == "MessageActionSetMessagesTTL":
+        period = getattr(action, "period", 0) or 0
+        return f"{who} set auto-delete to {format_duration(period)}" if period else f"{who} turned off auto-delete"
+    if kind == "MessageActionCustomAction":
+        return str(getattr(action, "message", "") or "Service message").strip()
+    return f"{who}: {_humanize_action(kind)}"
