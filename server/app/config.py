@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     groq_stt_model: str = Field(default="whisper-large-v3-turbo", validation_alias="GROQ_STT_MODEL")
     groq_stt_timeout_seconds: float = Field(default=20.0, validation_alias="GROQ_STT_TIMEOUT_SECONDS")
     transcribe_max_upload_bytes: int = Field(default=2_000_000, validation_alias="TRANSCRIBE_MAX_UPLOAD_BYTES")
+    # Recordings allowed in flight at once (each waits up to 30 s for a slot, then gets 503) and their length.
+    transcribe_max_concurrent: int = Field(default=2, validation_alias="TRANSCRIBE_MAX_CONCURRENT")
+    transcribe_max_seconds: float = Field(default=120.0, validation_alias="TRANSCRIBE_MAX_SECONDS")
     # Every other request body is a small encrypted JSON envelope (a 4096-character message is ~25 KB).
     request_max_json_bytes: int = Field(default=64 * 1024, validation_alias="REQUEST_MAX_JSON_BYTES")
     teleglance_shared_secret: Optional[str] = Field(default=None, validation_alias="TELEGLANCE_SHARED_SECRET")

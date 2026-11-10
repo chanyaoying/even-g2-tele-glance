@@ -56,7 +56,7 @@ from app.services.telegram import (
     TelegramSessionExpiredError,
     TelegramUnavailableError,
 )
-from app.services.transcription import TranscriptionServiceError, WhisperTranscriptionService
+from app.services.transcription import TranscriptionBusyError, TranscriptionServiceError, WhisperTranscriptionService
 
 # Seconds of silence before the update stream sends a keepalive comment; the phone treats ~3x this as dead.
 STREAM_KEEPALIVE_SECONDS = 15.0
@@ -136,8 +136,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                         return JSONResponse({"detail": "Encrypted JSON request body is required"}, status_code=400)
                     decrypted = decrypt_payload(encrypted_body, shared_secret)
                     request = _replace_request_body(request, decrypted)
-            except (json.JSONDecodeError, UnicodeDecodeError, SecureAuthError) as exc:
-                return JSONResponse({"detail": str(exc)}, status_code=400)
+            except SecureAuthError as exc:
+                return JSONResponse({"detail": str(exc)}, status_code=400)  # fixed messages, no internals
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return JSONResponse({"detail": "Encrypted JSON request body is required"}, status_code=400)
 
         started = time.perf_counter()
         response = await call_next(request)
@@ -440,15 +442,22 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         raw = await audio.read(max_bytes + 1)
         if len(raw) > max_bytes:
             raise HTTPException(status_code=413, detail="audio upload is too large")
-        try:
-            if audio.content_type in {"audio/pcm", "application/octet-stream"}:
+        if audio.content_type in {"audio/pcm", "application/octet-stream"}:
+            try:
                 raw = pcm16le_to_wav(raw)
+            except ValueError as exc:  # our own validation messages
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        try:
             return await transcription.transcribe_wav(raw, language=language or None)
-        except (ValueError, TranscriptionServiceError) as exc:
+        except TranscriptionBusyError as exc:
+            raise HTTPException(status_code=503, detail=str(exc), headers={"Retry-After": "5"}) from exc
+        except TranscriptionServiceError as exc:
+            # These messages are written for the user (silent, no speech, wrong format).
             timing_logger.warning("transcribe rejected (%d bytes): %s", len(raw), exc)
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"transcription failed: {exc}") from exc
+            timing_logger.exception("transcription failed (%d bytes)", len(raw))
+            raise HTTPException(status_code=500, detail="transcription failed") from exc
 
     return api
 

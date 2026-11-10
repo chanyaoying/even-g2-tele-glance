@@ -1,8 +1,10 @@
 """Fit photos into the Even G2 image container: exactly 288x120, letterboxed, greyscale, 16 levels."""
 
 import io
+import logging
 
 MAX_SOURCE_BYTES = 12 * 1024 * 1024
+logger = logging.getLogger(__name__)
 
 
 class ImagingError(RuntimeError):
@@ -32,7 +34,8 @@ def prepare_glasses_image(raw: bytes, max_width: int = 288, max_height: int = 12
             else:
                 image = oriented.convert("L")
     except Exception as exc:  # Pillow raises many unrelated types for bad input
-        raise ImagingError(f"image could not be decoded: {exc}") from exc
+        logger.info("image decode failed: %s: %s", exc.__class__.__name__, exc)
+        raise ImagingError("image could not be decoded") from exc
 
     image.thumbnail((max_width, max_height), Image.LANCZOS)
     image = ImageOps.autocontrast(image)
