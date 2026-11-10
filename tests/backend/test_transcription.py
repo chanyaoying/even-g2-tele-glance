@@ -204,3 +204,104 @@ def test_groq_is_used_when_a_key_is_set_and_local_model_is_the_fallback():
     with patch.object(service, "_transcribe_groq", side_effect=OSError("offline")), \
          patch.object(service, "_transcribe_blocking", return_value=TranscriptionResponse(text="from local")):
         assert asyncio.run(service.transcribe_wav(wav)).text == "from local"
+
+
+# --- audit B9-B11: decode once off the loop, single model load, bounded queue ---------------------------
+
+import asyncio
+import struct
+import sys
+import threading
+import time as _time
+
+import app.services.transcription as transcription_module
+from app.services.transcription import TranscriptionBusyError
+
+
+def wav_with_extra_chunk(pcm: bytes, extra: bytes) -> bytes:
+    """A WAV whose data chunk does not start at byte 44 (a LIST chunk sits before it)."""
+    fmt = struct.pack("<HHIIHH", 1, 1, 16000, 32000, 2, 16)
+    chunks = b"fmt " + struct.pack("<I", len(fmt)) + fmt
+    chunks += b"LIST" + struct.pack("<I", len(extra)) + extra
+    chunks += b"data" + struct.pack("<I", len(pcm)) + pcm
+    return b"RIFF" + struct.pack("<I", 4 + len(chunks)) + b"WAVE" + chunks
+
+
+@pytest.mark.asyncio
+async def test_silence_is_measured_on_the_samples_not_on_header_bytes():
+    service = WhisperTranscriptionService(settings=Settings())
+    loud_metadata = b"\xff\x7f" * 4000  # would look like a loud tone if read as PCM
+    with pytest.raises(TranscriptionServiceError, match="silent"):
+        await service.transcribe_wav(wav_with_extra_chunk(b"\x00\x00" * 8000, loud_metadata))
+
+
+@pytest.mark.asyncio
+async def test_audio_is_decoded_once_off_the_event_loop_even_when_groq_falls_back(monkeypatch):
+    loop_thread = threading.get_ident()
+    reads = []
+    original = transcription_module._read_wav
+
+    def recording_read(data):
+        reads.append(threading.get_ident())
+        return original(data)
+
+    monkeypatch.setattr(transcription_module, "_read_wav", recording_read)
+    service = WhisperTranscriptionService(Settings(GROQ_API_KEY="key", TELEGLANCE_SHARED_SECRET=None))
+    with patch.object(service, "_transcribe_groq", side_effect=OSError("offline")), \
+         patch.object(service, "_transcribe_blocking", return_value=TranscriptionResponse(text="local")) as local:
+        assert (await service.transcribe_wav(make_tiny_wav())).text == "local"
+    assert len(reads) == 1 and reads[0] != loop_thread
+    assert len(local.call_args.args[0]) == 8000  # the local model gets the samples decoded above
+
+
+def test_silence_check_is_fast_on_a_full_size_recording():
+    frames = b"\x01\x00" * 1_000_000  # 2 MB, about a minute at 16 kHz
+    started = _time.perf_counter()
+    assert transcription_module._is_effectively_silent(frames) is True
+    assert _time.perf_counter() - started < 0.2
+
+
+def test_model_is_built_once_when_preload_and_a_request_race(monkeypatch):
+    builds = []
+
+    class SlowModel:
+        def __init__(self, *args, **kwargs):
+            builds.append(threading.get_ident())
+            _time.sleep(0.05)
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=SlowModel))
+    service = WhisperTranscriptionService(settings=Settings())
+    threads = [threading.Thread(target=service._load_model) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(builds) == 1
+
+
+@pytest.mark.asyncio
+async def test_busy_transcription_queue_answers_quickly_instead_of_growing(monkeypatch):
+    monkeypatch.setattr(transcription_module, "TRANSCRIBE_QUEUE_WAIT_SECONDS", 0.05)
+    service = WhisperTranscriptionService(Settings(TRANSCRIBE_MAX_CONCURRENT=1))
+    release = threading.Event()
+
+    def blocking(audio, language):
+        release.wait(5)
+        return TranscriptionResponse(text="first")
+
+    with patch.object(service, "_transcribe_blocking", side_effect=blocking):
+        first = asyncio.create_task(service.transcribe_wav(make_tiny_wav()))
+        await asyncio.sleep(0.05)
+        with pytest.raises(TranscriptionBusyError):
+            await service.transcribe_wav(make_tiny_wav())
+        release.set()
+        assert (await first).text == "first"
+
+
+@pytest.mark.asyncio
+async def test_overlong_recording_is_refused_before_transcription():
+    service = WhisperTranscriptionService(Settings(TRANSCRIBE_MAX_SECONDS=0.25))
+    with patch.object(service, "_load_model") as load_mock:
+        with pytest.raises(TranscriptionServiceError, match="too long"):
+            await service.transcribe_wav(make_tiny_wav(duration_ms=500))
+    load_mock.assert_not_called()

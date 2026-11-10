@@ -492,6 +492,27 @@ async def test_debug_events_are_appended_to_the_log_file(fake_services, tmp_path
         )
 
     assert response.status_code == 200
+    import app.main as main_module
+
+    main_module._stop_debug_listener()  # file writes happen on a background thread; flush them
     lines = log_path.read_text().splitlines()
     assert len(lines) == 1
     assert json.loads(lines[0])["raw"] == {"event": "send", "ok": False}
+
+
+@pytest.mark.asyncio
+async def test_debug_events_are_capped_and_text_fields_redacted(fake_services):
+    app = secure_test_app(fake_services)
+    transport = httpx.ASGITransport(app=app)
+    raw = {"event": "list", "currentSelectItemName": "Secret chat", "nested": {"text": "hello there", "index": 3}, "preview": [1, 2]}
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        await client.post(
+            "/api/debug/events",
+            headers=auth_headers(json_body=True),
+            json=encrypted_json_body({"source": "even-hub", "raw": raw, "mapped": {"blob": "x" * 5000}, "note": "n" * 500}),
+        )
+        listed = await client.get("/api/debug/events", headers=auth_headers())
+    event = decrypted_json(listed)[-1]
+    assert event["raw"] == {"event": "list", "currentSelectItemName": "[redacted 11 chars]", "nested": {"text": "[redacted 11 chars]", "index": 3}, "preview": [1, 2]}
+    assert event["mapped"]["truncated"] is True and event["mapped"]["bytes"] > 5000
+    assert len(event["note"]) == 200

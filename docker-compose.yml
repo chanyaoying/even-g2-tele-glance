@@ -7,6 +7,8 @@ services:
     env_file: .env
     environment:
       HF_HOME: /models
+      # Phone debug events (only sent while Settings > Debug events is on) are appended here, redacted and
+      # size-capped. Remove this line to keep no debug file; keep ./logs private on the host (chmod 700).
       DEBUG_LOG_PATH: /logs/debug-events.jsonl
     networks:
       - homelab

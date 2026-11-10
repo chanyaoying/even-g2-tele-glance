@@ -6,6 +6,7 @@ import json
 import logging
 import logging.handlers
 import os
+from queue import SimpleQueue
 import time
 from typing import Optional
 
@@ -13,8 +14,20 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from app.body_limits import AUTH_VALIDATED_STATE_KEY, RequestBodyLimitMiddleware
 from app.config import Settings, get_settings
-from app.dependencies import discard_pending_telegram_service, get_telegram_service, get_transcription_service, validate_backend_auth
+from app.dependencies import (
+    ERROR_CODE_HEADER,
+    SESSION_EXPIRED_ERROR_HEADERS,
+    SWEEP_INTERVAL_SECONDS,
+    close_all_telegram_services,
+    discard_pending_telegram_service,
+    forget_telegram_service,
+    get_telegram_service,
+    get_transcription_service,
+    sweep_telegram_services,
+    validate_backend_auth,
+)
 from app.models import (
     AuthStatus,
     ChatSummary,
@@ -37,17 +50,29 @@ from app.models import (
     TypingUpdate,
 )
 from app.services.audio import pcm16le_to_wav
-from app.services.secure_auth import SecureAuthError, decrypt_payload, encrypt_payload
-from app.services.telegram import TelegramService, TelegramServiceError, TelegramRateLimitError, TelegramServiceTimeoutError, TelegramSessionExpiredError
-from app.services.transcription import TranscriptionServiceError, WhisperTranscriptionService
+from app.services.secure_auth import PROTO_HEADER, SecureAuthError, decrypt_payload, encrypt_payload, payload_aads
+from app.services.telegram import (
+    TelegramRateLimitError,
+    TelegramService,
+    TelegramServiceError,
+    TelegramServiceTimeoutError,
+    TelegramSessionExpiredError,
+    TelegramUnavailableError,
+)
+from app.services.transcription import TranscriptionBusyError, TranscriptionServiceError, WhisperTranscriptionService
 
 # Seconds of silence before the update stream sends a keepalive comment; the phone treats ~3x this as dead.
 STREAM_KEEPALIVE_SECONDS = 15.0
+# Room for the multipart boundary, part headers and the language field around the audio upload itself.
+MULTIPART_OVERHEAD_BYTES = 512 * 1024
 timing_logger = logging.getLogger("uvicorn.error")
 
 
 def _debug_file_logger() -> Optional[logging.Logger]:
-    """Append every phone debug event to a rotating JSONL file (DEBUG_LOG_PATH; unset or unwritable = off)."""
+    """Append every phone debug event to a rotating JSONL file (DEBUG_LOG_PATH; unset or unwritable = off).
+
+    Writes happen on a background thread (QueueHandler/QueueListener) so a slow disk never blocks requests.
+    """
     path = os.environ.get("DEBUG_LOG_PATH", "").strip()
     if not path:
         return None
@@ -57,18 +82,66 @@ def _debug_file_logger() -> Optional[logging.Logger]:
     except OSError:
         return None
     handler.setFormatter(logging.Formatter("%(message)s"))
+    global _debug_listener
+    _stop_debug_listener()
+    queue: "SimpleQueue[logging.LogRecord]" = SimpleQueue()
+    _debug_listener = logging.handlers.QueueListener(queue, handler)
+    _debug_listener.start()
     logger = logging.getLogger("teleglance.debug-events")
     logger.setLevel(logging.INFO)
     logger.propagate = False
-    logger.handlers = [handler]
+    logger.handlers = [logging.handlers.QueueHandler(queue)]
     return logger
+
+
+_debug_listener: Optional[logging.handlers.QueueListener] = None
+
+
+def _stop_debug_listener() -> None:
+    """Flush queued debug lines to the file and stop the writer thread."""
+    global _debug_listener
+    listener, _debug_listener = _debug_listener, None
+    if listener is not None:
+        listener.stop()
+# A debug event's `raw` / `mapped` larger than this (serialised) is replaced by a size marker.
+DEBUG_FIELD_MAX_BYTES = 4096
+DEBUG_NOTE_MAX_CHARS = 200
+# String values under these keys can carry chat names or message text; diagnostics never need them.
+_DEBUG_REDACTED_KEYS = {"text", "caption", "title", "body", "content", "transcript", "sender", "username", "firstname", "lastname", "phone", "code", "password", "session"}
+
+
+def _redact_debug_value(value: object, depth: int = 0) -> object:
+    if depth > 8:
+        return "[nested]"
+    if isinstance(value, dict):
+        redacted = {}
+        for key, item in value.items():
+            lowered = str(key).lower()
+            if isinstance(item, str) and (lowered in _DEBUG_REDACTED_KEYS or lowered.endswith("itemname")):
+                redacted[key] = f"[redacted {len(item)} chars]"
+            else:
+                redacted[key] = _redact_debug_value(item, depth + 1)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_debug_value(item, depth + 1) for item in value]
+    return value
+
+
+def _bounded_debug_value(value: object) -> object:
+    value = _redact_debug_value(value)
+    size = len(json.dumps(value, default=str, separators=(",", ":")))
+    if size > DEBUG_FIELD_MAX_BYTES:
+        return {"truncated": True, "bytes": size}
+    return value
 
 
 def raise_telegram_http_error(exc: Exception) -> None:
     if isinstance(exc, TelegramSessionExpiredError):
-        raise HTTPException(status_code=401, detail=str(exc)) from exc
+        raise HTTPException(status_code=401, detail=str(exc), headers=SESSION_EXPIRED_ERROR_HEADERS) from exc
     if isinstance(exc, TelegramRateLimitError):
         raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": str(exc.seconds)}) from exc
+    if isinstance(exc, TelegramUnavailableError):
+        raise HTTPException(status_code=503, detail=str(exc), headers={"Retry-After": "5"}) from exc
     if isinstance(exc, (TelegramServiceTimeoutError, TimeoutError)):
         raise HTTPException(status_code=504, detail=str(exc) or "Telegram request timed out. Please retry.") from exc
     raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -81,20 +154,21 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         if app_settings.whisper_preload:
             # Warm the model in the background so the first recording after a restart is not slow.
             _app.state.preload_task = asyncio.create_task(get_transcription_service().preload())
-        yield
+        sweeper = asyncio.create_task(_sweep_services_forever())
+        try:
+            yield
+        finally:
+            sweeper.cancel()
+            try:
+                await sweeper
+            except asyncio.CancelledError:
+                pass
+            await close_all_telegram_services()
+            _stop_debug_listener()
 
     api = FastAPI(title="TeleGlance Backend", lifespan=lifespan)
     debug_events: deque[dict] = deque(maxlen=100)
     debug_file_logger = _debug_file_logger()
-    api.add_middleware(
-        CORSMiddleware,
-        allow_origins=app_settings.backend_cors_origins,
-        allow_origin_regex=app_settings.backend_cors_origin_regex,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-        expose_headers=["X-TeleGlance-Encrypted", "Server-Timing", "Retry-After"],
-    )
 
     async def require_app_backend_auth(request: Request) -> None:
         validate_backend_auth(request.headers.get("X-TeleGlance-Auth"), app_settings.teleglance_shared_secret)
@@ -104,6 +178,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         shared_secret = app_settings.teleglance_shared_secret
         encrypted_auth = request.headers.get("X-TeleGlance-Auth")
         should_encrypt = bool(shared_secret and encrypted_auth and request.url.path.startswith("/api/"))
+        request_aad, response_aad = payload_aads(request.headers.get(PROTO_HEADER))
 
         if should_encrypt and _requires_encrypted_body(request):
             try:
@@ -113,10 +188,12 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     encrypted_body = envelope.get("encryptedPayload") if isinstance(envelope, dict) else None
                     if not isinstance(encrypted_body, str):
                         return JSONResponse({"detail": "Encrypted JSON request body is required"}, status_code=400)
-                    decrypted = decrypt_payload(encrypted_body, shared_secret)
+                    decrypted = decrypt_payload(encrypted_body, shared_secret, request_aad)
                     request = _replace_request_body(request, decrypted)
-            except (json.JSONDecodeError, UnicodeDecodeError, SecureAuthError) as exc:
-                return JSONResponse({"detail": str(exc)}, status_code=400)
+            except SecureAuthError as exc:
+                return JSONResponse({"detail": str(exc)}, status_code=400)  # fixed messages, no internals
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return JSONResponse({"detail": "Encrypted JSON request body is required"}, status_code=400)
 
         started = time.perf_counter()
         response = await call_next(request)
@@ -132,7 +209,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         body = b""
         async for chunk in response.body_iterator:
             body += chunk
-        encrypted = encrypt_payload(body, shared_secret)
+        encrypted = encrypt_payload(body, shared_secret, response_aad)
         headers = dict(response.headers)
         headers.pop("content-length", None)
         headers["X-TeleGlance-Encrypted"] = "1"
@@ -142,6 +219,30 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             headers=headers,
         )
 
+    # Added after (so outside) the encryption middleware: bodies are size-checked before anything reads them.
+    api.add_middleware(
+        RequestBodyLimitMiddleware,
+        default_limit=app_settings.request_max_json_bytes,
+        path_limits={"/api/transcribe": app_settings.transcribe_max_upload_bytes + MULTIPART_OVERHEAD_BYTES},
+        auth_first_paths={"/api/transcribe"},
+        validate_auth=lambda header: validate_backend_auth(header, app_settings.teleglance_shared_secret),
+    )
+    # Outermost, so every response (including the early 4xx answers above) carries CORS headers.
+    api.add_middleware(
+        CORSMiddleware,
+        allow_origins=app_settings.backend_cors_origins,
+        allow_origin_regex=app_settings.backend_cors_origin_regex,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["X-TeleGlance-Encrypted", "Server-Timing", "Retry-After", ERROR_CODE_HEADER],
+    )
+
+    async def require_transcribe_auth(request: Request) -> None:
+        if request.scope.get("state", {}).get(AUTH_VALIDATED_STATE_KEY):
+            return  # the body-limit middleware checked the header before the upload was read
+        await require_app_backend_auth(request)
+
     @api.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
@@ -150,8 +251,15 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     async def append_debug_event(payload: DebugEvent) -> dict[str, int]:
         event = payload.model_dump(mode="json")
         mapped = event.get("mapped") or {}
-        if mapped.get("type") == "audioChunk":
+        if isinstance(mapped, dict) and mapped.get("type") == "audioChunk":
             return {"count": len(debug_events)}
+        event["raw"] = _bounded_debug_value(event.get("raw"))
+        event["mapped"] = _bounded_debug_value(event.get("mapped"))
+        if event.get("note"):
+            event["note"] = str(event["note"])[:DEBUG_NOTE_MAX_CHARS]
+        for key in ("source", "build_version"):
+            if isinstance(event.get(key), str):
+                event[key] = event[key][:DEBUG_NOTE_MAX_CHARS]
         event["received_at"] = datetime.now(timezone.utc).isoformat()
         if event.get("note"):
             # Timing notes from the phone (picture transfer, page rebuild) also go to the log for easy reading.
@@ -200,9 +308,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 # The session now belongs to this caller; do not leave the signed-in client in the
                 # pending cache where another caller with the same api_id/api_hash could reuse it.
                 discarded = discard_pending_telegram_service(telegram)
-                close = getattr(discarded, "close", None)
-                if close is not None:
-                    await close()
+                if discarded is not None:
+                    await discarded.close()
             return status
         except (TelegramServiceError, TimeoutError) as exc:
             raise_telegram_http_error(exc)
@@ -216,6 +323,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             return {"status": "ok"}
         except (TelegramServiceError, TimeoutError) as exc:
             raise_telegram_http_error(exc)
+        finally:
+            # A logged-out service must not be handed to the next request with the same header.
+            forget_telegram_service(telegram)
 
     @api.get("/api/chats", response_model=list[ChatSummary])
     async def list_chats(
@@ -241,10 +351,14 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     @api.get("/api/chats/{chat_id}/topics", response_model=list[TopicSummary])
     async def list_topics(
         chat_id: int,
+        limit: int = Query(default=20, ge=1, le=100),
+        offset: int = Query(default=0, ge=0, le=400),
         telegram: TelegramService = Depends(get_telegram_service),
     ) -> list[TopicSummary]:
+        # Only pass paging when asked for, so the default request stays the original single fetch of 20.
+        paging = {"limit": limit, "offset": offset} if (limit, offset) != (20, 0) else {}
         try:
-            return await telegram.list_topics(chat_id)
+            return await telegram.list_topics(chat_id, **paging)
         except (TelegramServiceError, TimeoutError) as exc:
             raise_telegram_http_error(exc)
 
@@ -275,11 +389,12 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         telegram: TelegramService = Depends(get_telegram_service),
     ) -> StreamingResponse:
         encrypt_events = bool(app_settings.teleglance_shared_secret and request.headers.get("X-TeleGlance-Auth"))
+        _request_aad, event_aad = payload_aads(request.headers.get(PROTO_HEADER))
 
         def event_data(payload: str) -> str:
             if not encrypt_events:
                 return payload
-            encrypted = encrypt_payload(payload.encode("utf-8"), app_settings.teleglance_shared_secret or "")
+            encrypted = encrypt_payload(payload.encode("utf-8"), app_settings.teleglance_shared_secret or "", event_aad)
             return json.dumps({"encryptedPayload": encrypted})
 
         async def events():
@@ -291,6 +406,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                         pending = asyncio.ensure_future(updates.__anext__())
                     done, _ = await asyncio.wait({pending}, timeout=STREAM_KEEPALIVE_SECONDS)
                     if not done:
+                        # A quiet stream is only healthy while Telegram is connected: reconnect a dropped
+                        # client (the service then queues a resync) or end with an error event.
+                        ensure_connected = getattr(telegram, "ensure_stream_connection", None)
+                        if ensure_connected is not None:
+                            await ensure_connected()
                         # A comment line: ignored by the phone's parser, but it proves the connection is alive
                         # and stops proxies and phones from silently dropping an idle stream.
                         yield ": keepalive\n\n"
@@ -308,7 +428,14 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     else:
                         yield f"event: message\ndata: {event_data(payload)}\n\n"
             except TelegramServiceError as exc:
-                payload = json.dumps({"detail": str(exc)})
+                error = {"detail": str(exc)}
+                if isinstance(exc, TelegramSessionExpiredError):
+                    error["code"] = "session_expired"
+                payload = json.dumps(error)
+                yield f"event: error\ndata: {event_data(payload)}\n\n"
+            except Exception:
+                timing_logger.exception("update stream failed")
+                payload = json.dumps({"detail": "Update stream failed. Please retry."})
                 yield f"event: error\ndata: {event_data(payload)}\n\n"
             finally:
                 if pending is not None:
@@ -370,7 +497,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         except (TelegramServiceError, TimeoutError) as exc:
             raise_telegram_http_error(exc)
 
-    @api.post("/api/transcribe", response_model=TranscriptionResponse, dependencies=[Depends(require_app_backend_auth)])
+    @api.post("/api/transcribe", response_model=TranscriptionResponse, dependencies=[Depends(require_transcribe_auth)])
     async def transcribe(
         audio: UploadFile = File(...),
         language: str = Form(""),
@@ -380,20 +507,36 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         raw = await audio.read(max_bytes + 1)
         if len(raw) > max_bytes:
             raise HTTPException(status_code=413, detail="audio upload is too large")
-        try:
-            if audio.content_type in {"audio/pcm", "application/octet-stream"}:
+        if audio.content_type in {"audio/pcm", "application/octet-stream"}:
+            try:
                 raw = pcm16le_to_wav(raw)
+            except ValueError as exc:  # our own validation messages
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        try:
             return await transcription.transcribe_wav(raw, language=language or None)
-        except (ValueError, TranscriptionServiceError) as exc:
+        except TranscriptionBusyError as exc:
+            raise HTTPException(status_code=503, detail=str(exc), headers={"Retry-After": "5"}) from exc
+        except TranscriptionServiceError as exc:
+            # These messages are written for the user (silent, no speech, wrong format).
             timing_logger.warning("transcribe rejected (%d bytes): %s", len(raw), exc)
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"transcription failed: {exc}") from exc
+            timing_logger.exception("transcription failed (%d bytes)", len(raw))
+            raise HTTPException(status_code=500, detail="transcription failed") from exc
 
     return api
 
 
 app = create_app()
+
+
+async def _sweep_services_forever() -> None:
+    while True:
+        await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
+        try:
+            await sweep_telegram_services()
+        except Exception:
+            timing_logger.warning("Telegram service sweep failed", exc_info=True)
 
 
 def _login_finished(status: object) -> bool:
