@@ -226,13 +226,14 @@
           "cached message previews"
         ],
         "panelFooterDefault": "Swipe chats | Press open",
-        "panelBox": null
+        "panelBox": null,
+        "panelBodyNotes": "panelBody is the plain-text fallback (startup page, refused native list); the glasses show nativeList.items"
       },
       "transitions": {
-        "press": "sidebar.messages",
+        "click(row)": "sidebar.messages / sidebar.topics / sidebar.chats (Back to top, More chats...)",
         "doublePress": "asleep",
-        "swipeUp": "sidebar.chats",
-        "swipeDown": "sidebar.chats",
+        "swipeUp": "sidebar.chats (no render)",
+        "swipeDown": "sidebar.chats (no render)",
         "doublePressWithFolders": "sidebar.folderPicker"
       },
       "budgetMs": 1000,
@@ -244,7 +245,7 @@
         "listMessages",
         "listTopics"
       ],
-      "notes": "Chats load 20 at a time; when the selection is within 3 rows of the end and the last page was full, the next page is fetched with offset=loaded count. With Telegram folders, the title is '<folder> <n>/<total>' and double press opens sidebar.folderPicker instead of sleeping."
+      "notes": "Drawn as a native (firmware) list: the glasses move a selection box with momentum and report only the row clicked. Swipes reach the app as nothing (simulator) or bare scroll events, never redraw the list, and do not change selectedChatIndex, which is the list's anchor: the window starts there (0 = top; after returning from a chat it is that chat, on row 0 where the firmware puts the selection box after a rebuild). At most 20 rows: 'More chats...' after the chats when chats follow (it fetches the next 20 from the server when needed), then 'Back to top' last when the window does not start at the top. Background changes do not redraw a list the user has swiped (footer 'New activity | ...'); they are drawn at the next rebuild the user causes (UI_INVARIANTS.md section 1.6). With Telegram folders, the title is '<folder> <n>/<total>' and double press opens sidebar.folderPicker instead of sleeping. If the host refuses a native list page the app falls back to the text list (panelBody with a '> ' marker the controller moves)."
     },
     "sidebar.topics.noPreview": {
       "state": {
@@ -282,7 +283,8 @@
       "apiCalls": [
         "listTopics",
         "listMessages"
-      ]
+      ],
+      "notes": "Text-list fallback only (the host refused native lists); the native topic list is sidebar.topics."
     },
     "sidebar.topics.preview": {
       "state": {
@@ -317,7 +319,8 @@
       "apiCalls": [
         "listTopics",
         "listMessages"
-      ]
+      ],
+      "notes": "Text-list fallback only (the host refused native lists); the native topic list is sidebar.topics."
     },
     "sidebar.messages.normal": {
       "state": {
@@ -732,6 +735,41 @@
         "sidebarTitle": "Folders",
         "markerAtFromState": "selectedIndex"
       }
+    },
+    "sidebar.topics": {
+      "state": {
+        "screen": "sidebar",
+        "focus": "topics"
+      },
+      "render": {
+        "kind": "sidebar",
+        "focus": "panel",
+        "fullWidth": true
+      },
+      "left": {
+        "sidebarTitle": "Topics",
+        "nativeListName": "topic-list",
+        "markerAtFromState": "selectedTopicIndex"
+      },
+      "right": {
+        "panelFooterDefault": "TAP TO OPEN TOPIC",
+        "panelBox": null,
+        "panelBodyNotes": "no preview: a topic's messages are fetched when it is opened"
+      },
+      "transitions": {
+        "click(row)": "sidebar.messages.topic / sidebar.topics (Back to top, More topics...)",
+        "doublePress": "sidebar.chats (anchored at the forum)",
+        "swipeUp": "sidebar.topics (no render)",
+        "swipeDown": "sidebar.topics (no render)"
+      },
+      "budgetMs": 1000,
+      "apiCalls": [
+        "listTopics"
+      ],
+      "apiCallsNotPresent": [
+        "listMessages"
+      ],
+      "notes": "Native list of the forum's topics, full width, same windowing and click rules as sidebar.chats. The text fallback is sidebar.topics.noPreview / sidebar.topics.preview (left list + preview), used only when the host refuses native lists."
     }
   },
   "steps": [
@@ -758,7 +796,8 @@
           "selectedChatIndex": 0
         },
         "renderBodyContains": [
-          "> Fixture Alpha"
+          "\"name\":\"chat-list\"",
+          "\"keys\":[\"chat:fixture-chat-0\",\"chat:fixture-chat-1\""
         ],
         "apiCallNotPresent": "listMessages"
       },
@@ -768,238 +807,107 @@
       "budgetMs": 1000
     },
     {
-      "name": "02-chats-swipe-down-1",
-      "input": "down",
+      "name": "02-chats-native-swipe-no-redraw",
+      "input": "pressSequence:down,down,down",
       "target": "sidebar.chats",
       "expect": {
-        "state": {
-          "screen": "sidebar",
-          "focus": "chats",
-          "selectedChatIndex": 1
-        }
+        "targetEventRequired": false,
+        "noRenderEvents": true,
+        "maxPerSwipeMs": 1000,
+        "apiCalls": []
       },
-      "budgetMs": 700
+      "budgetMs": 1000
     },
     {
-      "name": "03-chats-swipe-down-2",
-      "input": "down",
-      "target": "sidebar.chats",
+      "name": "03-chats-click-opens-highlighted-row",
+      "input": "click",
+      "target": "sidebar.messages.normal",
       "expect": {
         "state": {
           "screen": "sidebar",
+          "focus": "messages",
+          "selectedChatIndex": 3
+        }
+      },
+      "apiCalls": [
+        "listMessages"
+      ],
+      "budgetMs": 1500
+    },
+    {
+      "name": "04-chats-back-starts-at-opened-chat",
+      "input": "double_click",
+      "target": "sidebar.chats",
+      "expect": {
+        "state": {
           "focus": "chats",
-          "selectedChatIndex": 2
+          "selectedChatIndex": 3
         },
         "renderBodyContains": [
-          "> Fixture Ops"
+          "\"keys\":[\"chat:fixture-chat-3\",\"chat:fixture-chat-4\""
         ]
       },
       "budgetMs": 1000
     },
     {
-      "name": "04-chats-swipe-down-3",
-      "input": "down",
+      "name": "05-chats-back-to-top",
+      "input": "pressSequence:down,down,down,click",
       "target": "sidebar.chats",
       "expect": {
         "state": {
-          "screen": "sidebar",
-          "focus": "chats",
-          "selectedChatIndex": 3
-        }
-      },
-      "budgetMs": 500
-    },
-    {
-      "name": "04a-chats-back-from-non-zero",
-      "input": "pressSequence:click,double_click",
-      "target": "sidebar.chats",
-      "expect": {
-        "state": {
-          "screen": "sidebar",
-          "focus": "chats",
-          "selectedChatIndex": 3
-        }
-      },
-      "budgetMs": 2000
-    },
-    {
-      "name": "05-chats-swipe-up-1",
-      "input": "up",
-      "target": "sidebar.chats",
-      "goldenIgnoreFields": [
-        "panelBody"
-      ],
-      "expect": {
-        "state": {
-          "screen": "sidebar",
-          "focus": "chats",
-          "selectedChatIndex": 2
-        }
-      },
-      "budgetMs": 1000
-    },
-    {
-      "name": "06-chats-swipe-up-2",
-      "input": "up",
-      "target": "sidebar.chats",
-      "expect": {
-        "state": {
-          "screen": "sidebar",
-          "focus": "chats",
-          "selectedChatIndex": 1
-        }
-      },
-      "budgetMs": 700
-    },
-    {
-      "name": "07-chats-swipe-up-3",
-      "input": "up",
-      "target": "sidebar.chats",
-      "expect": {
-        "state": {
-          "screen": "sidebar",
           "focus": "chats",
           "selectedChatIndex": 0
-        }
+        },
+        "renderBodyContains": [
+          "\"keys\":[\"chat:fixture-chat-0\""
+        ]
       },
       "budgetMs": 1000
     },
     {
-      "name": "07a-burst-scroll-chats",
-      "input": "down",
-      "target": "sidebar.chats",
+      "name": "06-chats-open-forum-topics",
+      "input": "pressSequence:down,click",
+      "target": "sidebar.topics",
       "expect": {
         "state": {
-          "focus": "chats",
-          "selectedChatIndex": 1
-        }
-      },
-      "budgetMs": 1500
-    },
-    {
-      "name": "08-chats-open-forum-topics",
-      "input": "click",
-      "target": "sidebar.topics.noPreview",
-      "expect": {
-        "state": {
-          "screen": "sidebar",
           "focus": "topics",
-          "selectedChatIndex": 1
-        },
-        "renderBodyContains": [
-          "Topic zero warmup body"
-        ]
-      },
-      "budgetMs": 1500
-    },
-    {
-      "name": "08a-topics-fast-open-before-preview",
-      "input": "click",
-      "target": "sidebar.messages.topic",
-      "expect": {
-        "state": {
-          "selectedTopicIndex": 0,
-          "focus": "messages"
-        },
-        "renderBodyContains": [
-          "Topic zero warmup body"
-        ]
-      },
-      "apiCalls": [
-        "listMessages"
-      ],
-      "budgetMs": 1000
-    },
-    {
-      "name": "08b-topics-back-shows-loading",
-      "input": "double_click",
-      "target": "sidebar.topics.preview",
-      "expect": {
-        "state": {
-          "screen": "sidebar",
-          "focus": "topics",
+          "selectedChatIndex": 1,
           "selectedTopicIndex": 0
         },
         "renderBodyContains": [
-          "Topic zero warmup body"
-        ]
+          "\"name\":\"topic-list\"",
+          "\"keys\":[\"topic:fixture-topic-0\",\"topic:fixture-topic-1\""
+        ],
+        "apiCallNotPresent": "listMessages"
       },
-      "budgetMs": 1000
-    },
-    {
-      "name": "08c-topics-swipe-preview-from-cache",
-      "input": "down",
-      "target": "sidebar.topics.preview",
-      "expect": {
-        "state": {
-          "selectedTopicIndex": 1
-        },
-        "renderBodyContains": [
-          "fixture-topic-one-body"
-        ]
-      },
+      "apiCalls": [
+        "listTopics"
+      ],
       "budgetMs": 1500
     },
     {
-      "name": "08d-topics-swipe-back-cached-preview",
-      "input": "up",
-      "target": "sidebar.topics.preview",
-      "expect": {
-        "state": {
-          "selectedTopicIndex": 0
-        },
-        "renderBodyContains": [
-          "Topic zero warmup body"
-        ]
-      },
-      "budgetMs": 1000
-    },
-    {
-      "name": "09-topics-preview-loaded",
-      "input": null,
-      "target": "sidebar.topics.preview",
-      "expect": {
-        "renderBodyContains": [
-          "Topic zero warmup body"
-        ]
-      },
-      "apiCalls": [
-        "listMessages"
-      ],
-      "budgetMs": 1000
-    },
-    {
-      "name": "10-topics-swipe-down-1",
-      "input": "down",
-      "target": "sidebar.topics.preview",
-      "expect": {
-        "state": {
-          "selectedTopicIndex": 1
-        },
-        "renderBodyContains": [
-          "fixture-topic-one-body"
-        ]
-      },
-      "budgetMs": 1000
-    },
-    {
-      "name": "11-topics-open-topic-one",
-      "input": "click",
+      "name": "07-topics-open-topic-one",
+      "input": "pressSequence:down,click",
       "target": "sidebar.messages.topic",
       "expect": {
         "state": {
-          "screen": "sidebar",
           "focus": "messages",
           "selectedTopicIndex": 1
         },
         "renderBodyContains": [
           "fixture-topic-one-body"
+        ],
+        "renderBodyNotContains": [
+          "Topic zero warmup body"
         ]
       },
-      "budgetMs": 1000
+      "apiCalls": [
+        "listMessages"
+      ],
+      "budgetMs": 1500
     },
     {
-      "name": "12-topic-messages-scroll-older",
+      "name": "08-topic-messages-scroll-older",
       "input": "up",
       "target": "sidebar.messages.topic",
       "expect": {
@@ -1016,45 +924,35 @@
       "budgetMs": 1000
     },
     {
-      "name": "13-topic-messages-back",
+      "name": "09-topic-messages-back",
       "input": "double_click",
-      "target": "sidebar.topics.preview",
+      "target": "sidebar.topics",
       "expect": {
         "state": {
-          "screen": "sidebar",
-          "focus": "topics"
+          "focus": "topics",
+          "selectedTopicIndex": 1
         },
         "renderBodyContains": [
-          "fixture-topic-one-body"
+          "\"keys\":[\"topic:fixture-topic-1\",\"topic:fixture-topic-2\""
         ],
         "renderBodyNotContains": [
-          "Topic zero warmup body"
-        ]
-      },
-      "budgetMs": 500
-    },
-    {
-      "name": "14-topics-swipe-down-2",
-      "input": "down",
-      "target": "sidebar.topics.preview",
-      "expect": {
-        "state": {
-          "selectedTopicIndex": 2
-        },
-        "renderBodyContains": [
-          "Loading messages..."
+          "fixture-topic-one-body"
         ]
       },
       "budgetMs": 1000
     },
     {
-      "name": "15-topics-open-topic-two",
-      "input": "click",
+      "name": "10-topics-open-topic-two",
+      "input": "pressSequence:down,click",
       "target": "sidebar.messages.topic",
       "expect": {
         "state": {
+          "focus": "messages",
           "selectedTopicIndex": 2
-        }
+        },
+        "renderBodyContains": [
+          "fixture-topic-two-body"
+        ]
       },
       "apiCalls": [
         "markRead"
@@ -1062,36 +960,23 @@
       "budgetMs": 1500
     },
     {
-      "name": "16-topic-two-back",
+      "name": "11-topic-two-back",
       "input": "double_click",
-      "target": "sidebar.topics.preview",
+      "target": "sidebar.topics",
       "expect": {
         "state": {
-          "focus": "topics"
+          "focus": "topics",
+          "selectedTopicIndex": 2
         },
         "renderBodyContains": [
-          "Loading messages..."
-        ]
-      },
-      "budgetMs": 500
-    },
-    {
-      "name": "17-topics-swipe-down-3",
-      "input": "down",
-      "target": "sidebar.topics.preview",
-      "expect": {
-        "state": {
-          "selectedTopicIndex": 3
-        },
-        "renderBodyContains": [
-          "Loading messages..."
+          "\"keys\":[\"topic:fixture-topic-2\",\"topic:fixture-topic-3\""
         ]
       },
       "budgetMs": 1000
     },
     {
-      "name": "18-topics-open-topic-three",
-      "input": "pressSequence:click,up",
+      "name": "12-topics-open-topic-three",
+      "input": "pressSequence:down,click,up",
       "target": "sidebar.messages.topic",
       "expect": {
         "state": {
@@ -1106,7 +991,7 @@
       "budgetMs": 1500
     },
     {
-      "name": "18a-topic-long-message-verify",
+      "name": "13-topic-long-message-verify",
       "input": "pressSequence:up,up",
       "target": "sidebar.messages.topic",
       "expect": {
@@ -1117,49 +1002,65 @@
       "budgetMs": 1000
     },
     {
-      "name": "19-topic-three-back",
-      "input": "pressSequence:double_click",
-      "target": "sidebar.topics.preview",
+      "name": "14-topic-three-back",
+      "input": "double_click",
+      "target": "sidebar.topics",
       "expect": {
         "state": {
-          "focus": "topics"
-        }
+          "focus": "topics",
+          "selectedTopicIndex": 3
+        },
+        "renderBodyContains": [
+          "\"keys\":[\"topic:fixture-topic-3\",\"topic:fixture-topic-4\""
+        ]
       },
       "budgetMs": 1000
     },
     {
-      "name": "19a-topics-box-to-no-box-swipe",
-      "input": "up",
-      "target": "sidebar.topics.preview",
+      "name": "15-topics-back-to-top",
+      "input": "pressSequence:down,down,down,down,click",
+      "target": "sidebar.topics",
       "expect": {
         "state": {
-          "selectedTopicIndex": 2
+          "focus": "topics",
+          "selectedTopicIndex": 0
         },
         "renderBodyContains": [
-          "fixture-topic-two-body",
-          "\"panelBox\":null"
-        ],
-        "bridgeCall": {
-          "method": "textContainerUpgrade"
-        }
+          "\"keys\":[\"topic:fixture-topic-0\""
+        ]
       },
-      "budgetMs": 1500
+      "budgetMs": 1000
     },
     {
-      "name": "20-topics-double-back-to-chats",
+      "name": "16-topics-double-back-to-chats",
       "input": "double_click",
       "target": "sidebar.chats",
       "expect": {
         "state": {
           "focus": "chats",
           "selectedChatIndex": 1
+        },
+        "renderBodyContains": [
+          "\"keys\":[\"chat:fixture-chat-1\",\"chat:fixture-chat-2\""
+        ]
+      },
+      "budgetMs": 1000
+    },
+    {
+      "name": "17-chats-back-to-top",
+      "input": "pressSequence:down,down,down,down,down,click",
+      "target": "sidebar.chats",
+      "expect": {
+        "state": {
+          "focus": "chats",
+          "selectedChatIndex": 0
         }
       },
       "budgetMs": 1000
     },
     {
       "name": "21-chats-open-alpha",
-      "input": "pressSequence:up,click",
+      "input": "click",
       "target": "sidebar.messages.normal",
       "expect": {
         "state": {
@@ -1228,12 +1129,12 @@
       "input": "pressSequence:down,down,down,down",
       "target": "sidebar.chats",
       "expect": {
-        "state": {
-          "focus": "chats",
-          "selectedChatIndex": 4
-        }
+        "targetEventRequired": false,
+        "noRenderEvents": true,
+        "maxPerSwipeMs": 1000,
+        "apiCalls": []
       },
-      "budgetMs": 700
+      "budgetMs": 1000
     },
     {
       "name": "21c-archive-long-message",
@@ -1276,13 +1177,28 @@
       "expect": {
         "state": {
           "focus": "chats"
-        }
+        },
+        "renderBodyContains": [
+          "\"keys\":[\"chat:fixture-chat-4\",\"chat:fixture-chat-5\""
+        ]
       },
       "budgetMs": 500
     },
     {
+      "name": "21f-chats-back-to-top",
+      "input": "pressSequence:down,down,click",
+      "target": "sidebar.chats",
+      "expect": {
+        "state": {
+          "focus": "chats",
+          "selectedChatIndex": 0
+        }
+      },
+      "budgetMs": 1000
+    },
+    {
       "name": "22-chats-reopen-alpha",
-      "input": "pressSequence:up,up,up,up,click",
+      "input": "click",
       "target": "sidebar.messages.normal",
       "expect": {
         "state": {
@@ -1623,7 +1539,8 @@
       "expect": {
         "apiCalls": [],
         "noRenderEvents": true,
-        "maxPerSwipeMs": 50
+        "maxPerSwipeMs": 50,
+        "targetEventRequired": false
       },
       "budgetMs": 1000
     },

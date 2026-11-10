@@ -97,6 +97,14 @@ const zh: LocaleStrings = {
   authPhonePending: 'Yanzhengma yi fasong zhi {phone}. Qing zai shouji shang shuru.',
 
   bridgeEmptyList: 'Kong',
+
+  listMoreChats: 'Gengduo liaotian...',
+
+  listMoreTopics: 'Gengduo huati...',
+
+  listBackToTop: 'Huidao dingbu',
+
+  statusNewActivity: 'Xin dongtai',
   typingSuffix: '正在输入\u2026',
   confirmSend: '发送',
   confirmCancel: '取消',

@@ -17,5 +17,20 @@
   "panelFooter": "Swipe chats | Press open",
   "panelBox": null,
   "popup": null,
-  "panelImage": null
+  "panelImage": null,
+  "nativeList": {
+    "name": "chat-list",
+    "items": [
+      "Fixture Research",
+      "Fixture Archive",
+      "Fixture Media",
+      "Back to top"
+    ],
+    "keys": [
+      "chat:fixture-chat-3",
+      "chat:fixture-chat-4",
+      "chat:fixture-chat-5",
+      "top"
+    ]
+  }
 }

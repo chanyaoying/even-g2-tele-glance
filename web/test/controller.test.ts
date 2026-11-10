@@ -3107,3 +3107,325 @@ describe('offline-first: stored data stays usable while the network is slow', ()
     controller.dispose()
   })
 })
+
+describe('native (firmware-drawn) chat and topic lists', () => {
+  type NativeTestBridge = GlassesBridge & { refuseNativeLists: () => void; startupText: { value: boolean } }
+  function nativeBridge(): NativeTestBridge {
+    let native = true
+    let unavailable: (() => void) | undefined
+    const startupText = { value: false }
+    return {
+      ...fakeBridge(),
+      supportsNativeList: vi.fn(() => native),
+      onNativeListUnavailable: vi.fn((listener: () => void) => { unavailable = listener }),
+      showingStartupText: vi.fn(() => startupText.value),
+      lastPageAcceptedAt: vi.fn(() => 0),
+      refuseNativeLists: () => { native = false; unavailable?.() },
+      startupText,
+    }
+  }
+  const plainChats = (count: number, from = 0): Chat[] =>
+    Array.from({ length: count }, (_, i) => ({ id: `c${from + i}`, title: `Chat ${from + i}`, kind: 'user' as const }))
+  // Clicks right after a list is drawn are treated as the firmware's own row-0 report unless the delay is 0.
+  const quick = { nativeListEchoMs: 0, swipeToPressDebounceMs: 0 }
+  async function settle() {
+    await flushAsync()
+    await flushAsync()
+  }
+  function lastFullModel(bridge: GlassesBridge) {
+    const calls = vi.mocked(bridge.render).mock.calls
+    const model = calls[calls.length - 1]?.[0]
+    if (!model || model.kind !== 'sidebar') throw new Error('expected a sidebar page')
+    return model
+  }
+  function lastKeys(bridge: GlassesBridge) {
+    return lastFullModel(bridge).nativeList?.keys
+  }
+  function renderCount(bridge: GlassesBridge) {
+    return vi.mocked(bridge.render).mock.calls.length
+  }
+  async function start(options: { chats?: Chat[] | (() => Chat[]); listChatsImpl?: Parameters<typeof fakeApi>[0]['listChatsImpl']; config?: Record<string, number>; topics?: Topic[] } = {}) {
+    const api = fakeApi({ authorized: true, chats: options.chats ?? plainChats(5), listChatsImpl: options.listChatsImpl, topics: options.topics })
+    const bridge = nativeBridge()
+    const controller = new TelegramAppController(api, bridge, options.config ?? quick)
+    await controller.init()
+    await settle()
+    return { api, bridge, controller }
+  }
+
+  it('draws the chat list as a native list: swipes move only the firmware highlight, a click opens the row it reports', async () => {
+    const { bridge, controller } = await start()
+    expect(lastKeys(bridge)).toEqual(['chat:c0', 'chat:c1', 'chat:c2', 'chat:c3', 'chat:c4'])
+    expect(lastFullModel(bridge).nativeList?.items).toEqual(['Chat 0', 'Chat 1', 'Chat 2', 'Chat 3', 'Chat 4'])
+    const renders = renderCount(bridge)
+
+    // A big swipe arrives as a few scroll events (or none): nothing is redrawn and the app does not guess.
+    await controller.dispatch({ type: 'swipeDown' })
+    await controller.dispatch({ type: 'swipeDown' })
+    await settle()
+    expect(renderCount(bridge)).toBe(renders)
+    expect(bridge.enqueueSidebarPanel).not.toHaveBeenCalled()
+    expect(controller.snapshot).toMatchObject({ focus: 'chats', selectedChatIndex: 0 })
+
+    await controller.dispatch({ type: 'selectIndex', index: 3 })
+    expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'messages', chat: { id: 'c3' } })
+  })
+
+  it('opens row 0 from a list click that carries no index (protobuf drops a zero index)', async () => {
+    const { controller } = await start()
+    await controller.dispatch({ type: 'press', index: 0 })
+    expect(controller.snapshot).toMatchObject({ focus: 'messages', chat: { id: 'c0' } })
+  })
+
+  it('ignores the row-0 report a native list may send by itself right after it is drawn', async () => {
+    const { controller } = await start({ config: { nativeListEchoMs: 400, swipeToPressDebounceMs: 0 } })
+    await controller.dispatch({ type: 'selectIndex', index: 0 })
+    expect(controller.snapshot).toMatchObject({ focus: 'chats' })
+    // Another row is never such a report.
+    await controller.dispatch({ type: 'selectIndex', index: 2 })
+    expect(controller.snapshot).toMatchObject({ focus: 'messages', chat: { id: 'c2' } })
+  })
+
+  it('falls back to the reported item name when the index is out of range, and ignores a click it cannot place', async () => {
+    const { controller } = await start()
+    await controller.dispatch({ type: 'selectIndex', index: 42 })
+    expect(controller.snapshot).toMatchObject({ focus: 'chats' })
+    await controller.dispatch({ type: 'selectIndex', index: 42, itemName: 'Chat 4' })
+    expect(controller.snapshot).toMatchObject({ focus: 'messages', chat: { id: 'c4' } })
+  })
+
+  it('prefers the reported name when it disagrees with the row at the reported index', async () => {
+    const { controller } = await start()
+    await controller.dispatch({ type: 'selectIndex', index: 1, itemName: 'Chat 3' })
+    expect(controller.snapshot).toMatchObject({ focus: 'messages', chat: { id: 'c3' } })
+  })
+
+  it('returns from a chat to the list drawn from that chat (the selection box starts on it); Back to top, last, redraws the top', async () => {
+    const { bridge, controller } = await start()
+    await controller.dispatch({ type: 'selectIndex', index: 3 })
+    await settle()
+    await controller.dispatch({ type: 'doublePress' })
+    await settle()
+    expect(controller.snapshot).toMatchObject({ focus: 'chats', selectedChatIndex: 3 })
+    expect(lastKeys(bridge)).toEqual(['chat:c3', 'chat:c4', 'top'])
+    expect(lastFullModel(bridge).nativeList?.items.at(-1)).toBe('Back to top')
+
+    // The firmware puts the box on row 0 after a rebuild: a click there reopens the chat just left.
+    await controller.dispatch({ type: 'press', index: 0 })
+    expect(controller.snapshot).toMatchObject({ focus: 'messages', chat: { id: 'c3' } })
+    await settle()
+    await controller.dispatch({ type: 'doublePress' })
+    await settle()
+    await controller.dispatch({ type: 'selectIndex', index: 2 })
+    await settle()
+    expect(controller.snapshot).toMatchObject({ focus: 'chats', selectedChatIndex: 0 })
+    expect(lastKeys(bridge)?.[0]).toBe('chat:c0')
+  })
+
+  it('pages a long list with More: the loaded chats first, then the next page from the server', async () => {
+    const { api, bridge, controller } = await start({
+      listChatsImpl: (_limit, options) => (options?.offset ? plainChats(5, 20) : plainChats(20)),
+    })
+    const first = lastKeys(bridge)!
+    expect(first).toHaveLength(20)
+    expect(first.at(-1)).toBe('more')
+    expect(first.at(-2)).toBe('chat:c18')
+
+    await controller.dispatch({ type: 'selectIndex', index: 19 })
+    await settle()
+    // Chat 19 is the last loaded chat: the next page is fetched before the next window is drawn.
+    expect(api.listChats).toHaveBeenLastCalledWith(20, { offset: 20, folderId: undefined })
+    expect(lastKeys(bridge)).toEqual(['chat:c19', 'chat:c20', 'chat:c21', 'chat:c22', 'chat:c23', 'chat:c24', 'top'])
+    expect(controller.snapshot).toMatchObject({ focus: 'chats', selectedChatIndex: 19, loadingMore: false })
+
+    await controller.dispatch({ type: 'selectIndex', index: 1 })
+    expect(controller.snapshot).toMatchObject({ focus: 'messages', chat: { id: 'c20' } })
+  })
+
+  it('redraws an untouched list when background data changes the rows', async () => {
+    let current = plainChats(3)
+    const { bridge, controller } = await start({ chats: () => current })
+    const renders = renderCount(bridge)
+    current = [{ ...current[0], unreadCount: 2 }, current[1], current[2]]
+    await refreshRootChats(controller)
+    await settle()
+    expect(renderCount(bridge)).toBe(renders + 1)
+    expect(lastFullModel(bridge).nativeList?.items[0]).toBe('(2) Chat 0')
+  })
+
+  it('holds background changes while the user scrolls the list, and shows them at the next rebuild the user causes', async () => {
+    let current = plainChats(3)
+    const { bridge, controller } = await start({ chats: () => current })
+    await controller.dispatch({ type: 'swipeDown' })
+    const renders = renderCount(bridge)
+
+    // Chat 2 gets a message and moves to the top.
+    current = [{ ...current[2], unreadCount: 1 }, current[0], current[1]]
+    await refreshRootChats(controller)
+    await settle()
+    expect(renderCount(bridge)).toBe(renders) // the firmware highlight stays where the user put it
+    expect(controller.snapshot).toMatchObject({ focus: 'chats', listUpdatePending: true })
+    const chrome = vi.mocked(bridge.enqueueSidebarPanel!).mock.calls.at(-1)?.[0]
+    expect(chrome?.panelFooter).toBe('New activity | Swipe chats | Press open')
+
+    // A click still means the row the user saw: row 0 is Chat 0, not the chat that moved up.
+    await controller.dispatch({ type: 'selectIndex', index: 1 })
+    expect(controller.snapshot).toMatchObject({ focus: 'messages', chat: { id: 'c1' } })
+    await settle()
+    await controller.dispatch({ type: 'doublePress' })
+    await settle()
+    expect(controller.snapshot).toMatchObject({ focus: 'chats' })
+    expect((controller.snapshot as { listUpdatePending?: boolean }).listUpdatePending).toBeUndefined()
+    // The fresh order: Chat 1 is now third, so the list is drawn from it; Back to top shows the chat that moved up.
+    expect(lastFullModel(bridge).nativeList?.items).toEqual(['Chat 1', 'Back to top'])
+    expect(lastFullModel(bridge).panelFooter).toBe('Swipe chats | Press open')
+    await controller.dispatch({ type: 'selectIndex', index: 1 })
+    await settle()
+    expect(lastFullModel(bridge).nativeList?.items).toEqual(['(1) Chat 2', 'Chat 0', 'Chat 1'])
+  })
+
+  it('applies a held update when the app comes back to the foreground', async () => {
+    let current = plainChats(3)
+    const { bridge, controller } = await start({ chats: () => current })
+    await controller.dispatch({ type: 'swipeDown' })
+    current = [{ ...current[0], unreadCount: 5 }, current[1], current[2]]
+    await refreshRootChats(controller)
+    await settle()
+    const renders = renderCount(bridge)
+    await controller.dispatch({ type: 'foreground' })
+    await settle()
+    expect(renderCount(bridge)).toBeGreaterThan(renders)
+    expect(lastFullModel(bridge).nativeList?.items[0]).toBe('(5) Chat 0')
+  })
+
+  it('swaps the stored chat list for the fresh one at startup while the list is untouched, staying at the top', async () => {
+    const storage = new Map<string, string>()
+    const memory = {
+      getLocalStorage: async (key: string) => storage.get(key) ?? '',
+      setLocalStorage: async (key: string, value: string) => { storage.set(key, value); return true },
+    }
+    const seed = new PersistentCache(memory, { flushDelayMs: 1 })
+    await seed.open('acct')
+    seed.putChats(plainChats(3))
+    await seed.flush()
+    const cache = new PersistentCache(memory, { flushDelayMs: 1 })
+    await cache.open('acct')
+    const fresh = [{ id: 'new', title: 'Newest', kind: 'user' as const, unreadCount: 1 }, ...plainChats(3)]
+    const gate = deferred<Chat[]>()
+    const api = fakeApi({ authorized: true })
+    vi.mocked(api.listChats).mockImplementation(() => gate.promise)
+    const bridge = nativeBridge()
+    const controller = new TelegramAppController(api, bridge, quick, undefined, () => true, cache)
+    const started = controller.init()
+    await settle()
+    expect(lastKeys(bridge)).toEqual(['chat:c0', 'chat:c1', 'chat:c2'])
+    gate.resolve(fresh)
+    await started
+    await settle()
+    expect(lastKeys(bridge)).toEqual(['chat:new', 'chat:c0', 'chat:c1', 'chat:c2'])
+  })
+
+  it('draws a forum topic list as a native list with no preview fetch, and returns to it anchored at the topic', async () => {
+    const forum: Chat = { id: 'f', title: 'Forum', kind: 'group', isForum: true }
+    const forumTopics: Topic[] = [{ id: 't1', title: 'One' }, { id: 't2', title: 'Two' }, { id: 't3', title: 'Three' }]
+    const { api, bridge, controller } = await start({ chats: [forum, ...plainChats(2)], topics: forumTopics })
+    await controller.dispatch({ type: 'press', index: 0 })
+    await sleep(300)
+    expect(controller.snapshot).toMatchObject({ focus: 'topics' })
+    expect(lastKeys(bridge)).toEqual(['topic:t1', 'topic:t2', 'topic:t3'])
+    expect(lastFullModel(bridge)).toMatchObject({ fullWidth: true, title: 'Forum' })
+    expect(api.listMessages).not.toHaveBeenCalled() // no topic preview
+
+    await controller.dispatch({ type: 'selectIndex', index: 2 })
+    expect(controller.snapshot).toMatchObject({ focus: 'messages', topic: { id: 't3' } })
+    await settle()
+    await controller.dispatch({ type: 'doublePress' })
+    await settle()
+    expect(controller.snapshot).toMatchObject({ focus: 'topics', selectedTopicIndex: 2 })
+    expect(lastKeys(bridge)).toEqual(['topic:t3', 'top'])
+    await controller.dispatch({ type: 'doublePress' })
+    await settle()
+    expect(controller.snapshot).toMatchObject({ focus: 'chats', selectedChatIndex: 0 })
+  })
+
+  it('keeps the folder picker and switches folders onto a fresh native list from the top', async () => {
+    const folders: Folder[] = [{ id: '2', title: 'Work' }]
+    const api = fakeApi({
+      authorized: true, folders,
+      listChatsImpl: (_limit, options) => (options?.folderId ? plainChats(2, 50) : plainChats(4)),
+    })
+    const bridge = nativeBridge()
+    const controller = new TelegramAppController(api, bridge, quick)
+    await controller.init()
+    await settle()
+    await controller.dispatch({ type: 'doublePress' })
+    expect(controller.snapshot).toMatchObject({ screen: 'folderPicker' })
+    await controller.dispatch({ type: 'swipeDown' })
+    await controller.dispatch({ type: 'press' })
+    await settle()
+    expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'chats', selectedChatIndex: 0 })
+    expect(lastKeys(bridge)).toEqual(['chat:c50', 'chat:c51'])
+    expect(lastFullModel(bridge).title).toBe('Work 2/2')
+  })
+
+  it('moves the marker on the startup text page until the native list lands', async () => {
+    const { bridge, controller } = await start()
+    bridge.startupText.value = true
+    await controller.dispatch({ type: 'swipeDown' })
+    await controller.dispatch({ type: 'swipeDown' })
+    expect(controller.snapshot).toMatchObject({ focus: 'chats', selectedChatIndex: 2 })
+    const sent = vi.mocked(bridge.enqueueSidebarPanel!).mock.calls.at(-1)?.[0]
+    expect(sent?.panelBody).toContain('> Chat 2')
+    expect(sent?.nativeList?.keys).toEqual(['chat:c2', 'chat:c3', 'chat:c4', 'top']) // the list that lands starts there
+    // A tap on the text page (no list index) opens the marked chat.
+    await controller.dispatch({ type: 'press' })
+    expect(controller.snapshot).toMatchObject({ focus: 'messages', chat: { id: 'c2' } })
+  })
+
+  it('drops a click from the list page that is being replaced (the new page has not landed yet)', async () => {
+    const { bridge, controller } = await start({ chats: [{ id: 'f', title: 'Forum', kind: 'group', isForum: true }, ...plainChats(3)] })
+    const chatPage = `chat-list-${lastFullModel(bridge).nativeList?.page}`
+    await controller.dispatch({ type: 'selectIndex', index: 0, listName: chatPage })
+    await sleep(300)
+    expect(controller.snapshot).toMatchObject({ focus: 'topics' })
+    const topicPage = `topic-list-${lastFullModel(bridge).nativeList?.page}`
+    expect(topicPage).not.toBe(chatPage)
+    // A second click on the old chat list (row 2 = Chat 1) must not open topic 3.
+    await controller.dispatch({ type: 'selectIndex', index: 2, listName: chatPage })
+    expect(controller.snapshot).toMatchObject({ focus: 'topics' })
+    await controller.dispatch({ type: 'selectIndex', index: 1, listName: topicPage })
+    expect(controller.snapshot).toMatchObject({ focus: 'messages', topic: { id: '20' } })
+  })
+
+  it('replaces a placeholder row (folder still loading) even after the user swiped on it', async () => {
+    const folders: Folder[] = [{ id: '2', title: 'Work' }]
+    const gate = deferred<Chat[]>()
+    const api = fakeApi({
+      authorized: true, folders,
+      listChatsImpl: (_limit, options) => (options?.folderId ? gate.promise : plainChats(2)),
+    })
+    const bridge = nativeBridge()
+    const controller = new TelegramAppController(api, bridge, quick)
+    await controller.init()
+    await settle()
+    await controller.dispatch({ type: 'doublePress' })
+    await controller.dispatch({ type: 'swipeDown' })
+    const switching = controller.dispatch({ type: 'press' }) // waits for the folder's chats
+    await settle()
+    expect(lastKeys(bridge)).toEqual(['empty'])
+    await controller.dispatch({ type: 'swipeDown' })
+    gate.resolve(plainChats(2, 70))
+    await switching
+    await vi.waitFor(() => expect(lastKeys(bridge)).toEqual(['chat:c70', 'chat:c71']))
+  })
+
+  it('goes back to the text list with a marker when the host refuses native lists', async () => {
+    const { bridge, controller } = await start()
+    bridge.refuseNativeLists()
+    await settle()
+    expect(lastFullModel(bridge).nativeList).toBeUndefined()
+    expect(lastFullModel(bridge).panelBody).toContain('> Chat 0')
+    await controller.dispatch({ type: 'swipeDown' })
+    expect(controller.snapshot).toMatchObject({ focus: 'chats', selectedChatIndex: 1 })
+  })
+})

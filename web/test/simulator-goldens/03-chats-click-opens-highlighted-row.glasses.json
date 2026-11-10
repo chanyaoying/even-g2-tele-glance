@@ -1,10 +1,10 @@
 {
   "kind": "sidebar",
-  "title": "Chats",
+  "title": "Fixture Research",
   "sidebarTitle": "Chats",
   "focus": "panel",
   "fullWidth": true,
-  "sidebarSelected": 2,
+  "sidebarSelected": 3,
   "sidebarItems": [
     "Fixture Alpha",
     "(3) Fixture Forum",
@@ -13,8 +13,8 @@
     "Fixture Archive",
     "Fixture Media"
   ],
-  "panelBody": "  Fixture Alpha\n  (3) Fixture Forum\n> Fixture Ops\n  Fixture Research\n  Fixture Archive\n  Fixture Media",
-  "panelFooter": "Swipe chats | Press open",
+  "panelBody": "Loading Fixture Research...",
+  "panelFooter": "Loading Fixture Research... | Swipe scroll | Hold to record | Double click back",
   "panelBox": null,
   "popup": null,
   "panelImage": null

@@ -4,6 +4,14 @@
 > uses a visible native list for chat/topic selection. It renders the sidebar and
 > marker in a text container under controller ownership and uses one full-screen
 > text event overlay. The SDK analysis below remains historical context.
+>
+> Update (native-list branch, November 2026): the chat and topic lists are native
+> lists again, designed around this limitation instead of fighting it. The app no
+> longer tries to know or restore the highlighted row: the list window starts at
+> the item the app wants under the box (row 0 after every rebuild), clicks are read
+> against the rows as drawn, and background data never redraws a list the user has
+> scrolled. See `docs/UI_INVARIANTS.md` section 1.6. SDK 0.0.16 still has no way to
+> set the selected row.
 
 **Affected SDK**: `@evenrealities/even_hub_sdk` (verified against
 the version pinned in `web/package.json`, currently `0.7.2` of

@@ -1,0 +1,43 @@
+{
+  "kind": "sidebar",
+  "title": "Fixture Forum",
+  "sidebarTitle": "Topics",
+  "focus": "panel",
+  "fullWidth": true,
+  "sidebarSelected": 1,
+  "sidebarItems": [
+    "Fixture Topic Zero",
+    "Fixture Topic One",
+    "(1) Fixture Topic Two",
+    "(1) Fixture Topic Three",
+    "Fixture Topic Four",
+    "Fixture Topic Five",
+    "Fixture Topic Six"
+  ],
+  "panelBody": "  Fixture Topic Zero\n> Fixture Topic One\n  (1) Fixture Topic Two\n  (1) Fixture Topic Three\n  Fixture Topic Four\n  Fixture Topic Five\n  Fixture Topic Six",
+  "panelFooter": "TAP TO OPEN TOPIC",
+  "panelBox": null,
+  "popup": null,
+  "panelImage": null,
+  "nativeList": {
+    "name": "topic-list",
+    "items": [
+      "Fixture Topic One",
+      "(1) Fixture Topic Two",
+      "(1) Fixture Topic Three",
+      "Fixture Topic Four",
+      "Fixture Topic Five",
+      "Fixture Topic Six",
+      "Back to top"
+    ],
+    "keys": [
+      "topic:fixture-topic-1",
+      "topic:fixture-topic-2",
+      "topic:fixture-topic-3",
+      "topic:fixture-topic-4",
+      "topic:fixture-topic-5",
+      "topic:fixture-topic-6",
+      "top"
+    ]
+  }
+}

@@ -16,14 +16,17 @@ The glasses display is `576 x 288` pixels. The Even Hub SDK imposes these hard l
 | `panelBox`     | `TextContainerProperty`                         | 999        | up to 8 rows       | x=184, y=54, width=376, 1 px border            |
 | `panelFooter`  | `TextContainerProperty`                         | 120        | 1-2                | x=2, y=248, width=572                          |
 | `eventOverlay` | `TextContainerProperty`                         | 0          | n/a                | full size, capture 1 when focus=panel          |
-| hidden list    | `ListContainerProperty`                         | n/a        | 1 empty item       | hidden 1x1 compatibility container, capture disabled |
+| hidden list    | `ListContainerProperty`                         | n/a        | 1 empty item       | hidden 1x1 compatibility container, capture disabled (text/sidebar pages) |
+| native list    | `ListContainerProperty`                         | item names <= 64 | 1-20 items   | chat/topic list pages only: x=2, y=38, 572x208, capture 1, selection border on (section 1.6) |
 
 Harness invariants on every render:
 - `model.title` UTF-8 bytes <= 120
 - `model.panelBody` UTF-8 bytes <= 999
 - `model.panelFooter` UTF-8 bytes <= 120
 - `model.sidebarItems` length 1..20, each item byte length <= 64
-- For `kind === 'sidebar'`, the bridge always renders container IDs `0..7` (the harness parses the bridge JSON for these IDs and asserts no stale container survives a state change)
+- For `kind === 'sidebar'` without `nativeList`, the bridge always renders container IDs `0..7` (the harness parses the bridge JSON for these IDs and asserts no stale container survives a state change)
+- For `kind === 'sidebar'` with `nativeList` (chat and topic lists), the bridge renders the native list page: container IDs `0, 1, 4` (text) and `8` (list), section 1.6
+- Every page stays within the host limits (README of `@evenrealities/even_hub_sdk` 0.0.16 and on-glasses evidence): 1-12 containers, at most 8 text containers, exactly one `isEventCapture: 1`, `zOrderIndex` on all containers or none (unique). `web/test/evenBridge.test.ts` asserts this for the native list page and its text fallback
 
 ## 1.5 Container ID contract
 
@@ -39,24 +42,51 @@ Container IDs are shared across `TextContainerProperty`, `ListContainerProperty`
 | 5   | `sidebar`        | Text | Sidebar text content (panel-focus only)             |
 | 6   | `panelBody`      | Text | Right-side message/preview text                     |
 | 7   | `panelBox`       | Text | Bordered message box (optional)                     |
-| 8   | `sidebar-list`   | List | Native list for chat/topic selection (sidebar-focus) |
+| 8   | `list` / `chat-list-<n>` / `topic-list-<n>` | List | Hidden 1x1 compatibility list on text and sidebar pages; the visible, event-capturing native list on chat/topic list pages (`<n>` numbers each drawing of the list, section 1.6) |
 
 **Invariant**: Container IDs MUST be unique across ALL containers sent in a single `rebuildPageContainer` or `createStartUpPageContainer` call. A list container and a text container with the same ID is a bug. Every render event's bridge payload MUST be validated by the harness for:
 - All container IDs are unique across `textObject`, `listObject`, and `imageObject`
-- When `focus === 'sidebar'`, `listObject[0].containerID === 8` and `textObject` does NOT contain ID 5 (sidebar text)
-- When `focus === 'panel'`, `listObject[0]` is hidden (1x1, no capture) and `textObject` contains ID 5 with sidebar content
+- On text and sidebar (non-list) pages `listObject[0]` is the hidden list (1x1, one empty item, no capture, no selection border) and one text container captures input (`event-overlay`, `body` or `body-events`)
+- On chat/topic list pages `listObject[0]` is the visible native list and is the only container capturing input
 - `containerTotalNum` equals `textObject.length + listObject.length + imageObject.length`
-
-**Sidebar input invariants** (when `focus === 'sidebar'`):
-- `listObject[0].containerID === 8`
-- `eventOverlay.isEventCapture === 1`
-- `listObject[0].isEventCapture === 0`
-- `listObject[0].itemContainer.itemCount === 1`
-- `listObject[0].itemContainer.itemName` is empty
-- `listObject[0].itemContainer.isItemSelectBorderEn === 0`
-- the visible `> ` marker in the sidebar text matches the controller-selected index
-- `listObject[0].itemContainer.itemWidth === 0` (auto-fill)
 - No `TextContainerProperty` has `containerID === 8`
+
+## 1.6 Native list contract (chat and topic lists)
+
+The chat list and the forum topic list are drawn by the glasses firmware as a native list (`ListContainerProperty`), like other G2 apps: a selection box (`isItemSelectBorderEn: 1`) around the whole row, scrolled by the firmware with momentum, so a big swipe on the glasses or the R1 ring moves through several rows. The firmware does not tell the app where the box is; only a click reports a row.
+
+**Page shape** (`buildNativeListPage` in `web/src/bridge/evenBridge.ts`), 4 containers, no `zOrderIndex`:
+
+| ID | Name | Type | Geometry | Notes |
+| -- | ---- | ---- | -------- | ----- |
+| 0 | `outer` | Text | 0,0 576x288, border 2 | |
+| 1 | `title` | Text | 2,2 572x36 | `Chats`, `<folder> <n>/<total>` or the forum title |
+| 4 | `footer` | Text | 2,248 572x38, border 1 | controls; status; `New activity` while an update is held |
+| 8 | `chat-list-<n>` / `topic-list-<n>` | List | 2,38 572x208, padding 4 | `isEventCapture: 1`, `itemCount` = rows (1-20), `itemWidth: 0`, `isItemSelectBorderEn: 1` |
+
+**Limits.** The SDK (0.0.16 `index.d.ts`, README) declares no list limits and no way to set the selected row; the host limits used are the ones this app has always enforced (AGENTS.md "list item count 1-20", harness "item byte length <= 64"): at most 20 rows, each item name at most 64 UTF-8 bytes (`NATIVE_LIST_MAX_ITEMS`, `NATIVE_LIST_ITEM_BYTES`). An empty list still sends one placeholder row (`Empty`, or `Loading more chats...` while a folder loads).
+
+**Windowing.** The controller's `selectedChatIndex` / `selectedTopicIndex` is the list's *anchor*, not the highlighted row: the window starts at it (`nativeListWindow` in `web/src/controller/model.ts`). Rows: the chats/topics from the anchor, then `More chats...` / `More topics...` if anything follows (loaded, or more chats on the server), then `Back to top` if the window does not start at the top. A page rebuild puts the firmware's box on row 0 (seen in the simulator, and the reason the native list was dropped in June 2026), so row 0 is always the anchor item:
+- startup, folder switch, `Back to top`, double press out of the folder picker: anchor 0 (the top);
+- returning from a chat or topic (double press), or waking from sleep: anchor = the chat/topic that was open, so the box is on it again and one click reopens it (this is how "selection kept by chat id" survives without a way to set the highlight);
+- `More...`: anchor = the first chat after the last row shown; when that window would reach the end of the loaded chats and the server has more, the next 20 are fetched first (footer `Loading more chats...`), then the window is drawn.
+
+**Input.**
+- Swipes move only the firmware box. The simulator sends no event at all; real glasses may send bare scroll events. Either way the app does not move its anchor, does not render, and only notes that the list was touched.
+- A click arrives as a list event: `currentSelectItemIndex` (+ `currentSelectItemName` when the host sends it) and the container name. Row 0 often comes with no index at all (protobuf omits 0): a list event that names its container but no row is row 0 (`mapEvenHubEvent`). The row is read against the rows *as drawn* (`shownList` in the controller), never against newer data: index in range wins unless the reported name names another drawn row; out of range falls back to the name; neither -> ignored (debug note `list.click-unresolved`).
+- A click whose container name is not the page last drawn (`chat-list-<n>` numbering) is from a page being replaced and is dropped (`list.stale-click`).
+- A row-0 report within `nativeListEchoMs` (150 ms) of the list landing (or being sent, before it lands) is dropped: native lists were seen to report their highlighted row by themselves when drawn.
+- Double press keeps its meaning (folder picker or sleep on chats, back to chats on topics). Long press is ignored on lists.
+- While the glasses still show the plain-text startup page (`showingStartupText`), the list behaves as before: swipes move a `> ` marker in that text and a press opens the marked chat; the native list that lands afterwards starts at the marked chat.
+
+**Live updates (hold rule).** A rebuild of the list puts the box back on row 0, and the app does not know where the user left it. So:
+- If the list was not touched (no swipe) since it was drawn, background changes (stream/poll refresh, unread counts, reordering, the stored -> fresh chat list at startup, a refreshed topic list) redraw it. A window that starts at the top stays at the top; one anchored further down keeps its anchor chat/topic by id.
+- Once the user has swiped it, a change of the drawn rows that the user did not cause is **held**: the state takes the new data, only the title/footer containers are updated (`New activity | ...` in the footer, `listUpdatePending` in the state), and the rows are redrawn at the next rebuild the user causes: opening and leaving a chat, `Back to top` / `More...`, a folder switch, waking, or the app coming back to the foreground. Changes that leave the drawn rows identical only update the title/footer. A list that only shows a placeholder row is always replaced.
+- Partial updates on a native list page touch only containers 1 and 4; the list container is never updated in place.
+
+**Fallback.** If the host refuses a native list page (a quick `false`, or still refused after the timeout retries), the bridge draws the same screen as the long-standing text page (marker list in `panelBody`, event overlay), reports `supportsNativeList() === false` from then on and tells the controller (`onNativeListUnavailable`), which goes back to moving the marker itself (sections 4.5-4.7 text behaviour). Bridges without native-list support (tests, the browser fallback) always get the text pages.
+
+**Hardware-only checks.** The simulator confirms: the page is accepted, up/down move the box with no app event, a click reports the row index (no name; no index for row 0), double click arrives as a system event, and a rebuild puts the box on row 0. Only real glasses/R1 can confirm: momentum scrolling, whether scroll events or row-0 echoes arrive, whether `currentSelectItemName` is sent, the 20-item/64-byte limits, and how the ring's click arrives.
 
 ## 2. Matcher rules
 
@@ -92,13 +122,13 @@ Per-step latencies are split into `stateMs` (input -> matching state event), `ap
 ## 3.5 UI responsiveness (non-blocking invariants)
 
 - Opening a chat or topic MUST render a loading state (right panel only) within `maxLoadingStateMs` before any network I/O blocks the controller
-- Chat/topic list swipes MUST update `selectedIndex` within `maxSwipeSelectionMs` without triggering a render event
-- Topic preview fetching MUST NOT block sidebar scroll input; controller selection moves before preview loading completes
+- Native chat/topic lists (section 1.6): swipes MUST NOT trigger any render or state change; the firmware moves the selection. Text-fallback lists: swipes MUST update `selectedIndex` within `maxSwipeSelectionMs` without triggering a full render
+- Topic preview fetching (text fallback only) MUST NOT block sidebar scroll input; controller selection moves before preview loading completes
 - Startup prefetching MUST NOT delay the first visible chat list render past `maxInitialRenderMs`; speculative warming begins after 1.2 seconds and is bounded to chats 2-3 plus at most one forum topic
 - SDK-delivered gestures are dispatched at most one per 20 ms window. Movement (swipes, list selection, foreground) MUST be latest-wins so a stale swipe burst cannot replay on a later screen, but presses (press, double press, long press/release) MUST never be coalesced or dropped, and a swipe still pending when a press arrives MUST be dispatched before the press (so "swipe then press" opens the row swiped to). The backlog is capped at 4 entries
-- Background refreshes MUST NOT overwrite the controller-owned sidebar marker
+- Background refreshes MUST NOT overwrite the controller-owned sidebar marker, and MUST NOT redraw a native list the user has swiped since it was drawn (hold rule, section 1.6)
 - Async results from stale requests (previous chat open that was abandoned by backing out) MUST be discarded silently
-- Chat/topic scroll MUST dispatch a partial render through `bridge.enqueueSidebarPanel` rather than a full rebuild. The partial update includes the text sidebar marker and right panel. Rapid swipes MUST coalesce so only the latest model reaches the glasses
+- Text-fallback chat/topic scroll MUST dispatch a partial render through `bridge.enqueueSidebarPanel` rather than a full rebuild. The partial update includes the text sidebar marker and right panel. Rapid swipes MUST coalesce so only the latest model reaches the glasses. On a native list page a partial update only rewrites the title and footer
 - The bridge exposes `render.partial.enqueue` and `render.partial.flush` events for the harness to verify coalescing. `getPartialRenderStats().dropped > 0` is expected during a swipe streak
 
 ### 4.1 `loading`
@@ -136,29 +166,26 @@ Per-step latencies are split into `stateMs` (input -> matching state event), `ap
 - **budget**: 500 ms
 - **apiCalls**: `startPhoneAuth` then `verifyPhoneAuth`
 
-### 4.5 `sidebar.chats` (root chat list, full width, no preview)
-- **state**: `{ screen: 'sidebar', focus: 'chats', chats: [...5 chats...], selectedChatIndex: 0..4 }`
-- **render**: `{ kind: 'sidebar', title: 'Chats', focus: 'panel', fullWidth: true }`
-- **left**: none. The sidebar column is collapsed; `sidebarItems` still carries the labels and `sidebarSelected` the marker for tests.
-  - `sidebarItems.exact`: `['Fixture Alpha', 'Fixture Forum (3)', 'Fixture Ops', 'Fixture Research', 'Fixture Archive']`
-  - The hidden list must have `isEventCapture: 0`; the text overlay is the only active listener
-- **right** (the full-width panel body is the list itself, 7 rows max, windowed around the selection):
-  - `panelBody.contains`: `'> ' + selected chat label` (the marker row)
-  - `panelBody.notContains`: any message preview or `lastMessage` text. Chat previews no longer exist on this screen; they appear only on the topic screen.
-  - `panelFooter`: `'Swipe chats | Press open'`
-  - `panelBox`: `null`
+### 4.5 `sidebar.chats` (root chat list, native list, full width, no preview)
+- **state**: `{ screen: 'sidebar', focus: 'chats', chats: [...], selectedChatIndex, listUpdatePending? }`; `selectedChatIndex` is the list's anchor (section 1.6), not the highlighted row
+- **render**: `{ kind: 'sidebar', title: 'Chats', focus: 'panel', fullWidth: true, nativeList: { name: 'chat-list', items, keys } }`
+- **glasses**: the native list page (section 1.6). `nativeList.items` are the unread-first labels from the anchor (`(3) Fixture Forum`), then `More chats...`, then `Back to top`; `keys` are `chat:<id>` / `more` / `top`. `panelBody` is only the plain-text fallback (startup page, refused native list) with a `> ` marker on the anchor
+  - `panelFooter`: `'Swipe chats | Press open'`; `Loading more chats...` while the next page loads; `New activity | ...` while an update is held
+  - `panelBox`: `null`; no message previews anywhere
 - **transitions**:
-  - `swipeUp` / `swipeDown` -> `state.selectedChatIndex` moves (clamped); no network calls
-  - `press` on normal chat -> `sidebar.messages.normal`
-  - `press` on forum chat -> `sidebar.topics.noPreview`
-  - `selectIndex(n)` with `n === state.selectedChatIndex` after arming window -> `press`
+  - `swipeUp` / `swipeDown` -> no state change, no render (the firmware moves the box)
+  - click on a chat row -> `sidebar.messages.normal`, or `sidebar.topics` for a forum
+  - click on `More chats...` -> `sidebar.chats` anchored at the next chat (fetching the next page first when needed)
+  - click on `Back to top` -> `sidebar.chats` anchored at 0
   - `doublePress` -> `asleep` when the account has no Telegram folders; bridge must call `turnScreenOff` before state event
   - `doublePress` -> `sidebar.folderPicker` when the account has folders
-- **paging**: 20 chats per page. When `selectedChatIndex >= chats.length - 3` and the last page was full, the next page is fetched (`offset` = loaded count), appended without duplicates, and the footer shows `Loading more chats...` meanwhile.
+- **returning**: double press from a chat's messages draws the list anchored at that chat (box on it; a click reopens it)
+- **paging**: 20 chats per server page. No automatic loading while scrolling; `More chats...` loads the next page (`offset` = loaded count), appended without duplicates.
 - **backend cache**: the backend fetches chats from Telegram in blocks of 100 (one request each) and keeps them for 45 s, so consecutive pages cost no extra Telegram requests. Page one (`offset=0`) is always refetched and refreshes only the head of the cache, so background refreshes never discard pages already scrolled in. Folder pages scan from the top once and look ahead 60 matches on deeper pages.
 - **title**: `Chats`, or `<folder> <n>/<total>` (e.g. `Work 2/3`) when folders exist.
-- **budget**: 500 ms per swipe, 1000 ms after `init`
-- **apiCalls**: `listChats` (+ `listFolders` at startup, + paged `listChats` while scrolling). No `listMessages`/`listTopics` and no read acknowledgements while browsing the list; messages load when a chat is opened.
+- **text fallback** (host refused native lists): the long-standing marker list: swipes move `selectedChatIndex` (clamped, no network), a press opens the marked chat, and the next page loads when the marker is within 3 rows of the end.
+- **budget**: 500 ms per click, 1000 ms after `init`
+- **apiCalls**: `listChats` (+ `listFolders` at startup, + paged `listChats` from `More chats...`). No `listMessages`/`listTopics` and no read acknowledgements while browsing the list; messages load when a chat is opened.
 
 ### 4.5a `sidebar.folderPicker` (choose a Telegram folder or sleep)
 - **state**: `{ screen: 'folderPicker', chats, selectedChatIndex, options: ['All chats', ...folders, 'Sleep'], selectedIndex }`
@@ -171,39 +198,22 @@ Per-step latencies are split into `stateMs` (input -> matching state event), `ap
   - `doublePress` -> `sidebar.chats` for the current folder, scrolled to the top (first chat selected)
 - **fixture note**: the fixture account has no folders, so the simulator harness never reaches this screen; it is covered by `web/test/controller.test.ts` (`folders`).
 
-### 4.6 `sidebar.topics.noPreview` (forum topics, preview not yet loaded)
-- **state**: `{ screen: 'sidebar', focus: 'topics', chat, topics: [...4...], selectedTopicIndex: 0 }`
-- **render**: `{ kind: 'sidebar', focus: 'sidebar' }`
-- **left**:
-  - `sidebarTitle`: `'Topics'`
-  - `sidebarItems.exact`: `['Fixture Topic Zero', 'Fixture Topic One (1)', 'Fixture Topic Two (1)', 'Fixture Topic Three (1)']`
-  - `sidebarItems.markerAt`: equals `state.selectedTopicIndex`
-- **right**:
-  - `panelTitle`: selected topic title truncated to 20
-  - `panelBody.contains`: `['Loading messages...']`
-  - `panelBody.notContains`: any topic `lastMessage` strings
-  - `panelFooter`: `'Loading messages...'`
-  - `panelBox`: `null`
+### 4.6 `sidebar.topics` (forum topics, native list, full width, no preview)
+- **state**: `{ screen: 'sidebar', focus: 'topics', chat, topics: [...], selectedTopicIndex, listUpdatePending? }`; `selectedTopicIndex` is the anchor
+- **render**: `{ kind: 'sidebar', title: <forum title>, focus: 'panel', fullWidth: true, nativeList: { name: 'topic-list', items, keys } }`
+- **glasses**: the native list page (section 1.6) with the topics (`(1) Fixture Topic One`), `More topics...` and `Back to top` as for chats; footer `TAP TO OPEN TOPIC` (status first when `Offline`)
+- **no preview**: nothing is fetched while browsing topics; a topic's messages load when it is opened (accepted trade-off: the native list cannot report the highlighted topic, so a preview could not follow it)
 - **transitions**:
-  - `swipeUp` / `swipeDown` -> `selectedTopicIndex` moves
-  - `press` -> `sidebar.messages.topic`
-  - `doublePress` -> `sidebar.chats` with `selectedChatIndex` preserved
-- **budget**: 1000 ms to load first preview
-- **apiCalls**: `listTopics` once; `listMessages` for each unique selected topic preview
-
-### 4.7 `sidebar.topics.preview` (forum topics, preview loaded)
-- **state**: same as `noPreview` plus `previewMessages`, `previewTopic`, `previewCursor`, `previewIsNewestPage: true`
-- **render**: `{ kind: 'sidebar', focus: 'sidebar' }`
-- **right**:
-  - `panelBody.contains`: first message text of selected topic preview
-  - `panelBody.contains`: second message text when present
-  - `panelBody.notContains`: stale messages from any other topic (e.g. `fixture-topic-one-body` must not survive a swipe to topic 2). The right panel MUST reflect the currently selected topic after every swipe, using the prefetched cache when available and falling back to a single `api.listMessages` call when it is not.
-  - `panelFooter`: `'Swipe topics | Press open'`
-  - `panelBox`: optional; when present, `panelBody` must be empty
-- **transitions**: same as `noPreview`
+  - `swipeUp` / `swipeDown` -> no state change, no render
+  - click on a topic -> `sidebar.messages.topic` (`listMessages` with the forum **topic id**)
+  - click on `More topics...` / `Back to top` -> `sidebar.topics` re-anchored
+  - `doublePress` -> `sidebar.chats` anchored at the forum
+- **returning**: double press from a topic's messages draws the topic list anchored at that topic
 - **budget**: 1000 ms
-- **apiCalls**: as `noPreview` plus the preview fetch
-- **eventMustEmit**: `api.call === 'listMessages'` with `args.topicId === <selected topic id>`
+- **apiCalls**: `listTopics` (stored topic lists open at once and are refreshed behind; the hold rule applies to the refresh)
+
+### 4.7 `sidebar.topics.noPreview` / `sidebar.topics.preview` (text fallback only)
+Only when the host refused native lists (section 1.6): topic list on the left with a `> ` marker, preview of the marked topic on the right (`Loading messages...` until it arrives, then the cached/fetched messages; it must never show another topic's messages), footer `TAP TO OPEN TOPIC`. Swipes move `selectedTopicIndex` and fetch the preview after a short idle delay; `press` opens the marked topic; `doublePress` returns to `sidebar.chats`.
 
 ### 4.8 `sidebar.messages.normal` (normal chat messages, no loading)
 - **state**: `{ screen: 'sidebar', focus: 'messages', chat, messages: [...], cursor, isNewestPage: true, scrollOffset: 0, back }`
@@ -362,32 +372,31 @@ Same screen as 4.15 with `> Cancel` / `  Send` in the popup body (`selectedIndex
 |#|Step name|Input|Expected target|Extra assertions|
 |---|---|---|---|---|
 |00|`00-startup-loading`|(boot)|`loading`|first render after `init`|
-|01|`01-chats-startup`|(after `init`)|`sidebar.chats`|`selectedChatIndex === 0`, list marker on `Fixture Alpha`|
-|02|`02-chats-swipe-down-1`|`swipeDown`|`sidebar.chats`|`selectedChatIndex === 1`, list marker on `Fixture Forum (3)`|
-|03|`03-chats-swipe-down-2`|`swipeDown`|`sidebar.chats`|`selectedChatIndex === 2`, list marker on `Fixture Ops`|
-|04|`04-chats-swipe-down-3`|`swipeDown`|`sidebar.chats`|`selectedChatIndex === 3`, list marker on `Fixture Research`|
-|05|`05-chats-swipe-up-1`|`swipeUp`|`sidebar.chats`|`selectedChatIndex === 2`|
-|06|`06-chats-swipe-up-2`|`swipeUp`|`sidebar.chats`|`selectedChatIndex === 1`|
-|07|`07-chats-swipe-up-3`|`swipeUp`|`sidebar.chats`|`selectedChatIndex === 0`|
-|08|`08-chats-open-forum-topics`|`press`|`sidebar.topics.noPreview`|panel shows `Loading messages...`|
-|08a|`08a-topics-fast-open-before-preview`|`click` on first topic|`sidebar.messages.topic`|message fetch must use `topic.id`; preview cache MUST populate for the just-opened topic so a back-then-swipe shows content, not `Loading messages...`|
-|08b|`08b-topics-back-shows-loading`|`doublePress`|`sidebar.topics.noPreview`|back to topics must show `Loading messages...` (preview cache was cleared on open) — a back-after-preload MUST keep the cached preview|
-|08c|`08c-topics-swipe-preview-from-cache`|`swipeDown`|`sidebar.topics.preview` (topic 1)|panel must show `fixture-topic-one-body` from the cache, not a fresh fetch|
-|08d|`08d-topics-swipe-back-cached-preview`|`swipeUp`|`sidebar.topics.preview` (topic 0)|panel must show `Topic zero warmup body` from the cache; this catches a regression where the swipe handler blanks the right panel on cached-only topics|
-|09|`09-topics-preview-loaded`|(wait)|`sidebar.topics.preview`|panel shows topic 0 preview|
-|10|`10-topics-swipe-down-1`|`swipeDown`|`sidebar.topics.preview` (topic 1)|panel must show `fixture-topic-one-body`|
-|11|`11-topics-open-topic-one`|`press`|`sidebar.messages.topic`|left marker on topic 1, panel shows both messages; render must NOT contain `Topic zero warmup body` (catches stale-topic preview leaking through to messages view)|
-|12|`12-topic-messages-scroll-older`|`swipeUp`|`sidebar.messages.topic` (older page)|`state.status` contains `Loading older` then older text|
-|13|`13-topic-messages-back`|`doublePress`|`sidebar.topics.preview`|returns to topics, NOT chats; right panel must show `fixture-topic-one-body` (the topic we just left) and MUST NOT show `Topic zero warmup body`|
-|14|`14-topics-swipe-down-2`|`swipeDown`|`sidebar.topics.preview` (topic 2)|panel must show `fixture-topic-two-body` from the prefetch cache|
-|15|`15-topics-open-topic-two`|`press`|`sidebar.messages.topic`|`api.listMessages.args.topicId === 'fixture-topic-2'`|
-|16|`16-topic-two-back`|`doublePress`|`sidebar.topics.preview`|back to topics; panel must show `fixture-topic-two-body` (the topic we just left), not a stale `Loading messages...`|
-|17|`17-topics-swipe-down-3`|`swipeDown`|`sidebar.topics.preview` (topic 3)|panel must show the topic-3 long-message anchor (catches a regression where the swipe handler does not hydrate the right panel for cached topic 3)|
-|18|`18-topics-open-topic-three`|`press`|`sidebar.messages.topic`|panel shows topic 3 messages|
-|19|`19-topic-three-back`|`doublePress`|`sidebar.topics.preview`|back to topics|
-|20|`20-topics-double-back-to-chats`|`doublePress`|`sidebar.chats`|`selectedChatIndex === 1` preserved|
-|21|`21-chats-open-alpha`|`swipeUp` + `press`|`sidebar.messages.normal`|chat 0, both messages, `markRead` called|
-|22|`22-chats-reopen-alpha`|`pressSequence:up,up,up,up,click`|`sidebar.messages.normal`|chat 0, both messages, `markRead` called, ends on the message thread with the press debounce armed|
+|01|`01-chats-startup`|(after `init`)|`sidebar.chats`|`selectedChatIndex === 0`; render carries `nativeList` `chat-list` with rows `chat:fixture-chat-0`, `chat:fixture-chat-1`, ...; no `listMessages`|
+|02|`02-chats-native-swipe-no-redraw`|`down` x3|`sidebar.chats`|no full render, no API call (the simulator moves its box and sends no event)|
+|03|`03-chats-click-opens-highlighted-row`|`click`|`sidebar.messages.normal`|the click reports row 3: `selectedChatIndex === 3` (Fixture Research)|
+|04|`04-chats-back-starts-at-opened-chat`|`double_click`|`sidebar.chats`|`selectedChatIndex === 3`; rows start `chat:fixture-chat-3`, `chat:fixture-chat-4` (box on the chat just left)|
+|05|`05-chats-back-to-top`|`down` x3, `click`|`sidebar.chats`|the last row, `Back to top`: anchor 0, rows start `chat:fixture-chat-0`|
+|06|`06-chats-open-forum-topics`|`down`, `click`|`sidebar.topics`|`selectedChatIndex === 1`, `topic-list` rows `topic:fixture-topic-0`, ...; `listTopics`; no `listMessages` (no preview)|
+|07|`07-topics-open-topic-one`|`down`, `click`|`sidebar.messages.topic`|`selectedTopicIndex === 1`, `fixture-topic-one-body`, never `Topic zero warmup body`|
+|08|`08-topic-messages-scroll-older`|`up`|`sidebar.messages.topic` (older page)|`isNewestPage === false`, `Older fixture`, `listMessages` with `beforeId`|
+|09|`09-topic-messages-back`|`double_click`|`sidebar.topics`|returns to topics, NOT chats; rows start `topic:fixture-topic-1`; no preview body|
+|10|`10-topics-open-topic-two`|`down`, `click`|`sidebar.messages.topic`|`selectedTopicIndex === 2`, `fixture-topic-two-body`, `markRead`|
+|11|`11-topic-two-back`|`double_click`|`sidebar.topics`|rows start `topic:fixture-topic-2`|
+|12|`12-topics-open-topic-three`|`down`, `click`, `up`|`sidebar.messages.topic`|`selectedTopicIndex === 3`, scrolled one block up (`first line is preserved`)|
+|13|`13-topic-long-message-verify`|`up` x2|`sidebar.messages.topic`|`fixture-long-topic-body-anchor`|
+|14|`14-topic-three-back`|`double_click`|`sidebar.topics`|rows start `topic:fixture-topic-3`|
+|15|`15-topics-back-to-top`|`down` x4, `click`|`sidebar.topics`|`Back to top`: `selectedTopicIndex === 0`|
+|16|`16-topics-double-back-to-chats`|`double_click`|`sidebar.chats`|`selectedChatIndex === 1`, rows start `chat:fixture-chat-1`|
+|17|`17-chats-back-to-top`|`down` x5, `click`|`sidebar.chats`|`selectedChatIndex === 0`|
+|21|`21-chats-open-alpha`|`click`|`sidebar.messages.normal`|row 0 (a list click without an index): chat 0, both messages|
+|21a|`21a-back-to-chats`|`double_click`|`sidebar.chats`|`selectedChatIndex === 0`|
+|21b|`21b-chats-swipe-to-archive`|`down` x4|`sidebar.chats`|no full render, no API call|
+|21c|`21c-archive-long-message`|`click`, `up`|`sidebar.messages.normal`|`selectedChatIndex === 4`, long-message anchor|
+|21d|`21d-archive-paginate-older`|`up`|`sidebar.messages.normal`|older page|
+|21e|`21e-back-from-archive`|`double_click`|`sidebar.chats`|rows start `chat:fixture-chat-4`|
+|21f|`21f-chats-back-to-top`|`down` x2, `click`|`sidebar.chats`|`selectedChatIndex === 0`|
+|22|`22-chats-reopen-alpha`|`click`|`sidebar.messages.normal`|chat 0, ends on the message thread with the press debounce armed|
 |22a|`22a-press-debounce-starts-recording`|(wait for `messagePressDelayMs`)|`sidebarRecording`|`setAudioEnabled(true)` called — pins the 260ms debounce that turns a single press into recording (without it the user has no feedback when they tap "record")|
 |23|`23-alpha-record-start`|`click` (no-op, controller already recording)|`sidebarRecording`|`setAudioEnabled(true)` (idempotent)|
 |24|`24-alpha-record-audio-2`|`audioChunk` x 1|`sidebarRecording`|`state.chunks.length === 2`|

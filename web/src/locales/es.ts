@@ -193,6 +193,10 @@ const es: LocaleStrings = {
 
   // ── Bridge ──
   bridgeEmptyList: 'Vacío',
+  listMoreChats: 'Más chats...',
+  listMoreTopics: 'Más temas...',
+  listBackToTop: 'Volver arriba',
+  statusNewActivity: 'Actividad nueva',
   titleFolders: 'Carpetas',
   folderAllChats: 'Todos los chats',
   folderSleep: 'Suspender',

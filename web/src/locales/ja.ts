@@ -97,6 +97,14 @@ const ja: LocaleStrings = {
   authPhonePending: 'Kakunin kōdo o {phone} ni sōshin shimashita. Denwa de nyūryoku shite kudasai.',
 
   bridgeEmptyList: 'Karappo',
+
+  listMoreChats: 'Motto chatto...',
+
+  listMoreTopics: 'Motto topikku...',
+
+  listBackToTop: 'Ue ni modoru',
+
+  statusNewActivity: 'Atarashii katsudou',
   confirmSend: '送信',
   confirmCancel: 'キャンセル',
   sanitizeRed: '[赤]',

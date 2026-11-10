@@ -83,13 +83,13 @@ let messagePageCache = new WeakMap<Message[], MessageDisplayPage[]>()
  * events on the G2 / simulator can mimic user input."
  */
 export type AppInput =
-  | { type: 'press'; index?: number; itemName?: string; eventSource?: number }
-  | { type: 'doublePress'; index?: number; itemName?: string; eventSource?: number }
+  | { type: 'press'; index?: number; itemName?: string; eventSource?: number; listName?: string }
+  | { type: 'doublePress'; index?: number; itemName?: string; eventSource?: number; listName?: string }
   | { type: 'longPress'; eventSource?: number }
   | { type: 'longPressRelease'; eventSource?: number }
   | { type: 'swipeUp'; eventSource?: number }
   | { type: 'swipeDown'; eventSource?: number }
-  | { type: 'selectIndex'; index?: number; itemName?: string; eventSource?: number }
+  | { type: 'selectIndex'; index?: number; itemName?: string; eventSource?: number; listName?: string }
   | { type: 'audioChunk'; pcm: Uint8Array; injected?: boolean }
   | { type: 'foreground'; eventSource?: number }
 
@@ -104,7 +104,71 @@ export type ScreenModel =
       panelImage?: PanelImage;
       popup?: PopupOverlay;
       fullWidth?: boolean;
+      /**
+       * Present on the chat and topic lists when the glasses draw them as a native (firmware) list: a selection box
+       * with momentum scrolling the app cannot follow. The text fields above remain the plain-text fallback (startup
+       * page, or a host that refuses native lists).
+       */
+      nativeList?: NativeListModel;
       focus: 'sidebar' | 'panel'; }
+
+/**
+ * A window of a chat or topic list drawn by the glasses firmware (`ListContainerProperty`). `items` are the labels sent
+ * (already byte-trimmed); `keys` say what each row is: `chat:<id>`, `topic:<id>`, `more` (next window), `top` (back to
+ * the top of the list, always the last row) or `empty` (placeholder row).
+ */
+export type NativeListModel = {
+  name: 'chat-list' | 'topic-list'
+  /**
+   * Which drawing of the list this is (set by the controller, bumped on every rebuild). The container is named
+   * `<name>-<page>` and the glasses echo that name in click events, so a click on a page that is being replaced is
+   * recognised and dropped instead of being read against the new rows.
+   */
+  page?: number
+  items: string[]
+  keys: string[]
+}
+
+/** The container name a native list page is sent with (and that its click events carry). */
+export function nativeListContainerName(list: Pick<NativeListModel, 'name' | 'page'>): string {
+  return list.page === undefined ? list.name : `${list.name}-${list.page}`
+}
+
+/** Host limits for a native list (AGENTS.md, harness): 1-20 items, item names up to 64 UTF-8 bytes. */
+export const NATIVE_LIST_MAX_ITEMS = 20
+export const NATIVE_LIST_ITEM_BYTES = 64
+
+export type NativeListWindow = {
+  /** Index of the first chat/topic shown. */
+  start: number
+  /** One past the last chat/topic shown. */
+  end: number
+  /** A "More..." row follows the items (chats/topics after the window, loaded or still to fetch). */
+  more: boolean
+  /** The last row is "Back to top" (the window does not start at the top). */
+  top: boolean
+}
+
+/**
+ * Which part of a list a native list page shows. The window starts at `start` (the controller's anchor: the top, the
+ * chat just left, or the first chat after a "More" page), so that item is row 0, where the firmware puts the selection
+ * box when a page is drawn. It fills the 20 rows the host allows, keeping one row for "More..." when anything follows
+ * and, last, one for "Back to top" when it does not start at the top.
+ */
+export function nativeListWindow(total: number, start: number, hasMore: boolean): NativeListWindow {
+  const first = Math.max(0, Math.min(start, total - 1))
+  const top = first > 0
+  const room = NATIVE_LIST_MAX_ITEMS - (top ? 1 : 0)
+  if (total - first <= room && !hasMore) return { start: first, end: total, more: false, top }
+  return { start: first, end: Math.min(total, first + room - 1), more: true, top }
+}
+
+export type ScreenModelOptions = {
+  /** Draw the chat and topic lists as native lists (the bridge supports them). */
+  nativeLists?: boolean
+  /** The chat list has more chats on the server than are loaded. */
+  hasMoreChats?: boolean
+}
 
 /**
  * A picture shown inline with the messages: the text leaves a blank gap and the picture container sits over it.
@@ -138,7 +202,10 @@ export type BoxedText = {
 export type AppState =
   | { screen: 'loading'; message: string }
   | { screen: 'auth'; mode: 'needsSetup' | 'signedOut' | 'phonePending'; message: string; phone?: string; phoneCodeHash?: string | null; passwordRequired?: boolean }
-  | { screen: 'sidebar'; focus: 'chats'; chats: Chat[]; selectedChatIndex: number; status?: string; folderLabel?: string; loadingMore?: boolean; previewMessages?: Message[]; previewCursor?: Id; previewScrollOffset?: number; previewNewerPages?: Message[][]; previewIsNewestPage?: boolean }
+  | { screen: 'sidebar'; focus: 'chats'; chats: Chat[]; selectedChatIndex: number; status?: string; folderLabel?: string; loadingMore?: boolean;
+      /** Native list only: newer data arrived while the user was scrolling the list, and is shown at the next rebuild. */
+      listUpdatePending?: boolean;
+      previewMessages?: Message[]; previewCursor?: Id; previewScrollOffset?: number; previewNewerPages?: Message[][]; previewIsNewestPage?: boolean }
   | { screen: 'folderPicker'; chats: Chat[]; selectedChatIndex: number; folderLabel?: string; options: string[]; selectedIndex: number }
   | { screen: 'asleep'; chats: Chat[]; selectedChatIndex: number }
   | { screen: 'newMessage'; chat: Chat; topic?: Topic; message: string; chats: Chat[]; selectedChatIndex: number }
@@ -149,7 +216,9 @@ export type AppState =
       previewCursor?: Id; previewScrollOffset?: number;
       previewNewerPages?: Message[][]; previewIsNewestPage?: boolean;
       /** Set while the topic list shown is a stored one that could not be refreshed (for example `Offline`). */
-      status?: string; }
+      status?: string;
+      /** Native list only: see the chats state. */
+      listUpdatePending?: boolean; }
   | { screen: 'sidebarRecording'; focus: 'messages';
       chats: Chat[]; selectedChatIndex: number;
       chat: Chat; topic?: Topic;
@@ -226,7 +295,7 @@ export function backToMessages(state: ThreadSource, overrides: Partial<MessagesS
   }
 }
 
-export function screenModel(state: AppState): ScreenModel {
+export function screenModel(state: AppState, options: ScreenModelOptions = {}): ScreenModel {
   const l = getLocale()
   switch (state.screen) {
     case 'loading':
@@ -240,6 +309,7 @@ export function screenModel(state: AppState): ScreenModel {
     case 'sidebar': {
       switch (state.focus) {
         case 'chats': {
+          if (options.nativeLists) return nativeChatListModel(state, options.hasMoreChats === true)
           // Full-width list with no message preview. Previews only appear on the topic screen.
           // The list is drawn into the (stable-id) panel body so the app-owned marker stays in sync.
           return {
@@ -256,6 +326,7 @@ export function screenModel(state: AppState): ScreenModel {
           }
         }
         case 'topics': {
+          if (options.nativeLists) return nativeTopicListModel(state)
           // The topics state shows the chat's topic list on the
           // left and a per-topic preview on the right. The preview
           // looks very similar to a full message thread (same
@@ -446,6 +517,77 @@ export function screenModel(state: AppState): ScreenModel {
   }
 }
 const CHAT_LIST_VISIBLE_ROWS = 7
+
+/** Footer of a native list: a held update leads it, then the status, then the controls. */
+function nativeListFooter(pending: boolean | undefined, status: string | undefined, controls: string) {
+  const base = footerText(status, controls)
+  return pending ? sanitizeGlassesText(`${getLocale().statusNewActivity} | ${base}`) : base
+}
+
+function nativeListRows<T extends { id: Id }>(
+  name: NativeListModel['name'],
+  items: T[],
+  window: NativeListWindow,
+  keyPrefix: 'chat' | 'topic',
+  label: (item: T) => string,
+  moreLabel: string,
+  emptyLabel: string,
+): NativeListModel {
+  const l = getLocale()
+  const rows: Array<{ key: string; label: string }> = []
+  for (const item of items.slice(window.start, window.end)) rows.push({ key: `${keyPrefix}:${item.id}`, label: label(item) })
+  if (window.more) rows.push({ key: 'more', label: moreLabel })
+  if (window.top) rows.push({ key: 'top', label: l.listBackToTop })
+  if (rows.length === 0) rows.push({ key: 'empty', label: emptyLabel })
+  return {
+    name,
+    items: rows.map((row) => trimUtf8Bytes(sanitizeGlassesText(row.label).replace(/\s+/g, ' ').trim() || ' ', NATIVE_LIST_ITEM_BYTES)),
+    keys: rows.map((row) => row.key),
+  }
+}
+
+/** The chat list as a native list window anchored at `selectedChatIndex` (see `nativeListWindow`). */
+function nativeChatListModel(state: Extract<AppState, { screen: 'sidebar'; focus: 'chats' }>, hasMore: boolean): ScreenModel {
+  const l = getLocale()
+  const labels = state.chats.map(chatLabel)
+  const window = nativeListWindow(state.chats.length, state.selectedChatIndex, hasMore)
+  const controls = state.loadingMore ? l.statusLoadingMoreChats : l.footerSwipeChats
+  return {
+    kind: 'sidebar',
+    title: sanitizeGlassesText(state.folderLabel ?? l.titleChats),
+    sidebarTitle: l.titleChats,
+    sidebarItems: labels,
+    sidebarSelected: state.selectedChatIndex,
+    panelTitle: '',
+    // Plain-text fallback (startup page, refused native list): the same list with the marker on the anchor.
+    panelBody: formatFullWidthChatList(labels, state.selectedChatIndex),
+    panelFooter: nativeListFooter(state.listUpdatePending, state.loadingMore ? undefined : state.status, controls),
+    fullWidth: true,
+    focus: 'panel',
+    nativeList: nativeListRows('chat-list', state.chats, window, 'chat', chatLabel, l.listMoreChats,
+      state.loadingMore ? l.statusLoadingMoreChats : l.bridgeEmptyList),
+  }
+}
+
+/** The topic list as a native list window. There is no preview: a topic's messages show once it is opened. */
+function nativeTopicListModel(state: Extract<AppState, { screen: 'sidebar'; focus: 'topics' }>): ScreenModel {
+  const l = getLocale()
+  const labels = state.topics.map(topicLabel)
+  const window = nativeListWindow(state.topics.length, state.selectedTopicIndex, false)
+  return {
+    kind: 'sidebar',
+    title: sanitizeGlassesText(state.chat.title.slice(0, 20)),
+    sidebarTitle: l.titleTopics,
+    sidebarItems: labels,
+    sidebarSelected: state.selectedTopicIndex,
+    panelTitle: '',
+    panelBody: formatFullWidthChatList(labels, state.selectedTopicIndex),
+    panelFooter: nativeListFooter(state.listUpdatePending, state.status, l.footerTapToOpenTopic),
+    fullWidth: true,
+    focus: 'panel',
+    nativeList: nativeListRows('topic-list', state.topics, window, 'topic', topicLabel, l.listMoreTopics, l.bridgeEmptyList),
+  }
+}
 
 function formatFullWidthChatList(labels: string[], selected: number): string {
   if (labels.length === 0) return ' '

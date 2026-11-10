@@ -95,6 +95,14 @@ const ms: LocaleStrings = {
   authPhonePending: 'Kod pengesahan dihantar ke {phone}. Masukkannya di telefon.',
 
   bridgeEmptyList: 'Kosong',
+
+  listMoreChats: 'Lebih banyak sembang...',
+
+  listMoreTopics: 'Lebih banyak topik...',
+
+  listBackToTop: 'Kembali ke atas',
+
+  statusNewActivity: 'Aktiviti baharu',
   typingSuffix: 'menaip…',
   confirmSend: 'Hantar',
   confirmCancel: 'Batal',

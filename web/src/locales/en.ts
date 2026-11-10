@@ -238,6 +238,11 @@ const en = {
 
   // ── Bridge ──
   bridgeEmptyList: 'Empty',
+  // Native (firmware-drawn) chat/topic lists: paging entries and the held-update marker.
+  listMoreChats: 'More chats...',
+  listMoreTopics: 'More topics...',
+  listBackToTop: 'Back to top',
+  statusNewActivity: 'New activity',
 
 } as const
 

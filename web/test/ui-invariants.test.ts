@@ -163,7 +163,7 @@ describe('UI_INVARIANTS catalog', () => {
     const targets = new Set(catalog.steps.map((step) => step.target))
     const required: string[] = [
       'sidebar.chats',
-      'sidebar.topics.noPreview',
+      'sidebar.topics',
       'sidebar.messages.normal',
       'sidebarRecording',
       'sidebarTranscribing',

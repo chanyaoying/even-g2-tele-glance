@@ -430,6 +430,9 @@ export function summarizeScreenModel(model: ScreenModel): Record<string, unknown
         panelBox: model.panelBox ? { heading: model.panelBox.heading, contentLength: model.panelBox.content.length, content: model.panelBox.content, contentExcerpt: model.panelBox.content.slice(0, 400) } : null,
         popup: model.popup ? { title: model.popup.title, body: model.popup.body } : null,
         panelImage: model.panelImage ? { messageId: model.panelImage.messageId, topLine: model.panelImage.topLine } : null,
+        // Present only on native chat/topic list pages (the firmware draws these rows; `panelBody` is then the
+        // plain-text fallback and is not what the glasses show).
+        ...(model.nativeList ? { nativeList: { name: model.nativeList.name, items: model.nativeList.items, keys: model.nativeList.keys } } : {}),
       }
   }
 }

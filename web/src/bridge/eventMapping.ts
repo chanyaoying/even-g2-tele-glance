@@ -172,7 +172,7 @@ export function mapEvenHubEvent(event: EvenHubEventLike | unknown): AppInput | u
   const index = readSelectedIndex(listEvent)
   const itemName = readSelectedName(listEvent)
   if ((index !== undefined || itemName !== undefined) && eventType === undefined) {
-    return withEventSource(withOptionalSelection('selectIndex', index, itemName), normalizedEventSource)
+    return withEventSource(withListName(withOptionalSelection('selectIndex', index, itemName), listEvent), normalizedEventSource)
   }
 
   if (eventTypeEquals(eventType, EvenEventType.longPress, EvenEventTypeName.longPress)) return withEventSource({ type: 'longPress' }, normalizedEventSource)
@@ -181,10 +181,27 @@ export function mapEvenHubEvent(event: EvenHubEventLike | unknown): AppInput | u
   // Protobuf omits a zero enum, so a record without an eventType is a CLICK (0). The exception is a system record that
   // carries IMU data or an exit reason: per the SDK's Sys_ItemEvent those are IMU reports and exit events, not taps.
   if (eventType === undefined && !listEvent && !normalized.textEvent && isNonGestureSysRecord(normalized.sysEvent)) return undefined
-  if (eventType === undefined || eventTypeEquals(eventType, EvenEventType.click, EvenEventTypeName.click)) return withEventSource(withOptionalSelection('press', index, itemName), normalizedEventSource)
+  if (eventType === undefined || eventTypeEquals(eventType, EvenEventType.click, EvenEventTypeName.click)) {
+    // A click on a native list row 0: protobuf omits the zero index, and the simulator (and maybe the host) sends no
+    // item name either, so the record carries only the container. Without this it would read as a press from nowhere.
+    const listIndex = listEvent && index === undefined && itemName === undefined && isListContainerRecord(listEvent) ? 0 : index
+    return withEventSource(withListName(withOptionalSelection('press', listIndex, itemName), listEvent), normalizedEventSource)
+  }
   if (eventTypeEquals(eventType, EvenEventType.scrollTop, EvenEventTypeName.scrollTop)) return withEventSource({ type: 'swipeUp' }, normalizedEventSource)
   if (eventTypeEquals(eventType, EvenEventType.scrollBottom, EvenEventTypeName.scrollBottom)) return withEventSource({ type: 'swipeDown' }, normalizedEventSource)
   return undefined
+}
+
+/** A list event names the list page it came from (`containerName`): the controller drops clicks on a replaced page. */
+function withListName(input: AppInput, listEvent: EventRecord | undefined): AppInput {
+  if (!listEvent || (input.type !== 'press' && input.type !== 'selectIndex')) return input
+  const name = pickValue(listEvent, ['containerName', 'Container_Name', 'container_name'])
+  return typeof name === 'string' && name !== '' && name !== 'list' ? { ...input, listName: name } : input
+}
+
+function isListContainerRecord(record: EventRecord): boolean {
+  return pickValue(record, ['containerID', 'Container_ID', 'container_id']) !== undefined
+    || pickValue(record, ['containerName', 'Container_Name', 'container_name']) !== undefined
 }
 
 function isNonGestureSysRecord(record: EventRecord | undefined): boolean {

@@ -97,6 +97,14 @@ const ko: LocaleStrings = {
   authPhonePending: 'Hwagin kodeu-reul {phone}(eu)ro bonaetseumnida. Jeonhwa-eseo ibryeok-hasipsio.',
 
   bridgeEmptyList: 'Bieo isseumnida',
+
+  listMoreChats: 'Chaeting deo bogi...',
+
+  listMoreTopics: 'Juje deo bogi...',
+
+  listBackToTop: 'Maen wiro',
+
+  statusNewActivity: 'Sae hwaldong',
   typingSuffix: '입력 중\u2026',
   confirmSend: '보내기',
   confirmCancel: '취소',

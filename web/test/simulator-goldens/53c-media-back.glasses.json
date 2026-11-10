@@ -17,5 +17,16 @@
   "panelFooter": "Swipe chats | Press open",
   "panelBox": null,
   "popup": null,
-  "panelImage": null
+  "panelImage": null,
+  "nativeList": {
+    "name": "chat-list",
+    "items": [
+      "Fixture Media",
+      "Back to top"
+    ],
+    "keys": [
+      "chat:fixture-chat-5",
+      "top"
+    ]
+  }
 }

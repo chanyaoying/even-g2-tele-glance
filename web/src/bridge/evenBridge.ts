@@ -12,7 +12,7 @@ import {
 import { setDebugSink } from '../debugLog'
 import { getLocale } from '../locales'
 import type { GlassesBridge } from '../controller/appController'
-import { INLINE_IMAGE_HEIGHT, INLINE_IMAGE_WIDTH, MESSAGE_ROW_HEIGHT_PX, type AppInput, type ScreenModel } from '../controller/model'
+import { INLINE_IMAGE_HEIGHT, INLINE_IMAGE_WIDTH, MESSAGE_ROW_HEIGHT_PX, NATIVE_LIST_ITEM_BYTES, NATIVE_LIST_MAX_ITEMS, nativeListContainerName, type AppInput, type NativeListModel, type ScreenModel } from '../controller/model'
 import { defaultApiBaseUrl, effectiveBackendSharedSecret, type TelegramAuthConfig } from '../api'
 import { encryptedTelegramAuthHeader, encryptJsonPayload, PROTOCOL_HEADER, PROTOCOL_VERSION } from '../secureAuth'
 import {
@@ -28,6 +28,8 @@ import { createBoundedInputDispatcher, createInputCoalescer, mapEvenHubEvent } f
 
 const encoder = new TextEncoder()
 const IMAGE_CONTAINER_ID = 9
+/** The native chat/topic list. Same id as the hidden compatibility list on the other pages (never both on one page). */
+const NATIVE_LIST_CONTAINER_ID = 8
 const IMAGE_CONTAINER_NAME = 'panel-image'
 const POPUP_CONTAINER_ID = 10
 /** A rebuild the host answered `false` to after at least this long timed out; it was not a refusal of the layout. */
@@ -154,6 +156,16 @@ export class EvenHubGlassesBridge implements GlassesBridge {
   /** Newest list state seen while the interactive layout was being sent; applied once it lands. */
   private selectionAfterRebuild: Extract<ScreenModel, { kind: 'sidebar' }> | undefined
   private pageSettledWaiters: Array<() => void> = []
+  /**
+   * Set once the host refused a native list page: chat and topic lists are drawn as text (marker) pages from then on.
+   * The controller is told (`onNativeListUnavailable`) so it switches back to moving the marker itself.
+   */
+  private nativeListDisabled = false
+  private nativeListUnavailableListeners: Array<() => void> = []
+  /** The page last sent to the glasses is a native list page (partial updates may only touch its title and footer). */
+  private pageIsNativeList = false
+  /** When the host last accepted a page (epoch ms). */
+  private lastPageAcceptedAtMs = 0
   private audioChain: Promise<void> = Promise.resolve()
   private pageGeneration = 0
   private renderSequence = 0
@@ -179,6 +191,29 @@ export class EvenHubGlassesBridge implements GlassesBridge {
     private unsubscribeEvents?: () => void,
     private readonly listenerToken?: symbol,
   ) {}
+
+  /** Chat and topic lists may be drawn as native (firmware) lists: false once the host refused one. */
+  supportsNativeList(): boolean {
+    return !this.nativeListDisabled
+  }
+
+  onNativeListUnavailable(listener: () => void) {
+    this.nativeListUnavailableListeners.push(listener)
+  }
+
+  /** The glasses still show the plain-text startup page (or it is being sent): list input is not on the native list. */
+  showingStartupText(): boolean {
+    return this.onBootstrapPage || (this.startupBootstrapped && !this.hasRendered)
+  }
+
+  /** When the host last accepted a page (epoch ms, 0 = never). */
+  lastPageAcceptedAt(): number {
+    return this.lastPageAcceptedAtMs
+  }
+
+  private usesNativeList(model: ScreenModel): boolean {
+    return model.kind === 'sidebar' && Boolean(model.nativeList) && !this.nativeListDisabled
+  }
 
   static async create(onInput: (input: AppInput) => void | Promise<void>, options: EvenBridgeOptions = {}) {
     const sdk = (await waitForEvenAppBridge()) as unknown as EvenBridgeInstance
@@ -318,8 +353,10 @@ export class EvenHubGlassesBridge implements GlassesBridge {
         await Promise.race([busy, sleep(IMAGE_BUSY_MAX_WAIT_MS)])
       }
 
+      const native = this.usesNativeList(model)
+      this.pageIsNativeList = native
       if (this.hasRendered) {
-        const container = buildPage(model, RebuildPageContainer, this.layoutTier)
+        const container = buildPage(model, RebuildPageContainer, this.layoutTier, native)
         logTeleGlanceTest('bridge', { method: 'rebuildPageContainer', args: { sequence, generation, hasPanelBox: model.kind === 'sidebar' ? Boolean(model.panelBox) : false } })
         // Log the render event BEFORE the SDK call. The simulator's
         // `rebuildPageContainer` can hang for several seconds on some
@@ -343,17 +380,23 @@ export class EvenHubGlassesBridge implements GlassesBridge {
             // The host answers `false` when it refuses a page. Ignoring that left the glasses on the previous
             // screen while the phone moved on, so fall back to a simpler layout and try again.
             if (accepted === false) {
-              this.handleRejectedPage(model, generation, 'rebuildPageContainer', false, Date.now() - rebuildStartedAt)
+              this.handleRejectedPage(model, generation, 'rebuildPageContainer', false, Date.now() - rebuildStartedAt, native)
               return
             }
             this.timeoutRetries = 0
+            this.lastPageAcceptedAtMs = Date.now()
             this.lastSidebarModel = model.kind === 'sidebar' ? model : undefined
             logTeleGlanceTest('render', { sequence, generation, model: summarizeScreenModel(model) })
             if (this.onBootstrapPage) {
               this.onBootstrapPage = false
               const newer = this.selectionAfterRebuild
               this.selectionAfterRebuild = undefined
-              if (newer && model.kind === 'sidebar') this.enqueueSidebarPanel(newer) // the user scrolled while the layout was being sent
+              if (newer && model.kind === 'sidebar') {
+                // The user scrolled the startup text while the layout was being sent. A native list cannot be moved to
+                // the new place by a partial update: send the list again anchored where the user stopped.
+                if (native && newer.nativeList && !sameNativeList(newer.nativeList, model.nativeList)) void this.render(newer).catch(() => undefined)
+                else this.enqueueSidebarPanel(newer)
+              }
             }
           },
           () => {
@@ -367,7 +410,7 @@ export class EvenHubGlassesBridge implements GlassesBridge {
           },
         )
       } else {
-        const container = buildPage(model, CreateStartUpPageContainer, this.layoutTier)
+        const container = buildPage(model, CreateStartUpPageContainer, this.layoutTier, native)
         logTeleGlanceTest('bridge', { method: 'createStartUpPageContainer', args: { sequence, generation, hasPanelBox: model.kind === 'sidebar' ? Boolean(model.panelBox) : false } })
         logTeleGlanceTest('render', { sequence, generation, model: summarizeScreenModel(model), attempted: true })
         const startupStartedAt = Date.now()
@@ -376,10 +419,11 @@ export class EvenHubGlassesBridge implements GlassesBridge {
             this.rebuildFinished()
             if (typeof result === 'number' && result !== 0) {
               debugNote?.('startup-page', { accepted: false, result: String(result), durationMs: Date.now() - startupStartedAt })
-              this.handleRejectedPage(model, generation, 'createStartUpPageContainer', result)
+              this.handleRejectedPage(model, generation, 'createStartUpPageContainer', result, 0, native)
               return
             }
             this.hasRendered = true
+            this.lastPageAcceptedAtMs = Date.now()
             this.onBootstrapPage = this.startupBootstrapped && model.kind === 'text'
             debugNote?.('startup-page', { accepted: true, bootstrap: this.onBootstrapPage, durationMs: Date.now() - startupStartedAt })
             this.lastSidebarModel = model.kind === 'sidebar' ? model : undefined
@@ -446,7 +490,7 @@ export class EvenHubGlassesBridge implements GlassesBridge {
    * The host refused a page. Log it, step down to a simpler sidebar layout and render the same screen again, unless a
    * newer render has already replaced it. After the simplest layout there is nothing left to try.
    */
-  private handleRejectedPage(model: ScreenModel, generation: number, method: string, result: unknown, durationMs = 0) {
+  private handleRejectedPage(model: ScreenModel, generation: number, method: string, result: unknown, durationMs = 0, native = false) {
     logTeleGlanceTest('render.rejected', { generation, method, result: String(result), tier: this.layoutTier })
     if (model.kind !== 'sidebar') return
     if (generation !== this.pageGeneration) return
@@ -464,6 +508,15 @@ export class EvenHubGlassesBridge implements GlassesBridge {
       return
     }
     this.timeoutRetries = 0
+    // A refused native list page: draw the lists as text pages (the long-standing layout) from now on.
+    if (native && !this.nativeListDisabled) {
+      this.nativeListDisabled = true
+      debugNote?.('native-list-refused', { method, durationMs, tier: this.layoutTier })
+      logTeleGlanceTest('render.native-list-disabled', { method, result: String(result) })
+      void this.render(model).catch(() => undefined)
+      for (const listener of this.nativeListUnavailableListeners) listener()
+      return
+    }
     if (this.layoutTier >= 2) return
     this.layoutTier = (this.layoutTier + 1) as LayoutTier
     void this.render(model).catch(() => undefined)
@@ -527,8 +580,14 @@ export class EvenHubGlassesBridge implements GlassesBridge {
       await this.render(model)
       return
     }
+    // A native list page and a text page have different containers: a partial update cannot turn one into the other.
+    if (this.pageIsNativeList !== this.usesNativeList(model)) {
+      await this.render(model)
+      return
+    }
     // After a full page went out the glasses may show it before `lastSidebarModel` catches up, so diff against nothing.
-    const updates = buildSidebarPanelUpdates(model, this.panelDiffReset ? undefined : this.lastSidebarModel)
+    const previous = this.panelDiffReset ? undefined : this.lastSidebarModel
+    const updates = this.pageIsNativeList ? buildNativeListChromeUpdates(model, previous) : buildSidebarPanelUpdates(model, previous)
     this.panelDiffReset = false
     logTeleGlanceTest('bridge', { method: 'textContainerUpgrade', args: { sequence, generation: this.pageGeneration, count: updates.length, hasPanelBox: Boolean(model.panelBox) } })
     logTeleGlanceTest('render', { sequence, generation: this.pageGeneration, partial: true, model: summarizeScreenModel(model), attempted: true })
@@ -819,7 +878,8 @@ type PageContainerClass = typeof CreateStartUpPageContainer | typeof RebuildPage
 type LayoutTier = 0 | 1 | 2
 
 
-function buildPage(model: ScreenModel, Container: PageContainerClass, tier: LayoutTier = 0) {
+function buildPage(model: ScreenModel, Container: PageContainerClass, tier: LayoutTier = 0, native = false) {
+  if (model.kind === 'sidebar' && native && model.nativeList) return buildNativeListPage(model, model.nativeList, Container)
   if (model.kind === 'sidebar') return buildSidebarPage(model, Container, tier)
   if (model.kind === 'list') return buildListPage(model, Container)
   return buildTextPage(model, Container)
@@ -1027,6 +1087,109 @@ function buildSidebarPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, Cont
     listObject: [list],
     imageObject: [panelImage],
   })
+}
+
+/**
+ * A chat or topic list drawn by the glasses firmware: the selection box and momentum scrolling are the firmware's, so
+ * a big swipe moves through several rows. Four containers (three text, one list); the list is the only one capturing
+ * input, and a click reports the row index (and name) it landed on. No stacking order: nothing overlaps.
+ */
+function buildNativeListPage(model: Extract<ScreenModel, { kind: 'sidebar' }>, list: NativeListModel, Container: PageContainerClass) {
+  const items = (list.items.length > 0 ? list.items : [' '])
+    .slice(0, NATIVE_LIST_MAX_ITEMS)
+    .map((item) => trimForContainer(item.trim() ? item : ' ', NATIVE_LIST_ITEM_BYTES))
+  const outerBorder = new TextContainerProperty({
+    containerID: 0,
+    containerName: 'outer',
+    content: '',
+    xPosition: 0,
+    yPosition: 0,
+    width: 576,
+    height: 288,
+    borderWidth: 2,
+    borderColor: 8,
+    paddingLength: 0,
+    isEventCapture: 0,
+  })
+  const title = new TextContainerProperty({
+    containerID: 1,
+    containerName: 'title',
+    content: trimForContainer(model.title, 100),
+    xPosition: 2,
+    yPosition: 2,
+    width: 572,
+    height: 36,
+    borderWidth: 0,
+    borderColor: 8,
+    paddingLength: 4,
+    isEventCapture: 0,
+  })
+  const footer = new TextContainerProperty({
+    containerID: 4,
+    containerName: 'footer',
+    content: trimForContainer(model.panelFooter, 120),
+    xPosition: 2,
+    yPosition: 248,
+    width: 572,
+    height: 38,
+    borderWidth: 1,
+    borderColor: 8,
+    paddingLength: 4,
+    isEventCapture: 0,
+  })
+  const nativeList = new ListContainerProperty({
+    containerID: NATIVE_LIST_CONTAINER_ID,
+    containerName: nativeListContainerName(list),
+    xPosition: 2,
+    yPosition: 38,
+    width: 572,
+    height: 208,
+    borderWidth: 0,
+    borderColor: 8,
+    paddingLength: 4,
+    itemContainer: new ListItemContainerProperty({
+      itemCount: items.length,
+      itemWidth: 0,
+      itemName: items,
+      isItemSelectBorderEn: 1,
+    }),
+    isEventCapture: 1,
+  })
+  return new Container({
+    containerTotalNum: 4,
+    textObject: [outerBorder, title, footer],
+    listObject: [nativeList],
+  })
+}
+
+/** Partial update of a native list page: only its title and footer are text containers. The list itself is never touched. */
+function buildNativeListChromeUpdates(
+  model: Extract<ScreenModel, { kind: 'sidebar' }>,
+  previous?: Extract<ScreenModel, { kind: 'sidebar' }>,
+): TextContainerUpgrade[] {
+  const updates: TextContainerUpgrade[] = []
+  const title = trimForContainer(model.title, 100)
+  if (!previous || title !== trimForContainer(previous.title, 100)) updates.push(new TextContainerUpgrade({
+    containerID: 1,
+    containerName: 'title',
+    content: title,
+    contentOffset: 0,
+    contentLength: title.length,
+  }))
+  const footer = trimForContainer(model.panelFooter, 120)
+  if (!previous || footer !== trimForContainer(previous.panelFooter, 120)) updates.push(new TextContainerUpgrade({
+    containerID: 4,
+    containerName: 'footer',
+    content: footer,
+    contentOffset: 0,
+    contentLength: footer.length,
+  }))
+  return updates
+}
+
+function sameNativeList(a: NativeListModel | undefined, b: NativeListModel | undefined) {
+  if (!a || !b) return a === b
+  return nativeListContainerName(a) === nativeListContainerName(b) && a.items.join('\u0000') === b.items.join('\u0000') && a.keys.join('\u0000') === b.keys.join('\u0000')
 }
 
 /**

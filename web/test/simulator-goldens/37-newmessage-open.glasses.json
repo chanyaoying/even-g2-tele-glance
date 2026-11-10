@@ -1,10 +1,10 @@
 {
   "kind": "sidebar",
-  "title": "Fixture Research",
+  "title": "Fixture Ops",
   "sidebarTitle": "Chats",
   "focus": "panel",
   "fullWidth": true,
-  "sidebarSelected": 3,
+  "sidebarSelected": 2,
   "sidebarItems": [
     "(1) Fixture Alpha",
     "(3) Fixture Forum",
@@ -13,7 +13,7 @@
     "Fixture Archive",
     "Fixture Media"
   ],
-  "panelBody": "Fixture Research: Research message page\n  contains\n  fixture-research-body for\n  chat index three.\nAnalyst: Research sample confirms normal\n  chat rendering.",
+  "panelBody": "Fixture Ops: Ops message page contains\n  fixture-ops-body for chat index\n  two.\nSRE: Ops latency sample message should\n  remain readable.",
   "panelFooter": "Swipe scroll | Hold to record | Double click back",
   "panelBox": null,
   "popup": null,

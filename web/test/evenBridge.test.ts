@@ -1053,3 +1053,127 @@ describe('debug event privacy', () => {
     })).toEqual({ durationMs: 12, ok: true, error: 'timeout' })
   })
 })
+
+describe('EvenHubGlassesBridge native chat/topic lists', () => {
+  type Page = {
+    containerTotalNum: number
+    textObject?: Array<{ containerID: number; containerName?: string; content?: string; isEventCapture?: number; zOrderIndex?: number }>
+    listObject?: Array<{ containerID: number; containerName?: string; isEventCapture?: number; zOrderIndex?: number; itemContainer?: { itemCount?: number; itemName?: string[]; isItemSelectBorderEn?: number } }>
+    imageObject?: Array<{ containerID: number }>
+  }
+  const listModel = (items: string[], extra: Partial<Extract<ScreenModel, { kind: 'sidebar' }>> = {}): Extract<ScreenModel, { kind: 'sidebar' }> => ({
+    kind: 'sidebar', title: 'Chats', sidebarTitle: 'Chats', sidebarItems: items, sidebarSelected: 0,
+    panelTitle: '', panelBody: items.map((item, i) => `${i === 0 ? '> ' : '  '}${item}`).join('\n'), panelFooter: 'Swipe chats | Press open',
+    fullWidth: true, focus: 'panel',
+    nativeList: { name: 'chat-list', items, keys: items.map((_, i) => `chat:${i}`) },
+    ...extra,
+  })
+  function makeBridge(accept: (page: Page) => boolean = () => true) {
+    const pages: Page[] = []
+    const upgrades: Array<{ containerID?: number; containerName?: string; content?: string }> = []
+    const bridge = new EvenHubGlassesBridge({
+      async createStartUpPageContainer(container: unknown) { pages.push(container as Page); return 0 },
+      async rebuildPageContainer(container: unknown) { pages.push(container as Page); return accept(container as Page) },
+      async textContainerUpgrade(update: { containerID?: number; content?: string }) { upgrades.push(update); return true },
+      async audioControl() { return undefined },
+      onEvenHubEvent() { return undefined },
+    } as never)
+    return { bridge, pages, upgrades }
+  }
+  function assertWithinHostLimits(page: Page) {
+    const all = [...(page.textObject ?? []), ...(page.listObject ?? []), ...(page.imageObject ?? [])]
+    expect(page.containerTotalNum).toBe(all.length)
+    expect(page.containerTotalNum).toBeGreaterThanOrEqual(1)
+    expect(page.containerTotalNum).toBeLessThanOrEqual(12)
+    expect((page.textObject ?? []).length).toBeLessThanOrEqual(8)
+    expect(new Set(all.map((item) => item.containerID)).size).toBe(all.length)
+    expect(all.filter((item) => (item as { isEventCapture?: number }).isEventCapture === 1)).toHaveLength(1)
+    expect(validateEvenHubPageContainerZOrder(page as never)).toMatchObject({ valid: true })
+  }
+
+  it('draws the list as a visible, event-capturing native list with a selection box, within the host limits', async () => {
+    const { bridge, pages } = makeBridge()
+    await bridge.render({ kind: 'text', title: 'Loading', body: 'x' })
+    await bridge.render(listModel(['Alice', '(3) Project', 'Ops']))
+    await flushAsync(10)
+    const page = pages[1]
+    assertWithinHostLimits(page)
+    expect(page.containerTotalNum).toBe(4)
+    expect(page.textObject?.map((item) => item.containerID)).toEqual([0, 1, 4])
+    expect(page.textObject?.some((item) => item.containerName === 'event-overlay')).toBe(false)
+    const list = page.listObject?.[0]
+    expect(list).toMatchObject({ containerID: 8, containerName: 'chat-list', isEventCapture: 1 })
+    expect(list?.itemContainer).toMatchObject({ itemCount: 3, itemName: ['Alice', '(3) Project', 'Ops'], isItemSelectBorderEn: 1 })
+    expect(page.textObject?.find((item) => item.containerID === 4)?.content).toBe('Swipe chats | Press open')
+  })
+
+  it('never sends more than 20 items or an item name over 64 bytes', async () => {
+    const { bridge, pages } = makeBridge()
+    await bridge.render({ kind: 'text', title: 'Loading', body: 'x' })
+    const items = Array.from({ length: 25 }, (_, i) => `${'é'.repeat(40)} ${i}`)
+    await bridge.render(listModel(items))
+    await flushAsync(10)
+    const container = pages[1].listObject?.[0]?.itemContainer
+    expect(container?.itemCount).toBe(20)
+    expect(container?.itemName).toHaveLength(20)
+    for (const name of container?.itemName ?? []) expect(new TextEncoder().encode(name).byteLength).toBeLessThanOrEqual(64)
+  })
+
+  it('updates only the title and footer of a native list page, never the list or text containers it does not have', async () => {
+    const { bridge, upgrades } = makeBridge()
+    await bridge.render({ kind: 'text', title: 'Loading', body: 'x' })
+    await bridge.render(listModel(['Alice', 'Ops']))
+    await flushAsync(10)
+    await bridge.renderSidebarPanel(listModel(['Alice (2)', 'Ops'], { title: 'Work 2/3', panelFooter: 'New activity | Swipe chats | Press open' }))
+    expect(upgrades.map((update) => update.containerID).sort()).toEqual([1, 4])
+    expect(upgrades.find((update) => update.containerID === 4)?.content).toBe('New activity | Swipe chats | Press open')
+  })
+
+  it('falls back to the text list page for good when the host refuses a native list page, and says so', async () => {
+    const isNative = (page: Page) => (page.listObject ?? []).some((list) => list.isEventCapture === 1)
+    const { bridge, pages } = makeBridge((page) => !isNative(page))
+    const unavailable = vi.fn()
+    bridge.onNativeListUnavailable(unavailable)
+    expect(bridge.supportsNativeList()).toBe(true)
+    await bridge.render({ kind: 'text', title: 'Loading', body: 'x' })
+    await bridge.render(listModel(['Alice', 'Ops']))
+    await flushAsync(20)
+
+    expect(isNative(pages[1])).toBe(true)
+    expect(isNative(pages[2])).toBe(false) // the same screen again, as the text (marker) layout
+    expect(JSON.stringify(pages[2])).toContain('> Alice')
+    expect(bridge.supportsNativeList()).toBe(false)
+    expect(unavailable).toHaveBeenCalledTimes(1)
+    for (const page of pages.slice(1)) assertWithinHostLimits(page)
+
+    await bridge.render(listModel(['Alice', 'Ops']))
+    await flushAsync(20)
+    expect(isNative(pages[3])).toBe(false)
+  })
+
+  it('reports the startup text page until the native list lands, and re-anchors the list if the user scrolled meanwhile', async () => {
+    const answers: Array<(accepted: boolean) => void> = []
+    const pages: Page[] = []
+    const bridge = new EvenHubGlassesBridge({
+      async createStartUpPageContainer(container: unknown) { pages.push(container as Page); return 0 },
+      rebuildPageContainer(container: unknown) { pages.push(container as Page); return new Promise<boolean>((resolve) => answers.push(resolve)) },
+      async textContainerUpgrade() { return true },
+      async audioControl() { return undefined },
+      onEvenHubEvent() { return undefined },
+    } as never)
+    await bridge.render(listModel(['Alice', 'Bob', 'Carol']))
+    await flushAsync(10)
+    expect(bridge.showingStartupText()).toBe(true)
+    expect(pages[0].listObject?.some((list) => list.isEventCapture === 1)).toBeFalsy() // startup page is plain text
+
+    // Scrolled on the startup text to Bob: the list anchored at Bob replaces the one in flight once it lands.
+    const scrolled = listModel(['Bob', 'Carol', 'Back to top'], { sidebarSelected: 1, panelBody: '  Alice\n> Bob\n  Carol' })
+    await bridge.renderSidebarPanel(scrolled)
+    answers[0](true)
+    await flushAsync(10)
+    expect(bridge.showingStartupText()).toBe(false)
+    expect(bridge.lastPageAcceptedAt()).toBeGreaterThan(0)
+    expect(pages).toHaveLength(3)
+    expect(pages[2].listObject?.[0]?.itemContainer?.itemName).toEqual(['Bob', 'Carol', 'Back to top'])
+  })
+})

@@ -14,7 +14,7 @@
     "Fixture Topic Five",
     "Fixture Topic Six"
   ],
-  "panelBody": "Older Fixture: Older fixture page before\n  110.\nOlder Fixture: Older fixture content\n  validates up-scroll loading.\nTopic One: Fixture topic one message body\n  includes fixture-topic-one-body.",
+  "panelBody": "Older Fixture: Older fixture page before\n  110.\nOlder Fixture: Older fixture content\n  validates up-scroll loading.\nTopic One: Fixture topic one message body\n  includes fixture-topic-one-body.\n----- last read -----",
   "panelFooter": "Older messages | 1 newer | Swipe scroll | Hold to record | Double click back",
   "panelBox": null,
   "popup": null,

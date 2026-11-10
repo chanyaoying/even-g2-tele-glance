@@ -4,7 +4,7 @@ import type { Chat, Folder, Id, Message, TelegramUpdate, TelegramTypingUpdate, T
 import { getLocale } from '../locales'
 import { backToMessages, DIDNT_CATCH_STATUS, UPDATING_STATUS } from './model'
 import type { AppInput, AppState, RecoverableState, ScreenModel } from './model'
-import { anchorMessageId, messageScrollUnitCount, nextMessageScrollOffset, offsetForAnchorMessage, screenModel } from './model'
+import { anchorMessageId, messageScrollUnitCount, nativeListContainerName, nextMessageScrollOffset, nativeListWindow, offsetForAnchorMessage, screenModel } from './model'
 import { isTeleGlanceFixtureMode, logLifecycleEvent, logRecordingEvent, logStateWork, logTeleGlanceTest, nowMs } from '../testMode'
 import { debugLog, errorText } from '../debugLog'
 import { consumeInjectedAudioChunks } from '../fixtureApi'
@@ -37,6 +37,26 @@ export interface GlassesBridge {
   showExitConfirmation?(): Promise<void>
   turnScreenOff?(): Promise<void>
   dispose?(): void
+  /** Chat and topic lists may be drawn as native (firmware) lists. Without it the lists are text with a marker. */
+  supportsNativeList?(): boolean
+  /** Called once if the host refuses native lists; the controller then redraws the lists as text. */
+  onNativeListUnavailable?(listener: () => void): void
+  /** The glasses still show the plain-text startup page, so list gestures arrive as text-page gestures. */
+  showingStartupText?(): boolean
+  /** When the host last accepted a page (epoch ms). */
+  lastPageAcceptedAt?(): number
+}
+
+/** The native list as the glasses were last asked to draw it: what a click on row N means. */
+type ShownNativeList = {
+  /** `chats:<folder>` or `topics:<chat id>`: changes when the user goes to another list. */
+  identity: string
+  /** Container name of the page (`chat-list-<n>`): a click naming another page is from a page being replaced. */
+  containerName: string
+  items: string[]
+  keys: string[]
+  /** The chat/topic object behind each `chat:`/`topic:` key, in case a refresh dropped it from the state meanwhile. */
+  objects: Map<string, Chat | Topic>
 }
 
 const MESSAGE_PAGE_LIMIT = 8
@@ -82,6 +102,7 @@ const DEFAULT_RUNTIME_CONFIG: ControllerRuntimeConfig = {
   // simulator) reset the tracked list-selection index to 0 on every full page rebuild, and the next click
   // reports the post-reset index. Inside this window the controller's state is trusted instead of the payload.
   firmwareResetWindowMs: 250,
+  nativeListEchoMs: 150,
 }
 
 export type ControllerRuntimeConfig = {
@@ -93,6 +114,8 @@ export type ControllerRuntimeConfig = {
   swipeToPressDebounceMs: number
   selectionOnlyPressDelayMs: number
   firmwareResetWindowMs: number
+  /** A native list's row-0 report this soon after the list landed (or was sent, if it never did) is not a click. */
+  nativeListEchoMs: number
 }
 
 type StateListener = (state: AppState) => void
@@ -205,6 +228,14 @@ export class TelegramAppController {
   private imagesSettled = false
   private imageDeferredSince = 0
   private lastUserInputAt = 0
+  /** Native list mode: the list the glasses were last asked to draw (see `applyNativeListState`). */
+  private shownList: ShownNativeList | undefined
+  /** Native list mode: the user scrolled the list since it was drawn, so the highlight is somewhere unknown. */
+  private nativeListTouched = false
+  /** Native list mode: when the current list page was sent (epoch ms). */
+  private nativeListSentAt = 0
+  /** Native list mode: numbers each drawing of a list (see `NativeListModel.page`). */
+  private nativeListPage = 0
   constructor(
     private readonly api: TelegramApi,
     private readonly bridge: GlassesBridge,
@@ -217,6 +248,28 @@ export class TelegramAppController {
     this.runtimeConfig = typeof options === 'number'
       ? { ...DEFAULT_RUNTIME_CONFIG, messagePressDelayMs: options }
       : { ...DEFAULT_RUNTIME_CONFIG, ...options }
+    // The host refused a native list: from now on the lists are text pages with a marker the controller moves.
+    this.bridge.onNativeListUnavailable?.(() => {
+      debugLog('native-list.unavailable', {})
+      this.shownList = undefined
+      this.enqueueRender(this.state)
+    })
+  }
+
+  /** Chat and topic lists are drawn by the glasses firmware (native list) rather than as text with a marker. */
+  private nativeLists(): boolean {
+    return this.bridge.supportsNativeList?.() === true
+  }
+
+  private model(state: AppState): ScreenModel {
+    const model = screenModel(state, { nativeLists: this.nativeLists(), hasMoreChats: this.chatsHasMore })
+    if (model.kind !== 'sidebar' || !model.nativeList) return model
+    return { ...model, nativeList: { ...model.nativeList, page: this.nativeListPage } }
+  }
+
+  /** A native list is on screen (not the startup text page that precedes it). */
+  private onNativeList(): boolean {
+    return this.nativeLists() && !this.bridge.showingStartupText?.()
   }
 
   get snapshot(): AppState {
@@ -549,6 +602,11 @@ export class TelegramAppController {
       }
       // The session is already loaded: refresh what is on screen without losing the user's place.
       const here = this.state
+      // A native list holding back an update (the user was scrolling it) shows it now: coming back to the app is a
+      // natural moment to redraw the list.
+      if (this.nativeLists() && here.screen === 'sidebar' && (here.focus === 'chats' || here.focus === 'topics') && here.listUpdatePending) {
+        await this.setState(here, { listRebuild: true })
+      }
       if (here.screen === 'sidebar' && here.focus === 'messages') void this.refreshVisibleMessages()
       else if (here.screen === 'sidebar' && here.focus === 'chats') void this.refreshRootChats()
       else if (here.screen === 'newMessage') void this.refreshRootChats()
@@ -604,7 +662,7 @@ export class TelegramAppController {
     }
 
     const state = this.state
-    if (state.screen === 'sidebar' && (state.focus === 'chats' || state.focus === 'topics') && input.type === 'selectIndex') {
+    if (state.screen === 'sidebar' && (state.focus === 'chats' || state.focus === 'topics') && input.type === 'selectIndex' && !this.nativeLists()) {
       const idx = state.focus === 'chats'
         ? this.resolveSelectedChatIndex(input, state.selectedChatIndex, state.chats)
         : this.resolveSelectedTopicIndex(input, state.selectedTopicIndex, state.topics)
@@ -786,6 +844,10 @@ export class TelegramAppController {
   private async handleSidebarChats(
     state: Extract<AppState, { screen: 'sidebar'; focus: 'chats' }>, input: AppInput
   ) {
+    if (this.onNativeList() && input.type !== 'doublePress') {
+      await this.handleNativeListInput(state, input)
+      return
+    }
     if (input.type === 'doublePress') {
       if (this.folders.length > 0) {
         // With folders, double-tap opens the folder picker (which also offers Sleep).
@@ -872,6 +934,10 @@ export class TelegramAppController {
   private async handleSidebarTopics(
     state: Extract<AppState, { screen: 'sidebar'; focus: 'topics' }>, input: AppInput
   ) {
+    if (this.onNativeList() && input.type !== 'doublePress') {
+      await this.handleNativeListInput(state, input)
+      return
+    }
     if (input.type === 'doublePress') {
       this.cancelTopicDebounce()
       await this.setState(this.chatsState(state.chats, state.selectedChatIndex))
@@ -986,7 +1052,128 @@ export class TelegramAppController {
 
     await this.scheduleMessagePress(state)
   }
+  /**
+   * Input on a native chat/topic list. The firmware moves the highlight (with momentum) and does not say where it is:
+   * a swipe only means "the user is scrolling" (background data must not redraw the list now), and a click reports the
+   * row it landed on.
+   */
+  private async handleNativeListInput(
+    state: Extract<AppState, { screen: 'sidebar'; focus: 'chats' | 'topics' }>, input: AppInput
+  ) {
+    if (input.type === 'swipeUp' || input.type === 'swipeDown') {
+      this.nativeListTouched = true
+      return
+    }
+    if (input.type !== 'press' && input.type !== 'selectIndex') return
+    const shown = this.shownList
+    if (!shown) return
+    if (input.listName !== undefined && input.listName !== shown.containerName) {
+      // A click on the list page that is being replaced (the new one has not landed yet): its rows are not these.
+      debugLog('list.stale-click', { index: input.index })
+      return
+    }
+    const now = Date.now()
+    if (input.type === 'selectIndex' && now - this.lastSwipeAt < this.runtimeConfig.swipeToPressDebounceMs) return
+    // Native lists have been seen to report the highlighted row (row 0) by themselves when they are drawn. That is not
+    // a click: drop a row-0 report that arrives right after the list landed (or was sent, while no answer came yet).
+    const drawnAt = Math.max(this.nativeListSentAt, this.bridge.lastPageAcceptedAt?.() ?? 0)
+    if (input.index === 0 && input.itemName === undefined && now - drawnAt < this.runtimeConfig.nativeListEchoMs) {
+      debugLog('list.echo-ignored', { type: input.type, sinceDrawnMs: now - drawnAt })
+      return
+    }
+    const row = resolveNativeListRow(shown, input)
+    if (row === undefined) {
+      debugLog('list.click-unresolved', { type: input.type, index: input.index, hasName: input.itemName !== undefined, rows: shown.keys.length })
+      return
+    }
+    const key = shown.keys[row]
+    debugLog('list.click', { row, key: key.split(':')[0] })
+    if (key === 'empty') return
+    if (key === 'top') {
+      await this.setState(state.focus === 'chats' ? { ...state, selectedChatIndex: 0 } : { ...state, selectedTopicIndex: 0 }, { listRebuild: true })
+      return
+    }
+    if (key === 'more') {
+      await this.showNextNativeListWindow(state, shown)
+      return
+    }
+    if (state.focus === 'chats') {
+      const index = state.chats.findIndex((chat) => `chat:${chat.id}` === key)
+      const chat = state.chats[index] ?? shown.objects.get(key) as Chat | undefined
+      if (!chat) return
+      // The chat opened becomes the anchor: going back draws the list starting at it.
+      await this.openChat(chat, { ...state, selectedChatIndex: index >= 0 ? index : state.selectedChatIndex, listUpdatePending: undefined })
+      return
+    }
+    const index = state.topics.findIndex((topic) => `topic:${topic.id}` === key)
+    const topic = state.topics[index] ?? shown.objects.get(key) as Topic | undefined
+    if (!topic) return
+    await this.openMessages(state.chat, topic, { ...state, selectedTopicIndex: index >= 0 ? index : state.selectedTopicIndex, listUpdatePending: undefined })
+  }
+
+  /** "More..." on a native list: draw the window that starts after the last row shown, fetching chats first if needed. */
+  private async showNextNativeListWindow(
+    state: Extract<AppState, { screen: 'sidebar'; focus: 'chats' | 'topics' }>, shown: ShownNativeList,
+  ) {
+    const itemKeys = shown.keys.filter((key) => key.startsWith('chat:') || key.startsWith('topic:'))
+    const lastKey = itemKeys.at(-1)
+    if (state.focus === 'topics') {
+      const last = state.topics.findIndex((topic) => `topic:${topic.id}` === lastKey)
+      const next = last >= 0 ? last + 1 : state.selectedTopicIndex + itemKeys.length
+      if (next >= state.topics.length) return
+      await this.setState({ ...state, selectedTopicIndex: next }, { listRebuild: true })
+      return
+    }
+    const last = state.chats.findIndex((chat) => `chat:${chat.id}` === lastKey)
+    const next = last >= 0 ? last + 1 : Math.min(state.chats.length, state.selectedChatIndex + itemKeys.length)
+    const window = nativeListWindow(state.chats.length, next, this.chatsHasMore)
+    const needsMore = this.chatsHasMore && (next >= state.chats.length || window.end >= state.chats.length)
+    if (!needsMore) {
+      if (next >= state.chats.length) return
+      await this.setState({ ...state, selectedChatIndex: next }, { listRebuild: true })
+      return
+    }
+    if (this.loadingMoreChats) return
+    const folderId = this.activeFolderId
+    const switchId = this.folderSwitchId
+    this.loadingMoreChats = true
+    await this.setState({ ...state, loadingMore: true })
+    try {
+      const page = await this.api.listChats(CHAT_LIST_LIMIT, { offset: state.chats.length, folderId })
+      if (switchId !== this.folderSwitchId) return
+      this.chatsHasMore = page.length >= CHAT_LIST_LIMIT
+      const current = this.state
+      if (current.screen !== 'sidebar' || current.focus !== 'chats') return
+      const known = new Set(current.chats.map((chat) => String(chat.id)))
+      const chats = [...current.chats, ...page.filter((chat) => !known.has(String(chat.id)))]
+      this.folderChatsCache.set(this.folderKey(folderId), { chats, hasMore: this.chatsHasMore })
+      const start = Math.min(next, Math.max(0, chats.length - 1))
+      await this.setState({ ...current, chats, selectedChatIndex: start, loadingMore: false }, { listRebuild: true })
+    } catch (error) {
+      debugLog('list.more-failed', { error: errorText(error) })
+      const current = this.state
+      if (switchId === this.folderSwitchId && current.screen === 'sidebar' && current.focus === 'chats') {
+        await this.setState({ ...current, loadingMore: false })
+      }
+    } finally {
+      this.loadingMoreChats = false
+    }
+  }
+
+  /**
+   * Native list mode: where a list's anchor goes when its data is replaced in the background. The top stays the top
+   * (new activity lands there); a window that starts further down keeps starting at the same chat/topic.
+   */
+  private reanchor<T extends { id: Id }>(previous: T[], anchor: number, next: T[]): number {
+    if (anchor <= 0 || next.length === 0) return 0
+    const id = previous[anchor]?.id
+    const index = id === undefined ? -1 : next.findIndex((item) => String(item.id) === String(id))
+    return index >= 0 ? index : clamp(anchor, 0, next.length - 1)
+  }
+
   private debounceTopicPreviewFetch(chat: Chat, topics: Topic[], selectedTopicIndex: number) {
+    // Native topic lists have no preview: a topic's messages are fetched when it is opened.
+    if (this.nativeLists()) return
     const topic = topics[selectedTopicIndex]
     if (!topic) return
     this.cancelTopicDebounce()
@@ -1342,7 +1529,9 @@ export class TelegramAppController {
           ? String(shown.chats[shown.selectedChatIndex]?.id)
           : undefined
         const keptIndex = keptChatId === undefined ? -1 : chats.findIndex((chat) => String(chat.id) === keptChatId)
-        await this.setState(this.chatsState(chats, keptIndex >= 0 ? keptIndex : 0))
+        // A native list anchored at the top stays at the top: the fresh list's first chats are the newest activity.
+        const nativeAtTop = this.nativeLists() && shown.screen === 'sidebar' && shown.focus === 'chats' && shown.selectedChatIndex === 0
+        await this.setState(this.chatsState(chats, keptIndex >= 0 && !nativeAtTop ? keptIndex : 0))
       }
       // Folders are optional and never block the chat list: apply them whenever they arrive.
       const generation = this.folderSwitchId
@@ -1394,7 +1583,9 @@ export class TelegramAppController {
     this.rememberChats(chats)
     this.cache?.putChats(chats)
     // Keep the highlight on the same chat if it was not the one that moved.
-    const selected = current.selectedChatIndex === index ? 0 : current.selectedChatIndex + (current.selectedChatIndex < index ? 1 : 0)
+    const selected = this.nativeLists()
+      ? this.reanchor(current.chats, current.selectedChatIndex, chats)
+      : current.selectedChatIndex === index ? 0 : current.selectedChatIndex + (current.selectedChatIndex < index ? 1 : 0)
     void this.setState({ ...current, chats, selectedChatIndex: selected })
     return true
   }
@@ -1481,7 +1672,7 @@ export class TelegramAppController {
   private isPanelImageShown(image: { chatId: string; messageId: string }) {
     const current = this.state
     if (current.screen !== 'sidebar' || current.focus !== 'messages') return false
-    const shown = screenModel(current)
+    const shown = this.model(current)
     return shown.kind === 'sidebar' && shown.panelImage?.messageId === image.messageId && shown.panelImage.chatId === image.chatId
   }
 
@@ -1564,6 +1755,8 @@ export class TelegramAppController {
   }
 
   private maybeLoadMoreChats(state: Extract<AppState, { screen: 'sidebar'; focus: 'chats' }>, selectedIndex: number) {
+    // Native lists page with their "More..." row instead (which fetches the next chats itself).
+    if (this.nativeLists()) return
     if (!this.chatsHasMore || this.loadingMoreChats) return
     if (selectedIndex < state.chats.length - CHAT_LOAD_MORE_THRESHOLD) return
     void this.loadMoreChats().catch(() => undefined)
@@ -1697,6 +1890,11 @@ export class TelegramAppController {
     if (current.screen !== 'sidebar' || current.focus !== 'chats') return
     const chats = mergeChatPages(current.chats, fresh)
     this.folderChatsCache.set(this.folderKey(folderId), { chats, hasMore: this.chatsHasMore })
+    if (this.nativeLists()) {
+      // The native list compares its rows (and holds the change while the user scrolls it).
+      await this.setState({ ...current, chats, selectedChatIndex: this.reanchor(current.chats, current.selectedChatIndex, chats) })
+      return
+    }
     await this.setStateWithoutRender({ ...current, chats })
   }
 
@@ -1780,7 +1978,7 @@ export class TelegramAppController {
     }
     const selectedId = current.topics[current.selectedTopicIndex]?.id
     const index = topics.findIndex((topic) => String(topic.id) === String(selectedId))
-    const selectedTopicIndex = index >= 0 ? index : 0
+    const selectedTopicIndex = this.nativeLists() ? this.reanchor(current.topics, current.selectedTopicIndex, topics) : index >= 0 ? index : 0
     const sameSelection = index >= 0
     await this.setState({
       ...current,
@@ -2329,15 +2527,19 @@ export class TelegramAppController {
       && String(topicThreadId(current.topic) ?? '') === String(topicThreadId(topic) ?? '')
   }
 
-  private async setState(state: AppState) {
+  private async setState(state: AppState, options: { listRebuild?: boolean } = {}) {
     const finish = this.timeSyncWork('setState')
     const prev = this.state
     if (prev.screen !== state.screen) debugLog('screen', { from: prev.screen, to: state.screen })
+    if (this.nativeLists() && this.applyNativeListState(state, options.listRebuild === true)) {
+      finish()
+      return
+    }
     this.applyState(state, true)
     // Partial updates may only change text content. A focus transition changes
     // which container captures input, so it requires a full page rebuild.
     if (prev.screen === 'sidebar' && state.screen === 'sidebar' && this.bridge.renderSidebarPanel) {
-      const newModel = screenModel(state)
+      const newModel = this.model(state)
       if (newModel.kind === 'sidebar') {
         const newHasPanelBox = panelLayoutKey(newModel)
         const listUnchanged = this.lastRenderedListItems !== undefined
@@ -2359,7 +2561,7 @@ export class TelegramAppController {
     } else {
       // First sidebar render (e.g. loading → chats). Cache the list items so
       // the next state change (chats → messages) can use the partial path.
-      const newModel = screenModel(state)
+      const newModel = this.model(state)
       if (newModel.kind === 'sidebar') {
         this.lastRenderedHasPanelBox = panelLayoutKey(newModel)
         this.lastRenderedListItems = newModel.sidebarItems
@@ -2367,6 +2569,86 @@ export class TelegramAppController {
     }
     this.enqueueRender(state)
     finish()
+  }
+
+  /**
+   * Native list mode: apply a chat/topic list state. Returns false for any other screen (the caller renders it).
+   *
+   * The firmware moves the highlight and the app never learns where it is, and a page rebuild puts it back on the first
+   * row. So once the user has scrolled the list (`nativeListTouched`), a change of the list's rows that the user did
+   * not ask for (new messages, unread counts, reordering, the stored -> fresh list at startup) is held: the state takes
+   * the new data, only the title/footer are updated (footer: "New activity"), and the rows are redrawn at the next
+   * rebuild the user causes (opening and leaving a chat, Back to top / More, a folder switch, coming back to the app).
+   * An untouched list is simply redrawn. `listRebuild` marks a change the user asked for.
+   */
+  private applyNativeListState(state: AppState, listRebuild: boolean): boolean {
+    if (state.screen !== 'sidebar' || (state.focus !== 'chats' && state.focus !== 'topics')) {
+      this.shownList = undefined
+      return false
+    }
+    const identity = this.listIdentity(state)
+    const model = this.model(state)
+    const list = model.kind === 'sidebar' ? model.nativeList : undefined
+    if (!list) return false
+    const shown = this.shownList
+    const startupText = this.bridge.showingStartupText?.() === true
+    if (shown && shown.identity === identity && !listRebuild) {
+      if (sameRows(shown, list)) {
+        // Same rows: title/footer only (also drops a held marker the data no longer needs).
+        const next = state.listUpdatePending ? { ...state, listUpdatePending: undefined } : state
+        this.applyState(next, false)
+        this.enqueueListChrome(this.model(next))
+        return true
+      }
+      // A placeholder row (a folder still loading) has no place worth keeping: always replace it.
+      if (this.nativeListTouched && !startupText && !shown.keys.every((key) => key === 'empty')) {
+        const held = state.listUpdatePending ? state : { ...state, listUpdatePending: true }
+        debugLog('list.update-held', { identity: identity.split(':')[0] })
+        this.applyState(held, false)
+        this.enqueueListChrome(this.model(held))
+        return true
+      }
+    }
+    const fresh = state.listUpdatePending ? { ...state, listUpdatePending: undefined } : state
+    this.applyState(fresh, true)
+    this.nativeListPage = (this.nativeListPage + 1) % 1000
+    this.rememberShownList(identity, fresh)
+    this.nativeListTouched = false
+    this.nativeListSentAt = Date.now()
+    this.lastRenderedListItems = undefined
+    this.enqueueRender(fresh)
+    return true
+  }
+
+  /** Which list a native list page shows: another identity is another list (a folder, a forum), never held back. */
+  private listIdentity(state: Extract<AppState, { screen: 'sidebar'; focus: 'chats' | 'topics' }>): string {
+    return state.focus === 'chats' ? `chats:${this.folderKey(this.activeFolderId)}` : `topics:${state.chat.id}`
+  }
+
+  private rememberShownList(identity: string, state: Extract<AppState, { screen: 'sidebar'; focus: 'chats' | 'topics' }>) {
+    const model = this.model(state)
+    const list = model.kind === 'sidebar' ? model.nativeList : undefined
+    if (!list) {
+      this.shownList = undefined
+      return
+    }
+    const objects = new Map<string, Chat | Topic>()
+    if (state.focus === 'chats') for (const chat of state.chats) objects.set(`chat:${chat.id}`, chat)
+    else for (const topic of state.topics) objects.set(`topic:${topic.id}`, topic)
+    this.shownList = {
+      identity,
+      containerName: nativeListContainerName(list),
+      items: list.items,
+      keys: list.keys,
+      objects: new Map(list.keys.filter((key) => objects.has(key)).map((key) => [key, objects.get(key)!])),
+    }
+  }
+
+  /** Title/footer of a native list page (the rows stay as drawn). */
+  private enqueueListChrome(model: ScreenModel) {
+    if (model.kind !== 'sidebar') return
+    if (this.bridge.enqueueSidebarPanel) this.bridge.enqueueSidebarPanel(model)
+    else void this.bridge.renderSidebarPanel?.(model)
   }
 
   private listItemsMatch(a: readonly string[], b: readonly string[]): boolean {
@@ -2426,7 +2708,11 @@ export class TelegramAppController {
       this.pendingRenderState = undefined
       if (state) {
         this.lastFullRenderAt = Date.now()
-        let model = screenModel(state)
+        let model = this.model(state)
+        // Whatever redraws a native list (a language change too) redraws what a click on row N means.
+        if (model.kind === 'sidebar' && model.nativeList && state.screen === 'sidebar' && (state.focus === 'chats' || state.focus === 'topics')) {
+          this.rememberShownList(this.listIdentity(state), state)
+        }
         // While the user is swiping, leave the picture out of the page: moving it means a heavier layout and a
         // transfer over the glasses link for every swipe. It is added back once scrolling pauses.
         const deferredImage = model.kind === 'sidebar' && model.panelImage && !this.imagesSettled
@@ -2543,11 +2829,14 @@ export class TelegramAppController {
       // `chats` is only the first page of "All chats". Keep the pages the user has already scrolled
       // through; inside a folder the displayed list is left alone (only activity detection uses it).
       const displayedChats = this.activeFolderId === undefined ? mergeChatPages(current.chats, chats) : current.chats
-      const selectedChatIndex = clamp(current.selectedChatIndex, 0, Math.max(0, displayedChats.length - 1))
+      const selectedChatIndex = this.nativeLists()
+        ? this.reanchor(current.chats, current.selectedChatIndex, displayedChats)
+        : clamp(current.selectedChatIndex, 0, Math.max(0, displayedChats.length - 1))
       // New activity never takes over the glasses: the Even app already notifies natively. The list just picks up
       // the new badge/preview (and a sleeping screen stays asleep, with the list ready for when it wakes).
       if (current.screen === 'sidebar' && current.focus === 'chats') {
-        if (activity) await this.setState({ ...current, chats: displayedChats, selectedChatIndex })
+        // A native list compares the rows itself (and holds the change while the user scrolls it).
+        if (activity || this.nativeLists()) await this.setState({ ...current, chats: displayedChats, selectedChatIndex })
         else await this.setStateWithoutRender({ ...current, chats: displayedChats, selectedChatIndex })
       } else if (current.screen === 'asleep') {
         await this.setStateWithoutRender({ ...current, chats: displayedChats, selectedChatIndex })
@@ -2690,16 +2979,16 @@ export class TelegramAppController {
     // The partial-render path only updates `panelBox` content, not its
     // position/size/border, so a visibility flip must trigger a full rebuild.
     const nextHasPanelBox = next.screen === 'sidebar'
-      ? panelLayoutKey(screenModel(next) as Extract<ScreenModel, { kind: 'sidebar' }>)
+      ? panelLayoutKey(this.model(next) as Extract<ScreenModel, { kind: 'sidebar' }>)
       : ''
     this.applyState(next, false)
     if (nextHasPanelBox !== this.lastRenderedHasPanelBox) {
       this.lastRenderedHasPanelBox = nextHasPanelBox
       this.enqueueRender(next)
     } else if (this.bridge.enqueueSidebarPanel) {
-      this.bridge.enqueueSidebarPanel(screenModel(next) as Extract<ScreenModel, { kind: 'sidebar' }>)
+      this.bridge.enqueueSidebarPanel(this.model(next) as Extract<ScreenModel, { kind: 'sidebar' }>)
     } else if (this.bridge.renderSidebarPanel) {
-      await this.bridge.renderSidebarPanel(screenModel(next) as Extract<ScreenModel, { kind: 'sidebar' }>)
+      await this.bridge.renderSidebarPanel(this.model(next) as Extract<ScreenModel, { kind: 'sidebar' }>)
     } else {
       // Bridge doesn't support partial updates — fall back to a queued full render so the
       // right panel still updates, even if the list selection may snap on real hardware.
@@ -2732,14 +3021,21 @@ export class TelegramAppController {
     // Capture the incoming `panelBox` visibility BEFORE applyState mutates `this.state`.
     // The partial-render path only updates `panelBox` content, not its
     // position/size/border, so a visibility flip must trigger a full rebuild.
-    const sidebarModel = state.screen === 'sidebar' || state.screen === 'folderPicker'
-      ? screenModel(state) as Extract<ScreenModel, { kind: 'sidebar' }>
+    let sidebarModel = state.screen === 'sidebar' || state.screen === 'folderPicker'
+      ? this.model(state) as Extract<ScreenModel, { kind: 'sidebar' }>
       : undefined
     const nextHasPanelBox = sidebarModel
       ? panelLayoutKey(sidebarModel)
       : ''
     this.applyState(state, true)
     if (!sidebarModel) { finish(); return }
+    // Native list mode, still on the startup text page: the native list that replaces it will start at this row.
+    if (sidebarModel.nativeList && state.screen === 'sidebar' && (state.focus === 'chats' || state.focus === 'topics')) {
+      this.nativeListPage = (this.nativeListPage + 1) % 1000
+      this.rememberShownList(this.listIdentity(state), state)
+      this.nativeListSentAt = Date.now()
+      sidebarModel = this.model(state) as Extract<ScreenModel, { kind: 'sidebar' }>
+    }
     if (nextHasPanelBox !== this.lastRenderedHasPanelBox) {
       this.lastRenderedHasPanelBox = nextHasPanelBox
       this.enqueueRender(state)
@@ -2918,6 +3214,34 @@ export class TelegramAppController {
     if (typeof input.index === 'number') return byIndex
     return selectedNamedIndex(input.itemName, currentIndex, topics, topicSelectionLabel)
   }
+}
+
+/** The rows of a native list are the ones already drawn. */
+function sameRows(shown: ShownNativeList, list: { items: string[]; keys: string[] }) {
+  return shown.items.length === list.items.length
+    && shown.items.every((item, i) => item === list.items[i])
+    && shown.keys.every((key, i) => key === list.keys[i])
+}
+
+/**
+ * Which drawn row a native list click means. The reported index is used when it is in range (and agrees with the
+ * reported name, when there is one); otherwise the name is looked up among the drawn rows. A click that carries
+ * neither (not from the list) means the row the list was drawn around.
+ */
+function resolveNativeListRow(shown: ShownNativeList, input: { type: string; index?: number; itemName?: string }): number | undefined {
+  const byName = input.itemName === undefined
+    ? -1
+    : shown.items.findIndex((item) => normalizeSelectionLabel(item) === normalizeSelectionLabel(input.itemName ?? ''))
+  if (typeof input.index === 'number' && Number.isInteger(input.index) && input.index >= 0 && input.index < shown.keys.length) {
+    if (input.itemName !== undefined && byName >= 0 && normalizeSelectionLabel(shown.items[input.index]) !== normalizeSelectionLabel(input.itemName)) return byName
+    return input.index
+  }
+  if (byName >= 0) return byName
+  if (input.index === undefined && input.itemName === undefined && input.type === 'press') {
+    const anchor = shown.keys.findIndex((key) => key !== 'top')
+    return anchor >= 0 ? anchor : 0
+  }
+  return undefined
 }
 
 /** Put freshly fetched first-page chats ahead of the already-loaded list without dropping deeper pages. */

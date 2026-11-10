@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatDayLabel, formatMessageTime, localizeStatus, messageScrollUnitCount, nextMessageScrollOffset, screenModel } from '../src/controller/model'
+import { formatDayLabel, formatMessageTime, localizeStatus, messageScrollUnitCount, nativeListWindow, nextMessageScrollOffset, screenModel } from '../src/controller/model'
 import type { AppState } from '../src/controller/model'
 import type { Message } from '../src/types'
 import { getLocale, setLocale } from '../src/locales'
@@ -982,5 +982,100 @@ describe('pixel-width wrapping', () => {
     } finally {
       setLocale(original)
     }
+  })
+})
+
+describe('native chat and topic lists', () => {
+  const chatsOf = (count: number) => Array.from({ length: count }, (_, i) => ({ id: String(i), title: `Chat ${i}`, kind: 'user' as const }))
+  const chatList = (count: number, selectedChatIndex: number, extra: Partial<Extract<AppState, { focus: 'chats' }>> = {}): AppState => ({
+    screen: 'sidebar', focus: 'chats', chats: chatsOf(count), selectedChatIndex, ...extra,
+  })
+  const native = (state: AppState, hasMoreChats = false) => {
+    const model = screenModel(state, { nativeLists: true, hasMoreChats })
+    if (model.kind !== 'sidebar' || !model.nativeList) throw new Error('expected a native list model')
+    return { model, list: model.nativeList }
+  }
+
+  it('fits the whole list in one window when it is short', () => {
+    expect(nativeListWindow(5, 0, false)).toEqual({ start: 0, end: 5, more: false, top: false })
+    expect(nativeListWindow(20, 0, false)).toEqual({ start: 0, end: 20, more: false, top: false })
+  })
+
+  it('keeps a row for More when more chats follow (loaded or on the server)', () => {
+    expect(nativeListWindow(21, 0, false)).toEqual({ start: 0, end: 19, top: false, more: true })
+    expect(nativeListWindow(20, 0, true)).toEqual({ start: 0, end: 19, top: false, more: true })
+    expect(nativeListWindow(5, 0, true)).toEqual({ start: 0, end: 5, top: false, more: true })
+  })
+
+  it('keeps a last row for Back to top when the window does not start at the top', () => {
+    expect(nativeListWindow(40, 19, false)).toEqual({ start: 19, end: 37, top: true, more: true })
+    expect(nativeListWindow(25, 19, false)).toEqual({ start: 19, end: 25, top: true, more: false })
+    // An anchor past the end (the list shrank) shows the last item.
+    expect(nativeListWindow(3, 7, false)).toEqual({ start: 2, end: 3, top: true, more: false })
+  })
+
+  it('draws the chat list as a native list with unread-first labels and keys per row', () => {
+    const state = chatList(3, 0)
+    ;(state as { chats: Array<{ unreadCount?: number }> }).chats[1].unreadCount = 4
+    const { model, list } = native(state)
+    expect(list.name).toBe('chat-list')
+    expect(list.items).toEqual(['Chat 0', '(4) Chat 1', 'Chat 2'])
+    expect(list.keys).toEqual(['chat:0', 'chat:1', 'chat:2'])
+    expect(model.panelFooter).toBe(getLocale().footerSwipeChats)
+    // The plain-text fallback is still there for the startup page.
+    expect(model.panelBody).toContain('> Chat 0')
+  })
+
+  it('windows a long chat list: at most 20 rows, the anchor chat first (where the selection box starts), then More, then Back to top', () => {
+    const { list } = native(chatList(60, 30))
+    expect(list.items).toHaveLength(20)
+    expect(list.keys[0]).toBe('chat:30')
+    expect(list.keys.at(-2)).toBe('more')
+    expect(list.items.at(-2)).toBe(getLocale().listMoreChats)
+    expect(list.keys.at(-1)).toBe('top')
+    expect(list.items.at(-1)).toBe(getLocale().listBackToTop)
+  })
+
+  it('offers More at the end of the loaded chats when the server has more', () => {
+    expect(native(chatList(20, 0)).list.keys.at(-1)).toBe('chat:19')
+    expect(native(chatList(20, 0), true).list.keys.at(-1)).toBe('more')
+  })
+
+  it('caps every item name at 64 UTF-8 bytes', () => {
+    const state: AppState = {
+      screen: 'sidebar', focus: 'chats', selectedChatIndex: 0,
+      chats: [{ id: '1', title: 'Ünïcödé '.repeat(20), kind: 'user' }],
+    }
+    const { list } = native(state)
+    expect(encoder.encode(list.items[0]).byteLength).toBeLessThanOrEqual(64)
+    expect(list.items[0].endsWith('...')).toBe(true)
+  })
+
+  it('shows a placeholder row for an empty list (the host needs at least one item)', () => {
+    expect(native(chatList(0, 0)).list).toMatchObject({ keys: ['empty'], items: [getLocale().bridgeEmptyList] })
+    expect(native(chatList(0, 0, { loadingMore: true })).list.items).toEqual([getLocale().statusLoadingMoreChats])
+  })
+
+  it('leads the footer with New activity while an update is held', () => {
+    const { model } = native(chatList(3, 0, { listUpdatePending: true }))
+    expect(model.panelFooter).toBe(`${getLocale().statusNewActivity} | ${getLocale().footerSwipeChats}`)
+  })
+
+  it('draws the topic list full width as a native list without a preview', () => {
+    const state: AppState = {
+      screen: 'sidebar', focus: 'topics', chats: [], selectedChatIndex: 0,
+      chat: { id: '9', title: 'Forum', kind: 'group', isForum: true },
+      topics: [{ id: '1', title: 'General' }, { id: '2', title: 'Ops', unreadCount: 2 }],
+      selectedTopicIndex: 0,
+    }
+    const { model, list } = native(state)
+    expect(list).toMatchObject({ name: 'topic-list', items: ['General', '(2) Ops'], keys: ['topic:1', 'topic:2'] })
+    expect(model).toMatchObject({ fullWidth: true, title: 'Forum', panelFooter: getLocale().footerTapToOpenTopic })
+    expect(model.panelBody).not.toContain(getLocale().statusLoadingMessages)
+  })
+
+  it('keeps the text list when native lists are off', () => {
+    const model = screenModel(chatList(3, 1))
+    expect(model.kind === 'sidebar' && model.nativeList).toBeFalsy()
   })
 })

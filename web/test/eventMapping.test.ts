@@ -62,7 +62,13 @@ describe('mapEvenHubEvent', () => {
     expect(mapEvenHubEvent({ sysEvent: { eventType: 8, imuData: { x: 1 } } })).toBeUndefined()
     // A text or list record without an eventType is still a press.
     expect(mapEvenHubEvent({ textEvent: { containerID: 2 } })).toEqual({ type: 'press' })
-    expect(mapEvenHubEvent({ listEvent: { eventType: undefined, containerID: 8 } })).toEqual({ type: 'press' })
+    // A list record that names its container but no row is a click on row 0 (protobuf omits the zero index; the
+    // simulator's list clicks carry only containerID, containerName and the index).
+    expect(mapEvenHubEvent({ listEvent: { eventType: undefined, containerID: 8 } })).toEqual({ type: 'press', index: 0 })
+    // A native list click names its page (the controller drops clicks on a page being replaced).
+    expect(mapEvenHubEvent({ listEvent: { containerID: 8, containerName: 'chat-list-4' } })).toEqual({ type: 'press', index: 0, listName: 'chat-list-4' })
+    expect(mapEvenHubEvent({ jsonData: { containerID: 8, containerName: 'chat-list-4', currentSelectItemIndex: 3 }, listEvent: { containerID: 8, containerName: 'chat-list-4', currentSelectItemIndex: 3 } }))
+      .toEqual({ type: 'selectIndex', index: 3, listName: 'chat-list-4' })
   })
 
   it('maps gesture event types from system events like even-toolkit', () => {
