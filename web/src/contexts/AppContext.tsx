@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { effectiveBackendSharedSecret, HttpTelegramApi, type ConnectionTestResult, type TelegramApi } from '../api'
+import { effectiveBackendSharedSecret, HttpTelegramApi, isSessionExpiredError, isUnrecoverableStreamError, type ConnectionTestResult, type TelegramApi } from '../api'
 import { EvenHubGlassesBridge } from '../bridge/evenBridge'
 import { TelegramAppController, type ControllerRuntimeConfig, type GlassesBridge } from '../controller/appController'
 import { screenModel, setGlassesFontWidthPercent } from '../controller/model'
@@ -8,6 +8,7 @@ import { FixtureTelegramApi, bindFixtureApi, bindFixtureCommandHandler, setFixtu
 import { InstrumentedTelegramApi } from '../instrumentedApi'
 import { localeFromCode, setLocale } from '../locales'
 import { PersistentCache, cacheAccountStamp } from '../cache/persistentCache'
+import { warmSharedSecretKey } from '../secureAuth'
 
 import {
   clearFrontendConfigFromAppStorage,
@@ -82,6 +83,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
           : await loadFrontendConfigFromAppStorage(appStorageRef.current, settingsRef.current)
         settingsRef.current = restoredSettings
         setSettings(restoredSettings)
+        // PBKDF2 is slow on phones: derive the key now, while the cache and the first page are being prepared.
+        if (!fixtureMode) warmSharedSecretKey(effectiveBackendSharedSecret(restoredSettings))
         setLocale(localeFromCode(restoredSettings.language))
         // The real app wraps by measured glyph width; the simulator fixture flow keeps character wrapping (goldens).
         if (!fixtureMode) setGlassesFontWidthPercent(restoredSettings.fontWidthPercent)
@@ -126,7 +129,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
             if (fixtureMode) return true
             const settings = settingsRef.current
             const telegramOk = Boolean(settings.telegramApiId.trim() && settings.telegramApiHash.trim())
-            return telegramOk && Boolean(settings.apiBaseUrl.trim()) && Boolean(effectiveBackendSharedSecret(settings, settings.apiBaseUrl))
+            return telegramOk && Boolean(settings.apiBaseUrl.trim()) && Boolean(effectiveBackendSharedSecret(settings))
           },
           persistentCache,
         )
@@ -175,20 +178,43 @@ export function AppProvider({ children }: { children: ReactNode }) {
             }
           })
         }
+        // The update stream stops for good on an error that retrying cannot fix (expired session, rejected
+        // auth, missing settings). It is started again when the glasses reach the chat screens afresh, i.e.
+        // after signing in again or once the backend accepts the auth.
+        let streamStopped = true
+        const startUpdates = () => {
+          if (!active || !streamStopped) return
+          streamStopped = false
+          unsubscribeUpdates = api.subscribeUpdates(
+            (update) => {
+              void createdController.handleTelegramUpdate(update)
+            },
+            (error) => {
+              createdController.setStreamHealthy(false)
+              if (!isUnrecoverableStreamError(error)) return
+              streamStopped = true
+              void createdController.handleStreamFailure(error)
+            },
+            () => {
+              void createdController.handleStreamReconnect()
+            },
+            () => createdController.setStreamHealthy(true),
+          )
+        }
+        let wasOnChatScreens = false
         unsubscribe = createdController.subscribe((next) => {
           logTeleGlanceTest('state', summarizeAppState(next))
           if (active) setState(next)
+          const onChatScreens = next.screen !== 'loading' && next.screen !== 'auth' && next.screen !== 'error'
+          if (onChatScreens && !wasOnChatScreens) startUpdates()
+          wasOnChatScreens = onChatScreens
         })
+        // Open the stream while the session is checked instead of after: updates that arrive before the chat
+        // list are ignored by the controller, and the first poll interval can already tell the stream is up.
+        // (The fixture stream delivers its injected notification at once, so there it opens after init.)
+        if (!fixtureMode) startUpdates()
         await createdController.init()
-        unsubscribeUpdates = api.subscribeUpdates(
-          (update) => {
-            void createdController.handleTelegramUpdate(update)
-          },
-          undefined,
-          () => {
-            void createdController.handleStreamReconnect()
-          },
-        )
+        if (fixtureMode) startUpdates()
       } catch (error) {
         if (active) setStartupError(error instanceof Error ? error.message : 'Startup failed')
       }
@@ -268,8 +294,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const logoutTelegram = useCallback(async () => {
+    // Log out on the backend first: if that fails the user stays signed in and sees the error, but the cache
+    // goes either way. A session that already expired counts as logged out.
+    try {
+      await apiRef.current?.logout()
+    } catch (error) {
+      if (!isSessionExpiredError(error)) {
+        await controllerRef.current?.clearCache().catch(() => undefined)
+        throw error
+      }
+    }
     await controllerRef.current?.clearCache().catch(() => undefined)
-    await apiRef.current?.logout()
     const next = { ...settingsRef.current, telegramSession: '' }
     saveFrontendConfig(next)
     await saveFrontendConfigToAppStorage(appStorageRef.current, next)
