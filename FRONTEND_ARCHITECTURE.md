@@ -108,7 +108,7 @@ The frontend intentionally uses `fetch` streaming instead of browser `EventSourc
 
 ## Caches
 
-- `PersistentCache` keeps the chat list, the newest 24 messages of recently opened threads and recent photos in Even App SDK storage (browser storage in the simulator), within a byte budget and a 7-day age limit, written in batches while input is quiet. At startup the stored chat list is shown at once (footer `Updating...`, or `Offline` with background retries if the backend cannot be reached). It is not encrypted; signing out or Reset clears it.
+- `PersistentCache` keeps the chat list, the newest 24 messages of recently opened threads and recent photos in Even App SDK storage (browser storage in the simulator), within a byte budget and a 7-day age limit, written in batches while input is quiet. At startup the stored chat list is shown at once (footer `Updating...`, or `Offline` with background retries if the backend cannot be reached). Everything stored is usable before the session check finishes: stored threads (also ones with unread messages, shown as `Updating...` until the fresh page places the unread divider) and stored forum topic lists open at once, and the network chat list never pulls a user who has left the stored list back to it. A failed background refresh of stored data shows `Offline`, never the error screen. It is not encrypted; signing out or Reset clears it.
 - In memory, `ThreadStore` keeps per-thread pages, topic lists, unread points and read marks for the 50 most recently used threads; photos and folder chat lists use the same LRU map. An open thread grows while the user pages back through history and is cut back to the newest 240 messages once the view returns to the newest message.
 
 ## Folders

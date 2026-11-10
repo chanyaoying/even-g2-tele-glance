@@ -1,4 +1,4 @@
-import type { Chat, Message, Photo } from '../types'
+import type { Chat, Message, Photo, Topic } from '../types'
 
 /** The slice of the Even App SDK storage the cache needs (string key/value, async, no documented size limit). */
 export interface CacheStorageBridge {
@@ -45,6 +45,8 @@ interface Index {
   account: string
   chatsBytes: number
   threads: Record<string, { bytes: number; usedAt: number }>
+  /** Forum topic lists, by chat. Counted in the same budget as the threads. */
+  topics?: Record<string, { bytes: number; usedAt: number }>
   photos?: Record<string, { bytes: number; usedAt: number }>
 }
 
@@ -77,8 +79,12 @@ function threadStorageKey(threadKey: string): string {
   return `${PREFIX}t.${shortHash(threadKey)}`
 }
 
+function topicsStorageKey(chatKey: string): string {
+  return `${PREFIX}tl.${shortHash(chatKey)}`
+}
+
 /**
- * Persists the chat list and the latest page of recent threads so they can be shown immediately on the
+ * Persists the chat list, forum topic lists and the latest page of recent threads so they can be shown immediately on the
  * next launch, then refreshed from the network. Everything is best effort: a missing, failing or
  * unreliable storage only means the cache stays empty.
  *
@@ -90,7 +96,11 @@ export class PersistentCache {
   private readonly options: Required<Omit<CacheOptions, 'canWrite'>> & Pick<CacheOptions, 'canWrite'>
   private index: Index | undefined
   private account = ''
-  private readonly dirty = new Map<string, { kind: 'chats' } | { kind: 'thread'; key: string; entry: ThreadEntry } | { kind: 'photo'; key: string; photo: Photo }>()
+  private readonly dirty = new Map<string,
+    | { kind: 'chats' }
+    | { kind: 'thread'; key: string; entry: ThreadEntry }
+    | { kind: 'topics'; key: string; topics: Topic[] }
+    | { kind: 'photo'; key: string; photo: Photo }>()
   private flushTimer: ReturnType<typeof setTimeout> | undefined
   private chain: Promise<void> = Promise.resolve()
   private indexDirty = false
@@ -119,7 +129,7 @@ export class PersistentCache {
   /** Load the index. A different account, an old format or expired entries are discarded here. */
   async open(account: string): Promise<void> {
     this.account = account
-    this.index = { version: VERSION, account, chatsBytes: 0, threads: {}, photos: {} }
+    this.index = { version: VERSION, account, chatsBytes: 0, threads: {}, topics: {}, photos: {} }
     if (!this.available) return
     const raw = await this.read(INDEX_KEY)
     const stored = raw ? safeParse<Index>(raw) : undefined
@@ -127,7 +137,7 @@ export class PersistentCache {
       if (stored) await this.wipe(stored)
       return
     }
-    this.index = { ...stored, threads: stored.threads ?? {}, photos: stored.photos ?? {}, chatsBytes: stored.chatsBytes ?? 0 }
+    this.index = { ...stored, threads: stored.threads ?? {}, topics: stored.topics ?? {}, photos: stored.photos ?? {}, chatsBytes: stored.chatsBytes ?? 0 }
     const cutoff = this.options.now() - this.options.maxAgeMs
     // Expired threads leave the index now (so they are never read), but deleting their storage keys waits for
     // the next flush: each delete is a round trip through the host bridge, and open() runs before the first
@@ -137,6 +147,13 @@ export class PersistentCache {
         delete this.index.threads[id]
         this.indexDirty = true
         this.pendingDeletes.add(`${PREFIX}t.${id}`)
+      }
+    }
+    for (const [id, meta] of Object.entries(this.index.topics ?? {})) {
+      if (meta.usedAt < cutoff) {
+        delete this.index.topics![id]
+        this.indexDirty = true
+        this.pendingDeletes.add(`${PREFIX}tl.${id}`)
       }
     }
     if (this.indexDirty) this.scheduleFlush()
@@ -162,6 +179,27 @@ export class PersistentCache {
     this.indexDirty = true
     this.scheduleFlush()
     return stored.entry
+  }
+
+  /** The stored topic list of a forum chat, if there is one (same age limit as threads). */
+  async getTopics(chatKey: string): Promise<Topic[] | undefined> {
+    if (!this.available || !this.index) return undefined
+    const id = shortHash(chatKey)
+    if (!this.index.topics?.[id]) return undefined
+    const raw = await this.read(`${PREFIX}tl.${id}`)
+    const stored = raw ? safeParse<{ at: number; key: string; topics: Topic[] }>(raw) : undefined
+    if (!stored || stored.key !== chatKey || !Array.isArray(stored.topics)) return undefined
+    if (this.options.now() - stored.at > this.options.maxAgeMs) return undefined
+    this.index.topics[id].usedAt = this.options.now()
+    this.indexDirty = true
+    this.scheduleFlush()
+    return stored.topics
+  }
+
+  putTopics(chatKey: string, topics: Topic[]): void {
+    if (!this.available || !this.index) return
+    this.dirty.set(topicsStorageKey(chatKey), { kind: 'topics', key: chatKey, topics })
+    this.scheduleFlush()
   }
 
   /** A prepared picture stored by an earlier session, if there is one. */
@@ -206,7 +244,11 @@ export class PersistentCache {
 
   stats(): { threads: number; bytes: number } {
     const threads = Object.values(this.index?.threads ?? {})
-    return { threads: threads.length, bytes: threads.reduce((sum, meta) => sum + meta.bytes, 0) + (this.index?.chatsBytes ?? 0) }
+    const topics = Object.values(this.index?.topics ?? {})
+    return {
+      threads: threads.length,
+      bytes: [...threads, ...topics].reduce((sum, meta) => sum + meta.bytes, 0) + (this.index?.chatsBytes ?? 0),
+    }
   }
 
   photoStats(): { photos: number; bytes: number } {
@@ -223,7 +265,7 @@ export class PersistentCache {
     const deletes = [...this.pendingDeletes]
     this.pendingDeletes.clear()
     const index = this.index
-    this.index = { version: VERSION, account: this.account, chatsBytes: 0, threads: {}, photos: {} }
+    this.index = { version: VERSION, account: this.account, chatsBytes: 0, threads: {}, topics: {}, photos: {} }
     this.indexDirty = false
     if (!this.available) return
     await this.chain
@@ -278,6 +320,16 @@ export class PersistentCache {
         }
         continue
       }
+      if (item.kind === 'topics') {
+        const value = JSON.stringify({ at: this.options.now(), key: item.key, topics: item.topics })
+        if (byteLength(value) > this.options.budgetBytes / 2) continue
+        if (await this.write(storageKey, value)) {
+          index.topics = index.topics ?? {}
+          index.topics[shortHash(item.key)] = { bytes: byteLength(value), usedAt: this.options.now() }
+          this.indexDirty = true
+        }
+        continue
+      }
       if (item.kind === 'photo') {
         const value = JSON.stringify({ at: this.options.now(), key: item.key, photo: item.photo })
         if (byteLength(value) > this.options.photoBudgetBytes / 4) continue
@@ -304,17 +356,21 @@ export class PersistentCache {
     }
   }
 
-  /** Drop the least recently used threads until the total fits the budget. */
+  /** Drop the least recently used threads and topic lists until the total fits the budget. */
   private async evict(index: Index) {
-    let total = index.chatsBytes + Object.values(index.threads).reduce((sum, meta) => sum + meta.bytes, 0)
+    const topics = index.topics ?? {}
+    const entries = [
+      ...Object.entries(index.threads).map(([id, meta]) => ({ id, meta, map: index.threads, key: `${PREFIX}t.${id}` })),
+      ...Object.entries(topics).map(([id, meta]) => ({ id, meta, map: topics, key: `${PREFIX}tl.${id}` })),
+    ]
+    let total = index.chatsBytes + entries.reduce((sum, entry) => sum + entry.meta.bytes, 0)
     if (total <= this.options.budgetBytes) return
-    const oldestFirst = Object.entries(index.threads).sort((a, b) => a[1].usedAt - b[1].usedAt)
-    for (const [id, meta] of oldestFirst) {
+    for (const entry of entries.sort((a, b) => a.meta.usedAt - b.meta.usedAt)) {
       if (total <= this.options.budgetBytes) break
-      delete index.threads[id]
-      total -= meta.bytes
+      delete entry.map[entry.id]
+      total -= entry.meta.bytes
       this.indexDirty = true
-      await this.write(`${PREFIX}t.${id}`, '')
+      await this.write(entry.key, '')
     }
   }
 
@@ -333,6 +389,7 @@ export class PersistentCache {
 
   private async wipe(index: Index) {
     for (const id of Object.keys(index.threads ?? {})) await this.write(`${PREFIX}t.${id}`, '')
+    for (const id of Object.keys(index.topics ?? {})) await this.write(`${PREFIX}tl.${id}`, '')
     for (const id of Object.keys(index.photos ?? {})) await this.write(`${PREFIX}p.${id}`, '')
     await this.write(CHATS_KEY, '')
     await this.write(INDEX_KEY, '')

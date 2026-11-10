@@ -95,6 +95,8 @@ export const ERROR_CODE_HEADER = 'X-TeleGlance-Error'
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000
 const SEND_REQUEST_TIMEOUT_MS = 20_000
 const TRANSCRIBE_REQUEST_TIMEOUT_MS = 60_000
+/** Picture downloads share the backend's Telegram connection and have taken 13-36 s; give them room. */
+const PHOTO_REQUEST_TIMEOUT_MS = 45_000
 
 /** Short message (fits the glasses) in `message`; the full technical text for the phone UI is in `detail`. */
 const SLOW_REQUEST_MS = 3000
@@ -145,8 +147,13 @@ function unauthorizedError(status: number, detail: string, code?: string | null)
     : new ApiError(SESSION_EXPIRED_MESSAGE, detail || SESSION_EXPIRED_MESSAGE, status, undefined, 'sessionExpired')
 }
 
+function isPhotoPath(path: string) {
+  return /^\/api\/chats\/[^/]+\/messages\/[^/]+\/photo$/.test(path)
+}
+
 export function requestTimeoutMs(path: string, method = 'GET') {
   if (path === '/api/transcribe') return TRANSCRIBE_REQUEST_TIMEOUT_MS
+  if (method === 'GET' && isPhotoPath(path)) return PHOTO_REQUEST_TIMEOUT_MS
   if (method === 'POST' && /^\/api\/chats\/[^/]+\/messages$/.test(path)) return SEND_REQUEST_TIMEOUT_MS
   return DEFAULT_REQUEST_TIMEOUT_MS
 }
@@ -379,6 +386,9 @@ export class HttpTelegramApi implements TelegramApi {
     if (!baseUrl?.trim()) throw notConfiguredError(getLocale().errorBackendUrlRequired)
     const ownBackend = baseUrl === this.baseUrl
     if (ownBackend) this.assertBackendNotBackedOff(path)
+    // A slow or failing picture says little about the rest of the backend: it must not make the chat list
+    // "Server busy", so picture results never move the failure streak or the backoff.
+    const countsForBackoff = ownBackend && !isPhotoPath(path)
     const headers = await this.withTelegramHeaders(init.headers, includeTelegramAuth)
     const requestInit = await this.withEncryptedJsonBody(init, headers, includeTelegramAuth)
     const controller = new AbortController()
@@ -392,7 +402,7 @@ export class HttpTelegramApi implements TelegramApi {
         signal: controller.signal,
       })
     } catch (error) {
-      if (ownBackend) this.noteBackendResult(true)
+      if (countsForBackoff) this.noteBackendResult(true)
       if (controller.signal.aborted) {
         throw new ApiError(BACKEND_TIMEOUT_MESSAGE, timeoutDetail(timeoutMs))
       }
@@ -400,12 +410,12 @@ export class HttpTelegramApi implements TelegramApi {
     } finally {
       clearTimeout(timer)
     }
-    if (ownBackend) this.noteBackendResult(response.status === 502 || response.status === 503 || response.status === 504)
+    if (countsForBackoff) this.noteBackendResult(response.status === 502 || response.status === 503 || response.status === 504)
     if (!response.ok) {
       const error = httpError(response, await this.errorResponseText(response, includeTelegramAuth))
       // "Busy, retry in N s" (Telegram unreachable): wait that long before the next request instead of piling on.
-      // A busy transcription server says the same but must not hold up the chat list.
-      if (ownBackend && error.status === 503 && error.retryAfterSeconds && path !== '/api/transcribe') {
+      // A busy transcription server or picture download says the same but must not hold up the chat list.
+      if (countsForBackoff && error.status === 503 && error.retryAfterSeconds && path !== '/api/transcribe') {
         this.blockedUntil = Math.max(this.blockedUntil, Date.now() + error.retryAfterSeconds * 1000)
       }
       throw error

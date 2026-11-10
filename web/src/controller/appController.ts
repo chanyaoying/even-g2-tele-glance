@@ -12,7 +12,7 @@ import type { Photo } from '../types'
 import type { PersistentCache } from '../cache/persistentCache'
 import { LruMap } from './lruMap'
 import {
-  hasIncomingChange, hasMessageChanges, messageThreadKey, newestMessageId, normalizeMessagePage, oldestMessageId,
+  hasIncomingChange, hasMessageChanges, idAtOrAfter, messageThreadKey, newestMessageId, normalizeMessagePage, oldestMessageId,
   THREAD_CACHE_LIMIT, ThreadStore, topicThreadId, windowNewestMessages,
 } from './threadStore'
 import { clearUnreadForThread, hasUnreadForThread } from './unreadState'
@@ -57,6 +57,8 @@ const FOLDER_WARM_DELAY_MS = 2500
 const OLDER_PREFETCH_LOW_WATER = 14
 const PHOTO_CACHE_LIMIT = 64
 const PHOTO_PREFETCH_COUNT = 2
+/** A picture that failed to load is tried once more after this long if it is still on screen. */
+const PHOTO_RETRY_DELAY_MS = 4_000
 const CHAT_LIST_LIMIT = 20
 // When the selection gets this close to the end of the loaded chats, fetch the next page.
 const CHAT_LOAD_MORE_THRESHOLD = 3
@@ -120,6 +122,13 @@ export class TelegramAppController {
   private rootRefreshInFlight = false
   /** True while the chat list shown came from the on-phone cache and the real one has not arrived yet. */
   private showingStoredChats = false
+  /**
+   * Thread opened from a stale stored page (it had unread messages) whose fresh page has not arrived yet. Until
+   * it does, nothing is marked read and no "last read" divider is placed: both need the fresh page.
+   */
+  private staleThreadKey: string | undefined
+  /** One automatic retry of a picture that failed to load while it is still on screen. */
+  private photoRetryTimer: ReturnType<typeof setTimeout> | undefined
   /** A reply send is running; a second press must not start another one. */
   private sendInFlight = false
   /** The startup run in progress, so a foreground event during startup reuses it instead of starting another. */
@@ -258,6 +267,7 @@ export class TelegramAppController {
       this.startupRetryTimer,
       this.notifyTimer,
       this.typingTimer,
+      this.photoRetryTimer,
     ]) {
       if (timer) clearTimeout(timer)
     }
@@ -272,6 +282,7 @@ export class TelegramAppController {
     this.startupRetryTimer = undefined
     this.notifyTimer = undefined
     this.typingTimer = undefined
+    this.photoRetryTimer = undefined
     this.pendingRenderState = undefined
     this.listeners.clear()
   }
@@ -440,7 +451,10 @@ export class TelegramAppController {
     } catch (error) {
       if (await this.handleAuthFailure(error)) return
       const shown = this.state
-      if (this.showingStoredChats && shown.screen !== 'loading' && shown.screen !== 'auth' && shown.screen !== 'error') {
+      // The user may already be anywhere in the stored data (even on an error screen of their own, which has its
+      // own way back): stay there and try again later. Only the chat list itself shows the offline mark here; an
+      // open thread gets it from its own refresh.
+      if (this.showingStoredChats && shown.screen !== 'loading' && shown.screen !== 'auth') {
         debugLog('startup.offline', { error: errorText(error), retryMs: this.startupRetryDelayMs })
         const status = isBackendAuthError(error) ? BACKEND_AUTH_REJECTED_MESSAGE : OFFLINE_STATUS
         if (shown.screen === 'sidebar' && shown.focus === 'chats' && shown.status !== status) await this.setState({ ...shown, status })
@@ -471,13 +485,8 @@ export class TelegramAppController {
   private async retryStartup() {
     this.cancelStartupRetry()
     if (!this.showingStoredChats || this.initPromise) return
-    const state = this.state
-    // Loading the chat list moves the glasses to it (and would wake a sleeping screen), so only do that while
-    // the user is on it.
-    if (!(state.screen === 'sidebar' && state.focus === 'chats')) {
-      this.scheduleStartupRetry()
-      return
-    }
+    // Safe from any screen: once the user has left the stored chat list, the fresh list is applied without
+    // moving them (see loadChats).
     await this.connectSession()
   }
 
@@ -1322,12 +1331,19 @@ export class TelegramAppController {
       this.cache?.putChats(chats)
       // If the stored list is on screen, keep the user's place in it by chat id.
       const shown = this.state
-      const keptChatId = this.showingStoredChats && shown.screen === 'sidebar' && shown.focus === 'chats'
-        ? String(shown.chats[shown.selectedChatIndex]?.id)
-        : undefined
+      const wasStored = this.showingStoredChats
       this.showingStoredChats = false
-      const keptIndex = keptChatId === undefined ? -1 : chats.findIndex((chat) => String(chat.id) === keptChatId)
-      await this.setState(this.chatsState(chats, keptIndex >= 0 ? keptIndex : 0))
+      if (wasStored && !(shown.screen === 'sidebar' && shown.focus === 'chats')) {
+        // The user already left the stored list (opened a chat, went to sleep...): never pull them back. The
+        // fresh list replaces every stored copy, so going back shows it.
+        await this.setStateWithoutRender(this.withFreshChats(shown, chats))
+      } else {
+        const keptChatId = wasStored && shown.screen === 'sidebar' && shown.focus === 'chats'
+          ? String(shown.chats[shown.selectedChatIndex]?.id)
+          : undefined
+        const keptIndex = keptChatId === undefined ? -1 : chats.findIndex((chat) => String(chat.id) === keptChatId)
+        await this.setState(this.chatsState(chats, keptIndex >= 0 ? keptIndex : 0))
+      }
       // Folders are optional and never block the chat list: apply them whenever they arrive.
       const generation = this.folderSwitchId
       void this.api.listFolders().then(async (folders) => {
@@ -1341,6 +1357,25 @@ export class TelegramAppController {
       }).catch(() => undefined)
       // The chat list has no preview panel, so nothing is fetched until a chat is opened.
     }, previous)
+  }
+
+  /** `state` with every carried chat list (including the screens to go back to) replaced by `chats`. */
+  private withFreshChats<T extends AppState>(state: T, chats: Chat[]): T {
+    if (state.screen === 'error') {
+      return (state.previous ? { ...state, previous: this.withFreshChats(state.previous, chats) } : state) as T
+    }
+    if (!('chats' in state)) return state
+    const selectedId = state.chats[state.selectedChatIndex]?.id
+    const index = selectedId === undefined ? -1 : chats.findIndex((chat) => String(chat.id) === String(selectedId))
+    const next = { ...state, chats, selectedChatIndex: index >= 0 ? index : 0 } as T & { back?: RecoverableState; chat?: Chat; topic?: Topic }
+    if ('back' in state && state.back) next.back = this.withFreshChats(state.back as RecoverableState, chats)
+    // A thread still waiting for its fresh page plans its unread divider from the chat's unread count: use the
+    // fresh count rather than the stored one.
+    if (state.screen === 'sidebar' && state.focus === 'messages' && !state.topic && this.staleThreadKey === messageThreadKey(state)) {
+      const freshChat = chats.find((chat) => String(chat.id) === String(state.chat.id))
+      if (freshChat) next.chat = freshChat
+    }
+    return next
   }
 
   /**
@@ -1422,16 +1457,42 @@ export class TelegramAppController {
     this.imageTimer = undefined
   }
 
-  /** Fetch a photo page's picture and push it to the glasses, unless the user has scrolled on meanwhile. */
-  private async showPanelImage(image: { chatId: string; messageId: string }) {
+  /**
+   * Fetch a photo page's picture and push it to the glasses, unless the user has scrolled on meanwhile. A picture
+   * that fails to load (the backend can be slow) leaves the gap empty and is tried once more after a short delay
+   * while it is still on screen; after that it is tried again whenever its page is drawn.
+   */
+  private async showPanelImage(image: { chatId: string; messageId: string }, retried = false) {
     if (!this.bridge.updateImage) return
-    const photo = await this.loadPhoto(image.chatId, image.messageId)
+    let photo: Photo
+    try {
+      photo = await this.loadPhoto(image.chatId, image.messageId)
+    } catch (error) {
+      debugLog('photo.failed', { messageId: image.messageId, retried, error: errorText(error) })
+      if (await this.handleAuthFailure(error)) return
+      if (!retried) this.schedulePhotoRetry(image)
+      return
+    }
     await this.bridge.pageSettled?.()
-    const current = this.state
-    if (current.screen !== 'sidebar' || current.focus !== 'messages') return
-    const shown = screenModel(current)
-    if (shown.kind !== 'sidebar' || shown.panelImage?.messageId !== image.messageId || shown.panelImage.chatId !== image.chatId) return
+    if (!this.isPanelImageShown(image)) return
     await this.bridge.updateImage(base64ToBytes(photo.data))
+  }
+
+  private isPanelImageShown(image: { chatId: string; messageId: string }) {
+    const current = this.state
+    if (current.screen !== 'sidebar' || current.focus !== 'messages') return false
+    const shown = screenModel(current)
+    return shown.kind === 'sidebar' && shown.panelImage?.messageId === image.messageId && shown.panelImage.chatId === image.chatId
+  }
+
+  private schedulePhotoRetry(image: { chatId: string; messageId: string }) {
+    if (this.photoRetryTimer) clearTimeout(this.photoRetryTimer)
+    this.photoRetryTimer = setTimeout(() => {
+      this.photoRetryTimer = undefined
+      if (this.isPanelImageShown(image) && this.imagesSettled) void this.showPanelImage(image, true).catch(() => undefined)
+    }, PHOTO_RETRY_DELAY_MS)
+    const maybeNodeTimeout = this.photoRetryTimer as unknown as { unref?: () => void }
+    maybeNodeTimeout.unref?.()
   }
 
   /** Warm the newest photos of an opened thread so they are ready when scrolled to. */
@@ -1648,7 +1709,21 @@ export class TelegramAppController {
         await this.openMessages(chat, undefined, previous, requestId)
         return
       }
-      const cachedTopics = this.threads.topics(chat.id)
+      const memoryTopics = this.threads.topics(chat.id)
+      // A topic list stored by an earlier session opens the chat at once (also offline); it is refreshed behind it.
+      const storedTopics = memoryTopics ? undefined : await this.threads.loadStoredTopics(chat.id)
+      if (requestId !== this.openRequestId) return
+      if (storedTopics) {
+        await this.setState({
+          screen: 'sidebar', focus: 'topics',
+          chats, selectedChatIndex,
+          chat, topics: storedTopics, selectedTopicIndex: 0,
+        })
+        this.debounceTopicPreviewFetch(chat, storedTopics, 0)
+        void this.refreshTopicsInBackground(chat, requestId)
+        return
+      }
+      const cachedTopics = memoryTopics
       if (!cachedTopics) {
         await this.setState({
           screen: 'sidebar', focus: 'messages',
@@ -1677,6 +1752,46 @@ export class TelegramAppController {
     }, previous)
   }
 
+  /**
+   * Fetch the topic list of a forum chat opened from its stored list and swap it in, keeping the selected topic.
+   * Never throws: a failure marks the screen offline (an expired session signs out), and opening the chat again
+   * retries.
+   */
+  private async refreshTopicsInBackground(chat: Chat, requestId: number) {
+    let topics: Topic[]
+    try {
+      topics = await this.api.listTopics(chat.id)
+    } catch (error) {
+      debugLog('topics.refresh-failed', { error: errorText(error) })
+      if (await this.handleAuthFailure(error)) return
+      const current = this.state
+      if (requestId === this.openRequestId && current.screen === 'sidebar' && current.focus === 'topics' && String(current.chat.id) === String(chat.id)) {
+        const status = isBackendAuthError(error) ? BACKEND_AUTH_REJECTED_MESSAGE : OFFLINE_STATUS
+        if (current.status !== status) await this.setState({ ...current, status })
+      }
+      return
+    }
+    this.threads.putTopics(chat.id, topics)
+    const current = this.state
+    if (current.screen !== 'sidebar' || current.focus !== 'topics' || String(current.chat.id) !== String(chat.id)) return
+    if (topics.length === 0) {
+      if (current.status) await this.setState({ ...current, status: undefined })
+      return
+    }
+    const selectedId = current.topics[current.selectedTopicIndex]?.id
+    const index = topics.findIndex((topic) => String(topic.id) === String(selectedId))
+    const selectedTopicIndex = index >= 0 ? index : 0
+    const sameSelection = index >= 0
+    await this.setState({
+      ...current,
+      topics,
+      selectedTopicIndex,
+      status: undefined,
+      ...(sameSelection ? {} : emptyTopicPreview()),
+    })
+    if (!sameSelection) this.debounceTopicPreviewFetch(chat, topics, selectedTopicIndex)
+  }
+
   /** True while the user is reading up from the newest message in a thread that had unread messages. */
   private isReadingFromUnread(state: Extract<AppState, { screen: 'sidebar'; focus: 'messages' }>) {
     return (state.scrollOffset ?? 0) > 0 && this.threads.hasUnreadBoundary(state)
@@ -1695,7 +1810,34 @@ export class TelegramAppController {
     const topics = topic && previous.screen === 'sidebar' && previous.focus === 'topics' ? previous.topics : undefined
     const selectedTopicIndex = topic && previous.screen === 'sidebar' && previous.focus === 'topics' ? previous.selectedTopicIndex : undefined
     await this.run(async () => {
-      const cached = this.threads.page({ chat, topic }) ?? (await this.threads.loadStoredPage({ chat, topic }))
+      const ref = { chat, topic }
+      const key = messageThreadKey(ref)
+      if (this.staleThreadKey === key) this.staleThreadKey = undefined
+      const inMemory = this.threads.page(ref)
+      const cached = inMemory ?? (await this.threads.loadStoredPage(ref))
+      if (cached && requestId !== this.openRequestId) return // the user moved on while the stored page was read
+      const fromDisk = Boolean(cached && !inMemory)
+      if (cached && fromDisk && (topic ?? chat).unreadCount) {
+        // The stored page misses the unread messages, so it is shown as it is (no divider, nothing marked read)
+        // until the fresh page arrives and gets the normal unread handling (refreshOpenMessagesInBackground).
+        this.staleThreadKey = key
+        await this.setState({
+          screen: 'sidebar', focus: 'messages',
+          chats, selectedChatIndex,
+          chat, topic,
+          messages: cached.messages,
+          cursor: cached.cursor,
+          back: messageBackTarget(previous),
+          status: UPDATING_STATUS,
+          newerPages: [],
+          isNewestPage: true,
+          scrollOffset: 0,
+          topics,
+          selectedTopicIndex,
+        })
+        void this.refreshOpenMessagesInBackground(chat, topic, requestId)
+        return
+      }
       if (cached) {
         const plan = this.threads.planUnreadOpen({ chat, topic }, cached.messages)
         const openState: AppState = {
@@ -1710,6 +1852,8 @@ export class TelegramAppController {
           scrollOffset: plan.scrollOffset,
           topics,
           selectedTopicIndex,
+          // A page from the phone's storage may be behind: say so until the fresh one has arrived.
+          ...(fromDisk ? { status: UPDATING_STATUS } : {}),
         }
         // Opened at the "last read" point: nothing counts as read until the user scrolls down to the newest message.
         if (plan.scrollOffset > 0) await this.setState(openState)
@@ -1754,28 +1898,84 @@ export class TelegramAppController {
     }, previous)
   }
 
+  /**
+   * Fetch the newest page of a thread opened from cached data and apply it. Never throws: a failure keeps the
+   * cached page on screen marked offline (an expired session signs out), and polling, the live stream's
+   * reconnect or coming back to the foreground try again (refreshVisibleMessages).
+   */
   private async refreshOpenMessagesInBackground(chat: Chat, topic: Topic | undefined, requestId: number) {
-    const messages = normalizeMessagePage(await this.api.listMessages(chat.id, { topicId: topicThreadId(topic), limit: MESSAGE_PAGE_LIMIT }))
+    const key = messageThreadKey({ chat, topic })
+    let messages: Message[]
+    try {
+      messages = normalizeMessagePage(await this.api.listMessages(chat.id, { topicId: topicThreadId(topic), limit: MESSAGE_PAGE_LIMIT }))
+    } catch (error) {
+      debugLog('messages.refresh-failed', { error: errorText(error) })
+      if (await this.handleAuthFailure(error)) return
+      if (!this.isStillOpeningMessages(chat, topic, requestId)) return
+      const current = this.state as Extract<AppState, { screen: 'sidebar'; focus: 'messages' }>
+      const status = isBackendAuthError(error) ? BACKEND_AUTH_REJECTED_MESSAGE : OFFLINE_STATUS
+      if (current.status !== status && (current.status === undefined || isRefreshStatus(current.status))) {
+        await this.setState({ ...current, status })
+      }
+      return
+    }
+    const wasStale = this.staleThreadKey === key
+    if (wasStale) this.staleThreadKey = undefined
     this.cacheMessages(chat, topic, messages)
     if (requestId !== this.openRequestId || !this.isStillOpeningMessages(chat, topic, requestId)) return
     const state = this.state
     if (state.screen !== 'sidebar' || state.focus !== 'messages') return
-    if (!hasMessageChanges(state.messages, messages)) return
+    const status = isRefreshStatus(state.status) ? undefined : state.status
+    if (wasStale) {
+      await this.applyFreshPageToStaleOpen(state, messages, status)
+      return
+    }
+    if (!hasMessageChanges(state.messages, messages)) {
+      if (status !== state.status) await this.setState({ ...state, status })
+      return
+    }
     if (this.isReadingFromUnread(state)) {
       const flagged = this.threads.flagUnread({ chat, topic }, messages)
       const scrollOffset = this.keepPlace(state, flagged)
-      await this.setState({ ...state, messages: flagged, cursor: oldestMessageId(flagged), newerPages: [], isNewestPage: scrollOffset === 0, scrollOffset })
+      await this.setState({ ...state, messages: flagged, cursor: oldestMessageId(flagged), newerPages: [], isNewestPage: scrollOffset === 0, scrollOffset, status })
       this.maybePrefetchOlder()
       return
     }
     await this.setStateWithVisibleRead({
       ...state,
+      status,
       messages,
       cursor: oldestMessageId(messages),
       newerPages: [],
       isNewestPage: true,
       scrollOffset: 0,
     }, chat, topic, messages)
+    this.maybePrefetchOlder()
+  }
+
+  /**
+   * The fresh page of a thread that was opened from a stale stored page (it had unread messages) has arrived:
+   * place the "last read" divider on it as if the thread had just been opened, or, if the user has already
+   * scrolled up in the stored page, keep their place. Only now may the thread be marked read.
+   */
+  private async applyFreshPageToStaleOpen(
+    state: Extract<AppState, { screen: 'sidebar'; focus: 'messages' }>, fresh: Message[], status: string | undefined,
+  ) {
+    const storedNewest = newestMessageId(state.messages)
+    const freshOldest = oldestMessageId(fresh)
+    // Only join the two when they overlap; otherwise messages between them would be missing.
+    const contiguous = storedNewest !== undefined && freshOldest !== undefined && idAtOrAfter(storedNewest, freshOldest)
+    const merged = contiguous ? normalizeMessagePage([...state.messages, ...fresh]) : fresh
+    const plan = this.threads.planUnreadOpen(state, merged)
+    const base = { ...state, messages: plan.messages, cursor: oldestMessageId(plan.messages), newerPages: [], status }
+    if (contiguous && (state.scrollOffset ?? 0) > 0) {
+      const scrollOffset = this.keepPlace(state, plan.messages)
+      await this.setState({ ...base, scrollOffset, isNewestPage: scrollOffset === 0 })
+    } else {
+      const next = { ...base, scrollOffset: plan.scrollOffset, isNewestPage: plan.scrollOffset === 0 }
+      if (plan.scrollOffset > 0) await this.setState(next)
+      else await this.setStateWithVisibleRead(next, state.chat, state.topic, plan.messages)
+    }
     this.maybePrefetchOlder()
   }
 
@@ -2390,6 +2590,11 @@ export class TelegramAppController {
     const requestedThreadKey = messageThreadKey(state)
     this.messageRefreshInFlight = true
     try {
+      if (state.screen === 'sidebar' && this.staleThreadKey === requestedThreadKey) {
+        // Still showing the stale stored page (its first refresh failed): fetch the whole fresh page.
+        await this.refreshOpenMessagesInBackground(state.chat, state.topic, this.openRequestId)
+        return
+      }
       const messages = await this.fetchNewerMessages(state).catch((error) => {
         void this.noteBackgroundError(error)
         return undefined
@@ -2417,7 +2622,8 @@ export class TelegramAppController {
     const merged = normalizeMessagePage([...current.messages, ...messages])
     if (!hasMessageChanges(current.messages, merged)) return
     const hasIncoming = hasIncomingChange(current.messages, merged)
-    this.cacheMessages(current.chat, current.topic, merged)
+    // A stale stored page with a live message added is still not the thread's latest page.
+    if (this.staleThreadKey !== messageThreadKey(current)) this.cacheMessages(current.chat, current.topic, merged)
     if (current.screen === 'sidebar' && current.focus === 'messages' && this.isReadingFromUnread(current)) {
       const flagged = this.threads.flagUnread(current, merged)
       const scrollOffset = this.keepPlace(current, flagged)
@@ -2442,7 +2648,8 @@ export class TelegramAppController {
     options: { forceAck?: boolean; render?: boolean } = {},
   ) {
     const maxId = newestMessageId(messages)
-    if (maxId === undefined) {
+    // A thread shown from a stale stored page is not read yet: its unread messages have not even arrived.
+    if (maxId === undefined || this.staleThreadKey === messageThreadKey({ chat, topic })) {
       if (options.render === false) {
         await this.setStateWithoutRender(state)
       } else {
@@ -2799,6 +3006,11 @@ function activeThreadState(state: AppState):
     default:
       return undefined
   }
+}
+
+/** Statuses that only describe the freshness of cached data; a successful refresh clears them. */
+function isRefreshStatus(status: string | undefined) {
+  return status === UPDATING_STATUS || status === OFFLINE_STATUS || status === BACKEND_AUTH_REJECTED_MESSAGE
 }
 
 function messageBackTarget(previous: RecoverableState): RecoverableState | undefined {
