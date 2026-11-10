@@ -31,6 +31,17 @@ function resetMessageCaches() {
   messageBlocksCache = new WeakMap()
   perMessageBlocks = new WeakMap()
 }
+/**
+ * The page and block caches are keyed by the messages array, which survives a language change: drop them when the
+ * active locale is no longer the one they were built with ("last read", "+N more", sender labels are localised).
+ */
+let cachedLocale: unknown
+function ensureCachesForCurrentLocale() {
+  const locale = getLocale()
+  if (locale === cachedLocale) return
+  cachedLocale = locale
+  resetMessageCaches()
+}
 /** Estimated width in px of `value` on the glasses (pixel mode), from the simulator-measured glyph advances. */
 export function glassesTextWidthPx(value: string): number {
   let total = 0
@@ -217,7 +228,7 @@ export function screenModel(state: AppState): ScreenModel {
     case 'auth':
       return {
         kind: 'text',
-        title: state.mode === 'phonePending' ? l.titleTelegramLogin : 'Telegram',
+        title: state.mode === 'phonePending' ? l.titleTelegramLogin : l.titleTelegram,
         body: state.message,
       }
     case 'sidebar': {
@@ -233,7 +244,7 @@ export function screenModel(state: AppState): ScreenModel {
             sidebarSelected: state.selectedChatIndex,
             panelTitle: '',
             panelBody: formatFullWidthChatList(state.chats.map(chatLabel), state.selectedChatIndex),
-            panelFooter: state.loadingMore ? l.statusLoadingMoreChats : (state.status ?? l.footerSwipeChats),
+            panelFooter: state.loadingMore ? l.statusLoadingMoreChats : (state.status ? sanitizeGlassesText(localizeStatus(state.status)) : l.footerSwipeChats),
             fullWidth: true,
             focus: 'panel',
           }
@@ -422,7 +433,7 @@ export function screenModel(state: AppState): ScreenModel {
       return {
         kind: 'text',
         title: l.titleError,
-        body: `${state.message}\n\nPress to retry. Double press back.`,
+        body: `${state.message}\n\n${l.bodyPressToRetry}`,
       }
   }
 }
@@ -496,11 +507,17 @@ function loadingMessageBody(status: string | undefined) {
 /**
  * Translate well-known English status strings from the controller into the
  * active locale. Unknown strings pass through unchanged, so custom error
- * messages and backend-provided text are never swallowed.
+ * messages and backend-provided text are never swallowed. Exported so the
+ * phone UI can show the same wording as the glasses.
  */
-function localizeStatus(status: string): string {
+export function localizeStatus(status: string): string {
   const l = getLocale()
   return {
+    [UPDATING_STATUS]: l.statusUpdating,
+    [DIDNT_CATCH_STATUS]: l.statusDidntCatch,
+    'Send failed': l.statusSendFailed,
+    'Transcription failed': l.statusTranscriptionFailed,
+    'Could not open folder': l.statusCouldNotOpenFolder,
     'Sent': l.statusSent,
     'Older messages': l.statusOlderMessages,
     'Newer messages': l.statusNewerMessages,
@@ -578,6 +595,7 @@ function boxGroupOffsets(pages: MessageDisplayPage[], boxGroupId: string) {
 }
 
 function messageDisplayPages(messages: Message[]): MessageDisplayPage[] {
+  ensureCachesForCurrentLocale()
   const cached = messagePageCache.get(messages)
   if (cached) return cached
 
@@ -661,6 +679,7 @@ function blocksForMessage(message: Message, dayLabel: string): MessageDisplayBlo
 }
 
 function messageDisplayBlocks(messages: Message[]): MessageDisplayBlock[] {
+  ensureCachesForCurrentLocale()
   const cachedBlocks = messageBlocksCache.get(messages)
   if (cachedBlocks && cachedBlocks.length > 0) return cachedBlocks
   const blocks: MessageDisplayBlock[] = []
