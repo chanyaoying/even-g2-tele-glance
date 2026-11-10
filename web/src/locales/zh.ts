@@ -196,6 +196,18 @@ const zh: LocaleStrings = {
   phoneForwardedFrom: '转发自',
   phonePhoto: '照片',
   phoneSticker: '贴纸',
+  titleFolders: 'Wenjianjia',
+  folderAllChats: 'Quanbu liaotian',
+  folderSleep: 'Xiumian',
+  footerFolderPicker: 'Huadong xuanze | Anxia dakai | Shuangji fanhui',
+  statusLoadingMoreChats: 'Jiazai gengduo liaotian...',
+  phoneTwoStepPassword: 'Liangbu yanzheng mima',
+  statusUpdating: 'Gengxin zhong...',
+  statusDidntCatch: 'Mei ting qing',
+  statusSendFailed: 'Fasong shibai',
+  statusTranscriptionFailed: 'Zhuanxie shibai',
+  statusCouldNotOpenFolder: 'Wufa dakai wenjianjia',
+  footerFetchingChats: 'Huoqu liaotian zhong...',
 }
 
 export default zh

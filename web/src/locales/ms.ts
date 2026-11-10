@@ -194,6 +194,18 @@ const ms: LocaleStrings = {
   phoneForwardedFrom: 'Dimajukan daripada',
   phonePhoto: 'foto',
   phoneSticker: 'pelekat',
+  titleFolders: 'Folder',
+  folderAllChats: 'Semua sembang',
+  folderSleep: 'Tidur',
+  footerFolderPicker: 'Leret pilih | Tekan buka | Klik dua undur',
+  statusLoadingMoreChats: 'Memuat lebih banyak sembang...',
+  phoneTwoStepPassword: 'Kata laluan pengesahan dua langkah',
+  statusUpdating: 'Mengemas kini...',
+  statusDidntCatch: 'Tidak dapat ditangkap',
+  statusSendFailed: 'Hantar gagal',
+  statusTranscriptionFailed: 'Transkripsi gagal',
+  statusCouldNotOpenFolder: 'Tidak dapat membuka folder',
+  footerFetchingChats: 'Mengambil sembang...',
 }
 
 export default ms
