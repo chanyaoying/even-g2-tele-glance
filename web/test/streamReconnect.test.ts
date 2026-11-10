@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { HttpTelegramApi } from '../src/api'
+import { HttpTelegramApi, isSessionExpiredError } from '../src/api'
 
 // Real WebCrypto key derivation does not advance with fake timers, and is not what these tests are about.
 vi.mock('../src/secureAuth', async (importOriginal) => ({
@@ -126,5 +126,49 @@ describe('update stream reconnect', () => {
     await vi.advanceTimersByTimeAsync(60_000)
     expect(fetchStub).not.toHaveBeenCalled()
     expect(onError).toHaveBeenCalledTimes(1)
+  })
+
+  it('opens the stream with fetch (so the auth and protocol headers are sent) and reports every open', async () => {
+    vi.useFakeTimers()
+    let headers: Headers | undefined
+    const fetchStub = vi.fn(async (_url: string, init?: RequestInit) => {
+      headers = new Headers(init?.headers)
+      return streamResponse([], true, init?.signal ?? undefined)
+    })
+    vi.stubGlobal('fetch', fetchStub)
+    const onOpen = vi.fn()
+    const stop = api().subscribeUpdates(() => undefined, undefined, undefined, onOpen)
+    await vi.advanceTimersByTimeAsync(10)
+    expect(fetchStub.mock.calls[0][0]).toBe('http://localhost:8787/api/updates')
+    expect(headers?.get('X-TeleGlance-Proto')).toBe('2')
+    expect(headers?.get('X-TeleGlance-Auth')).toBe('encrypted-auth')
+    expect(onOpen).toHaveBeenCalledTimes(1)
+    stop()
+  })
+
+  it.each([
+    [401, 'Telegram session has expired. Reconnect in TeleGlance Settings.'],
+    [401, 'Encrypted auth could not be decrypted'],
+    [403, 'Forbidden'],
+  ])('stops instead of reconnecting forever on HTTP %s', async (status, detail) => {
+    vi.useFakeTimers()
+    const fetchStub = vi.fn(async () => new Response(JSON.stringify({ detail }), { status }))
+    vi.stubGlobal('fetch', fetchStub)
+    const onError = vi.fn()
+    api().subscribeUpdates(() => undefined, onError)
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(fetchStub).toHaveBeenCalledTimes(1)
+    expect(onError).toHaveBeenCalledTimes(1)
+  })
+
+  it('stops on an expired-session error event and reports it as a session expiry', async () => {
+    vi.useFakeTimers()
+    const fetchStub = vi.fn(async () => streamResponse([`event: error\ndata: ${JSON.stringify({ detail: 'Telegram session has expired. Reconnect in TeleGlance Settings.' })}\n\n`]))
+    vi.stubGlobal('fetch', fetchStub)
+    const onError = vi.fn()
+    api().subscribeUpdates(() => undefined, onError)
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(fetchStub).toHaveBeenCalledTimes(1)
+    expect(isSessionExpiredError(onError.mock.calls[0][0])).toBe(true)
   })
 })

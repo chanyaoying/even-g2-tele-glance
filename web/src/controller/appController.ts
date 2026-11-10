@@ -1,5 +1,5 @@
 import { MAX_RECORDING_BYTES, pcmChunksToWav } from '../audio/wav'
-import type { TelegramApi } from '../api'
+import { BACKEND_AUTH_REJECTED_MESSAGE, isBackendAuthError, isSessionExpiredError, OFFLINE_STATUS, type TelegramApi } from '../api'
 import type { Chat, Folder, Id, Message, TelegramUpdate, TelegramTypingUpdate, Topic } from '../types'
 import { getLocale } from '../locales'
 import { backToMessages, DIDNT_CATCH_STATUS, UPDATING_STATUS } from './model'
@@ -38,6 +38,10 @@ const MESSAGE_PAGE_LIMIT = 8
 // or 24 messages, and a bigger chunk means far fewer waits at the edge of loaded history while scrolling.
 /** Ignore a plain click this soon after a hold event (some firmware double-reports). */
 const SEND_FAILED_STATUS = 'Send failed'
+const STARTUP_RETRY_BASE_MS = 5_000
+const STARTUP_RETRY_MAX_MS = 60_000
+/** While the live update stream is up, polling is only a slow safety net. */
+const STREAM_HEALTHY_POLL_MS = 60_000
 const TRANSCRIBE_FAILED_STATUS = 'Transcription failed'
 const HOLD_PRESS_GUARD_MS = 350
 const OLDER_PAGE_LIMIT = 24
@@ -114,6 +118,16 @@ export class TelegramAppController {
   private showingStoredChats = false
   /** A reply send is running; a second press must not start another one. */
   private sendInFlight = false
+  /** The startup run in progress, so a foreground event during startup reuses it instead of starting another. */
+  private initPromise: Promise<void> | undefined
+  /** Startup could not reach the backend while the stored chat list is shown: try again later. */
+  private startupRetryTimer: ReturnType<typeof setTimeout> | undefined
+  private startupRetryDelayMs = STARTUP_RETRY_BASE_MS
+  /** The live update stream is connected; polling then only runs as a slow safety net. */
+  private streamHealthy = false
+  /** An update arrived while a refresh was running: run one more refresh when it finishes. */
+  private rootRefreshDirty = false
+  private messageRefreshDirty = false
   /** The last send that failed, so a retry first checks whether it actually went through. */
   private failedSend: { key: string; startedAt: number } | undefined
   /** What pressing on the error screen runs again (undefined: go back to the screen before the error). */
@@ -247,6 +261,9 @@ export class TelegramAppController {
       this.startupPrefetchTimer,
       this.renderTimer,
       this.imageTimer,
+      this.startupRetryTimer,
+      this.notifyTimer,
+      this.typingTimer,
     ]) {
       if (timer) clearTimeout(timer)
     }
@@ -256,6 +273,7 @@ export class TelegramAppController {
     this.readAckFlushTimer = undefined
     this.startupPrefetchTimer = undefined
     this.renderTimer = undefined
+    this.startupRetryTimer = undefined
     this.notifyTimer = undefined
     this.typingTimer = undefined
     this.pendingRenderState = undefined
@@ -269,15 +287,26 @@ export class TelegramAppController {
     const trimmed = text.trim()
     if (!trimmed) return
     const ctx = sidebarContext(state)
-    await this.run(async () => {
-      if (this.sendInFlight) return
-      this.sendInFlight = true
-      let sent: Message
-      try {
-        sent = await this.sendWithDuplicateCheck(thread, trimmed)
-      } finally {
-        this.sendInFlight = false
+    // The phone keeps its draft unless this resolves, so a send that did not happen must throw.
+    if (this.sendInFlight) throw new Error(getLocale().phoneSendSkipped)
+    this.sendInFlight = true
+    let sent: Message
+    try {
+      sent = await this.sendWithDuplicateCheck(thread, trimmed)
+    } catch (error) {
+      debugLog('send', { ok: false, from: 'phone', error: errorText(error) })
+      if (!(await this.handleAuthFailure(error))) {
+        // Like a failed glasses send: the thread stays open with a short status; the phone shows the error.
+        const current = this.state
+        if (current.screen === 'sidebar' && current.focus === 'messages' && messageThreadKey(current) === messageThreadKey(thread)) {
+          await this.setState({ ...current, status: SEND_FAILED_STATUS })
+        }
       }
+      throw error
+    } finally {
+      this.sendInFlight = false
+    }
+    await this.run(async () => {
       const refreshed = await this.refreshLatestMessages(thread).catch(() => [])
       const messages = refreshed.some((message) => String(message.id) === String(sent.id))
         ? refreshed
@@ -378,7 +407,16 @@ export class TelegramAppController {
     }
   }
 
-  async init() {
+  /** Start (or restart) the session. A call while one is still running joins it instead of starting another. */
+  init(): Promise<void> {
+    this.initPromise ??= this.initOnce().finally(() => {
+      this.initPromise = undefined
+    })
+    return this.initPromise
+  }
+
+  private async initOnce() {
+    this.cancelStartupRetry()
     // Read the stored chat list before drawing anything: when there is one, the glasses go straight to it and never
     // show the "Checking Telegram session..." screen (every extra page costs the glasses link a rebuild).
     // The network request starts first so it runs while the stored list is read and drawn.
@@ -392,32 +430,88 @@ export class TelegramAppController {
     } else {
       await this.setState({ screen: 'loading', message: 'Checking Telegram session...' })
     }
-    await this.run(async () => {
-      if (!this.hasTelegramCredentials()) {
-        await this.setState({
-          screen: 'auth',
-          mode: 'needsSetup',
-          message: 'Follow the instructions on the Settings page to connect Telegram and the backend server.',
-        })
+    await this.connectSession(chatsRequest)
+  }
+
+  /**
+   * Check the session and load the chat list. When that fails while the stored chat list is on the glasses,
+   * the list stays (marked offline) and this runs again later, instead of replacing it with an error page.
+   */
+  private async connectSession(chatsRequest?: Promise<Chat[]>) {
+    try {
+      await this.connectSessionOnce(chatsRequest)
+      this.startupRetryDelayMs = STARTUP_RETRY_BASE_MS
+    } catch (error) {
+      if (await this.handleAuthFailure(error)) return
+      const shown = this.state
+      if (this.showingStoredChats && shown.screen !== 'loading' && shown.screen !== 'auth' && shown.screen !== 'error') {
+        debugLog('startup.offline', { error: errorText(error), retryMs: this.startupRetryDelayMs })
+        const status = isBackendAuthError(error) ? BACKEND_AUTH_REJECTED_MESSAGE : OFFLINE_STATUS
+        if (shown.screen === 'sidebar' && shown.focus === 'chats' && shown.status !== status) await this.setState({ ...shown, status })
+        this.scheduleStartupRetry()
         return
       }
-      // The chat list request is already running; it is dropped if the session is not authorized.
-      const status = await this.api.authStatus()
-      if (!status.authorized) {
-        this.showingStoredChats = false
-        void this.cache?.clear()
-        const hasFrontendCredentials = this.hasTelegramCredentials()
-        await this.setState({
-          screen: 'auth',
-          mode: hasFrontendCredentials ? 'signedOut' : 'needsSetup',
-          message: !hasFrontendCredentials || status.configured === false
-            ? 'Telegram not connected. Please connect using the instructions in Settings on the phone.'
-            : 'Telegram not connected. Enter your phone number in the phone UI to receive a Telegram login code.',
-        })
-        return
-      }
-      await this.loadChats(undefined, chatsRequest)
-    })
+      await this.showError(error)
+    }
+  }
+
+  private scheduleStartupRetry() {
+    this.cancelStartupRetry()
+    const delay = this.startupRetryDelayMs
+    this.startupRetryDelayMs = Math.min(STARTUP_RETRY_MAX_MS, this.startupRetryDelayMs * 2)
+    this.startupRetryTimer = setTimeout(() => {
+      this.startupRetryTimer = undefined
+      void this.retryStartup()
+    }, delay)
+    const maybeNodeTimeout = this.startupRetryTimer as unknown as { unref?: () => void }
+    maybeNodeTimeout.unref?.()
+  }
+
+  private cancelStartupRetry() {
+    if (this.startupRetryTimer) clearTimeout(this.startupRetryTimer)
+    this.startupRetryTimer = undefined
+  }
+
+  private async retryStartup() {
+    this.cancelStartupRetry()
+    if (!this.showingStoredChats || this.initPromise) return
+    const state = this.state
+    // Loading the chat list moves the glasses to it (and would wake a sleeping screen), so only do that while
+    // the user is on it.
+    if (!(state.screen === 'sidebar' && state.focus === 'chats')) {
+      this.scheduleStartupRetry()
+      return
+    }
+    await this.connectSession()
+  }
+
+  private async connectSessionOnce(chatsRequest?: Promise<Chat[]>) {
+    if (!this.hasTelegramCredentials()) {
+      await this.setState({
+        screen: 'auth',
+        mode: 'needsSetup',
+        message: 'Follow the instructions on the Settings page to connect Telegram and the backend server.',
+      })
+      return
+    }
+    // The chat list request is already running; it is dropped if the session is not authorized.
+    const status = await this.api.authStatus()
+    if (!status.authorized) {
+      this.showingStoredChats = false
+      void this.cache?.clear()
+      const hasFrontendCredentials = this.hasTelegramCredentials()
+      await this.setState({
+        screen: 'auth',
+        mode: hasFrontendCredentials ? 'signedOut' : 'needsSetup',
+        message: !hasFrontendCredentials || status.configured === false
+          ? 'Telegram not connected. Please connect using the instructions in Settings on the phone.'
+          : 'Telegram not connected. Enter your phone number in the phone UI to receive a Telegram login code.',
+      })
+      return
+    }
+    // Awaited here (not inside loadChats) so a failure reaches connectSession and can keep the stored list.
+    const chats = await (chatsRequest ?? this.api.listChats(CHAT_LIST_LIMIT))
+    await this.loadChats(undefined, Promise.resolve(chats))
   }
 
   async dispatch(input: AppInput) {
@@ -437,8 +531,14 @@ export class TelegramAppController {
         return
       }
       const screen = this.state.screen
+      // Never restart over a login code that is being entered on the phone.
+      if (this.state.screen === 'auth' && this.state.mode === 'phonePending') return
       if (screen === 'loading' || screen === 'auth' || screen === 'error') {
         await this.init()
+        return
+      }
+      if (this.startupRetryTimer) {
+        await this.retryStartup()
         return
       }
       // The session is already loaded: refresh what is on screen without losing the user's place.
@@ -589,6 +689,7 @@ export class TelegramAppController {
   async startPhoneLogin(phone: string) {
     const trimmed = phone.trim()
     if (!trimmed) return
+    let loginError: unknown
     await this.run(async () => {
       if (!this.hasTelegramCredentials()) {
         await this.setState({
@@ -598,7 +699,17 @@ export class TelegramAppController {
         })
         return
       }
-      const result = await this.api.startPhoneAuth(trimmed)
+      const before = this.state
+      let result: Awaited<ReturnType<TelegramApi['startPhoneAuth']>>
+      try {
+        result = await this.api.startPhoneAuth(trimmed)
+      } catch (error) {
+        // Stay on the sign-in screen (the phone shows the error next to the form) instead of an error page.
+        debugLog('phone-login', { ok: false, error: errorText(error) })
+        if (before.screen === 'auth') await this.setState({ ...before, message: error instanceof Error ? error.message : String(error) })
+        loginError = error
+        return
+      }
       await this.setState({
         screen: 'auth',
         mode: 'phonePending',
@@ -607,6 +718,7 @@ export class TelegramAppController {
         message: result.message ?? `Verification code sent to ${result.phone || trimmed}. Enter it on the phone.`,
       })
     }, this.state.screen === 'auth' ? this.state : undefined)
+    if (loginError !== undefined) throw loginError
   }
 
   async verifyPhoneLogin(phone: string, code: string, password?: string) {
@@ -750,6 +862,8 @@ export class TelegramAppController {
     // mimic user input."
     if (isTeleGlanceFixtureMode()) logLifecycleEvent('wake', { selectedChatIndex: state.selectedChatIndex })
     await this.setState(this.chatsState(state.chats, state.selectedChatIndex))
+    // Nothing polls while asleep; without the live stream the list may be stale, so refresh it now.
+    if (!this.streamHealthy) void this.refreshRootChats({ background: true })
   }
 
   private async handleNewMessage(state: Extract<AppState, { screen: 'newMessage' }>, input: AppInput) {
@@ -1212,6 +1326,11 @@ export class TelegramAppController {
       // The dispatch-level filter in `dispatch` has already dropped
       // any idle system `doublePress`. See `isIdleSystemDoublePress`.
       await this.setState(state.previous)
+      return
+    }
+    if (input.type === 'doublePress') {
+      // Nothing to go back to (startup failed): double-press means leave the app, as on the sign-in screen.
+      await this.bridge.showExitConfirmation?.()
       return
     }
     if (input.type === 'press') {
@@ -2005,18 +2124,90 @@ export class TelegramAppController {
     await this.loadChats()
   }
 
-  private async run(operation: () => Promise<void>, previous?: RecoverableState, retry?: () => Promise<void>) {
+  /**
+   * Run a user-visible operation. A failure never escapes: an expired Telegram session goes to the sign-in
+   * screen, anything else to the error screen. Resolves true when the operation completed.
+   */
+  private async run(operation: () => Promise<void>, previous?: RecoverableState, retry?: () => Promise<void>): Promise<boolean> {
     try {
       await operation()
+      return true
     } catch (error) {
-      debugLog('error-screen', { error: errorText(error), screen: this.state.screen })
-      await this.bridge.setAudioEnabled(false).catch(() => undefined)
-      this.errorRetry = retry
-      await this.setState({
-        screen: 'error',
-        message: error instanceof Error ? error.message : 'Unknown error',
-        previous,
-      })
+      if (await this.handleAuthFailure(error)) return false
+      await this.showError(error, previous, retry)
+      return false
+    }
+  }
+
+  private async showError(error: unknown, previous?: RecoverableState, retry?: () => Promise<void>) {
+    debugLog('error-screen', { error: errorText(error), screen: this.state.screen })
+    await this.bridge.setAudioEnabled(false).catch(() => undefined)
+    this.errorRetry = retry
+    await this.setState({
+      screen: 'error',
+      message: error instanceof Error ? error.message : 'Unknown error',
+      previous,
+    })
+  }
+
+  /**
+   * The backend said the Telegram session is gone (401): stop polling, forget the cached chats and the stored
+   * session, and show the sign-in screen. Any other error (including a rejected shared secret, which must not
+   * cost the user their login) returns false and is left to the caller.
+   */
+  async handleAuthFailure(error: unknown): Promise<boolean> {
+    if (!isSessionExpiredError(error)) return false
+    const state = this.state
+    if (state.screen === 'auth' && state.mode === 'signedOut') return true
+    debugLog('session.expired', { screen: state.screen })
+    this.openRequestId += 1
+    this.cancelStartupRetry()
+    this.stopMessagePolling()
+    this.stopChatPolling()
+    this.showingStoredChats = false
+    this.onTelegramSession?.('')
+    await this.bridge.setAudioEnabled(false).catch(() => undefined)
+    await this.setState({ screen: 'auth', mode: 'signedOut', message: getLocale().authSessionExpired })
+    await this.clearCache().catch(() => undefined)
+    return true
+  }
+
+  /** The update stream connected (true) or dropped (false). Polling is fast only while it is down. */
+  setStreamHealthy(healthy: boolean) {
+    if (this.streamHealthy === healthy) return
+    this.streamHealthy = healthy
+    if (this.messagePoll) {
+      this.stopMessagePolling()
+      this.syncMessagePolling()
+    }
+    if (this.chatPoll) {
+      this.stopChatPolling()
+      this.syncChatPolling()
+    }
+    // The backend is reachable again: no need to wait for the next startup retry.
+    if (healthy && this.startupRetryTimer) void this.retryStartup()
+  }
+
+  /** The update stream stopped for good (see isUnrecoverableStreamError); react like a failed background poll. */
+  async handleStreamFailure(error: unknown) {
+    await this.noteBackgroundError(error)
+  }
+
+  /** A background refresh failed: sign out on an expired session, flag a rejected shared secret, else ignore. */
+  private async noteBackgroundError(error: unknown) {
+    if (await this.handleAuthFailure(error)) return
+    if (!isBackendAuthError(error)) return
+    const state = this.state
+    if (state.screen === 'sidebar' && state.focus !== 'topics' && state.status !== BACKEND_AUTH_REJECTED_MESSAGE) {
+      await this.setState({ ...state, status: BACKEND_AUTH_REJECTED_MESSAGE })
+    }
+  }
+
+  /** A background refresh worked: drop a stale offline / auth-rejected mark. */
+  private async noteBackgroundSuccess() {
+    const state = this.state
+    if (state.screen === 'sidebar' && state.focus !== 'topics' && (state.status === BACKEND_AUTH_REJECTED_MESSAGE || state.status === OFFLINE_STATUS)) {
+      await this.setState({ ...state, status: undefined })
     }
   }
 
@@ -2173,7 +2364,7 @@ export class TelegramAppController {
     if (this.messagePoll) return
     this.messagePoll = setInterval(() => {
       void this.refreshVisibleMessages({ background: true })
-    }, this.runtimeConfig.messagePollMs)
+    }, this.pollInterval(this.runtimeConfig.messagePollMs))
     const maybeNodeInterval = this.messagePoll as unknown as { unref?: () => void }
     maybeNodeInterval.unref?.()
   }
@@ -2186,7 +2377,8 @@ export class TelegramAppController {
 
   private syncChatPolling() {
     const state = this.state
-    const shouldPoll = (state.screen === 'sidebar' && state.focus === 'chats') || state.screen === 'asleep' || state.screen === 'newMessage'
+    // No polling while asleep: the live stream (when up) still refreshes the list, and waking refreshes it.
+    const shouldPoll = (state.screen === 'sidebar' && state.focus === 'chats') || state.screen === 'newMessage'
     if (!shouldPoll) {
       this.stopChatPolling()
       return
@@ -2194,9 +2386,14 @@ export class TelegramAppController {
     if (this.chatPoll) return
     this.chatPoll = setInterval(() => {
       void this.refreshRootChats({ background: true })
-    }, this.runtimeConfig.chatPollMs)
+    }, this.pollInterval(this.runtimeConfig.chatPollMs))
     const maybeNodeInterval = this.chatPoll as unknown as { unref?: () => void }
     maybeNodeInterval.unref?.()
+  }
+
+  /** The configured (fast) interval while the update stream is down; a slow safety-net interval while it is up. */
+  private pollInterval(configuredMs: number) {
+    return this.streamHealthy ? Math.max(configuredMs, STREAM_HEALTHY_POLL_MS) : configuredMs
   }
 
   private stopChatPolling() {
@@ -2206,7 +2403,12 @@ export class TelegramAppController {
   }
 
   private async refreshRootChats(options: { background?: boolean } = {}) {
-    if (this.rootRefreshInFlight) return
+    if (this.rootRefreshInFlight) {
+      this.rootRefreshDirty = true
+      return
+    }
+    // The stored list is still waiting for startup to load the real one (or to retry it).
+    if (this.showingStoredChats) return
     if (options.background && this.isInputQuiet()) {
       this.deferRootRefresh()
       return
@@ -2215,8 +2417,12 @@ export class TelegramAppController {
     if ((state.screen !== 'sidebar' || state.focus !== 'chats') && state.screen !== 'asleep' && state.screen !== 'newMessage') return
     this.rootRefreshInFlight = true
     try {
-      const chats = await this.api.listChats(CHAT_LIST_LIMIT).catch(() => undefined)
+      const chats = await this.api.listChats(CHAT_LIST_LIMIT).catch((error) => {
+        void this.noteBackgroundError(error)
+        return undefined
+      })
       if (!chats) return
+      await this.noteBackgroundSuccess()
 
       const activity = this.findNewChatActivity(chats)
       this.rememberChats(chats)
@@ -2239,6 +2445,10 @@ export class TelegramAppController {
       }
     } finally {
       this.rootRefreshInFlight = false
+      if (this.rootRefreshDirty) {
+        this.rootRefreshDirty = false
+        void this.refreshRootChats({ background: true })
+      }
     }
   }
 
@@ -2258,7 +2468,10 @@ export class TelegramAppController {
   }
 
   private async refreshVisibleMessages(options: { background?: boolean } = {}) {
-    if (this.messageRefreshInFlight) return
+    if (this.messageRefreshInFlight) {
+      this.messageRefreshDirty = true
+      return
+    }
     if (options.background && this.isInputQuiet()) {
       this.deferMessageRefresh()
       return
@@ -2268,11 +2481,20 @@ export class TelegramAppController {
     const requestedThreadKey = messageThreadKey(state)
     this.messageRefreshInFlight = true
     try {
-      const messages = await this.fetchNewerMessages(state).catch(() => undefined)
-      if (!messages || messages.length === 0) return
+      const messages = await this.fetchNewerMessages(state).catch((error) => {
+        void this.noteBackgroundError(error)
+        return undefined
+      })
+      if (!messages) return
+      await this.noteBackgroundSuccess()
+      if (messages.length === 0) return
       await this.applyIncomingMessages(messages, requestedThreadKey)
     } finally {
       this.messageRefreshInFlight = false
+      if (this.messageRefreshDirty) {
+        this.messageRefreshDirty = false
+        void this.refreshVisibleMessages({ background: true })
+      }
     }
   }
 

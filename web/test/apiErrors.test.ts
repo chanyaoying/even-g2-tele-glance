@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ApiError,
+  BACKEND_AUTH_REJECTED_MESSAGE,
+  SESSION_EXPIRED_MESSAGE,
+  isBackendAuthError,
+  isSessionExpiredError,
   BACKEND_TIMEOUT_MESSAGE,
   BACKEND_UNREACHABLE_MESSAGE,
   HttpTelegramApi,
@@ -97,5 +101,48 @@ describe('HttpTelegramApi errors', () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ detail: 'Chat not found' }), { status: 404 })))
     const error = await makeApi().listChats(5).catch((e) => e)
     expect(error.message).toBe('Chat not found')
+  })
+
+  it('maps a 401 for an expired Telegram session to a session-expired error', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ detail: 'Telegram session has expired. Reconnect in TeleGlance Settings.' }), { status: 401 })))
+    const error = await makeApi().listChats(5).catch((e) => e)
+    expect(isSessionExpiredError(error)).toBe(true)
+    expect(isBackendAuthError(error)).toBe(false)
+    expect(error.status).toBe(401)
+    expect(error.message).toBe(SESSION_EXPIRED_MESSAGE)
+    expect(error.detail).toContain('session has expired')
+  })
+
+  it.each([
+    'Encrypted auth could not be decrypted',
+    'Encrypted auth timestamp expired',
+    'Encrypted auth nonce was already used',
+    'Malformed encrypted auth header',
+  ])('maps a 401 for an unreadable auth header (%s) to a backend-auth error, not a sign-out', async (detail) => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ detail }), { status: 401 })))
+    const error = await makeApi().authStatus().catch((e) => e)
+    expect(isBackendAuthError(error)).toBe(true)
+    expect(isSessionExpiredError(error)).toBe(false)
+    expect(error.message).toBe(BACKEND_AUTH_REJECTED_MESSAGE)
+    expect(error.detail).toContain('shared secret')
+    expect(error.detail).toContain(detail)
+  })
+
+  it('treats a 403 as a rejected auth too', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('Forbidden', { status: 403 })))
+    expect(isBackendAuthError(await makeApi().listFolders().catch((e) => e))).toBe(true)
+  })
+
+  it('sends the protocol header on every backend request, including the health check and transcription', async () => {
+    const seen: Array<string | null> = []
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      seen.push(new Headers(init?.headers).get('X-TeleGlance-Proto'))
+      return new Response(JSON.stringify({ authorized: true, text: '' }), { status: 200 })
+    }))
+    const api = makeApi()
+    await api.testConnection()
+    await api.transcribe(new Blob(['x']))
+    expect(seen.length).toBe(3) // /health, /api/session/status, /api/transcribe
+    expect(seen.every((value) => value === '2')).toBe(true)
   })
 })

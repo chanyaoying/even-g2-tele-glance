@@ -1,6 +1,7 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { TelegramAppController, type GlassesBridge } from '../src/controller/appController'
 import type { TelegramApi } from '../src/api'
+import { ApiError, BACKEND_AUTH_REJECTED_MESSAGE, BACKEND_TIMEOUT_MESSAGE, BACKEND_UNREACHABLE_MESSAGE, OFFLINE_STATUS, SESSION_EXPIRED_MESSAGE } from '../src/api'
 import { MAX_RECORDING_BYTES } from '../src/audio/wav'
 import type { Chat, Folder, Message, Topic, TranscriptionResult } from '../src/types'
 import { screenModel } from '../src/controller/model'
@@ -1495,7 +1496,7 @@ describe('TelegramAppController', () => {
     })
   })
 
-  it('does not overlap slow message refreshes', async () => {
+  it('does not overlap slow message refreshes, but runs one trailing refresh for what arrived meanwhile', async () => {
     let resolveLatest: ((messages: Message[]) => void) | undefined
     const latest = new Promise<Message[]>((resolve) => {
       resolveLatest = resolve
@@ -1515,11 +1516,16 @@ describe('TelegramAppController', () => {
     const second = refreshVisibleMessages(controller)
 
     expect(latestMessageCallCount(api)).toBe(initialLatestCalls + 1)
+    const third = refreshVisibleMessages(controller)
+    expect(latestMessageCallCount(api)).toBe(initialLatestCalls + 1)
     resolveLatest?.(reversedMessages)
     await first
     await second
+    await third
+    await flushAsync()
 
-    expect(latestMessageCallCount(api)).toBe(initialLatestCalls + 1)
+    // The two calls made while the first was running collapse into a single follow-up.
+    expect(latestMessageCallCount(api)).toBe(initialLatestCalls + 2)
   })
 
   it('refreshes root chats when a server update arrives on the chat list', async () => {
@@ -2581,5 +2587,229 @@ describe('on-phone cache and live updates', () => {
     const controller = new TelegramAppController(fakeApi({ authorized: true }), fakeBridge(), 0, undefined, () => true, cache)
     await controller.clearCache()
     expect(storage.data.size).toBe(0)
+  })
+})
+
+describe('failures, session expiry and polling', () => {
+  function memoryStorage() {
+    const data = new Map<string, string>()
+    return {
+      data,
+      getLocalStorage: async (key: string) => data.get(key) ?? '',
+      setLocalStorage: async (key: string, value: string) => {
+        if (value === '') data.delete(key)
+        else data.set(key, value)
+        return true
+      },
+    }
+  }
+
+  async function storedChatsCache(stored: Chat[]) {
+    const storage = memoryStorage()
+    const writer = new PersistentCache(storage, { flushDelayMs: 1 })
+    await writer.open('acct')
+    writer.putChats(stored)
+    await writer.flush()
+    const cache = new PersistentCache(storage, { flushDelayMs: 1 })
+    await cache.open('acct')
+    return { cache, storage }
+  }
+
+  const sessionExpired = () => new ApiError(SESSION_EXPIRED_MESSAGE, 'Telegram session has expired.', 401, undefined, 'sessionExpired')
+  const authRejected = () => new ApiError(BACKEND_AUTH_REJECTED_MESSAGE, 'Encrypted auth could not be decrypted', 401, undefined, 'backendAuth')
+  const unreachable = () => new ApiError(BACKEND_UNREACHABLE_MESSAGE, 'Backend is not reachable.')
+
+  async function openFirstChat(controller: TelegramAppController) {
+    await controller.init()
+    await controller.dispatch({ type: 'press' })
+    await flushAsync()
+    clearInputQuiet(controller)
+  }
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('rejects a failed phone send (so the phone keeps the draft) and marks the thread, without an error screen', async () => {
+    const api = fakeApi({ authorized: true })
+    vi.mocked(api.sendMessage).mockRejectedValue(new ApiError(BACKEND_TIMEOUT_MESSAGE, 'timed out'))
+    const controller = new TelegramAppController(api, fakeBridge(), 0)
+    await openFirstChat(controller)
+
+    await expect(controller.sendTextFromPhone('hello')).rejects.toThrow(BACKEND_TIMEOUT_MESSAGE)
+    expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'messages', status: 'Send failed' })
+  })
+
+  it('rejects a phone send that was skipped because another send is running', async () => {
+    const api = fakeApi({ authorized: true })
+    const gate = deferred<Message>()
+    vi.mocked(api.sendMessage).mockImplementation(() => gate.promise)
+    const controller = new TelegramAppController(api, fakeBridge(), 0)
+    await openFirstChat(controller)
+
+    const first = controller.sendTextFromPhone('one')
+    await flushAsync()
+    await expect(controller.sendTextFromPhone('two')).rejects.toThrow(/already being sent/)
+    gate.resolve({ id: '101', sender: 'Me', text: 'one', outgoing: true })
+    await expect(first).resolves.toBeUndefined()
+    expect(api.sendMessage).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects a failed login-code request and stays on the sign-in screen', async () => {
+    const api = fakeApi({ authorized: false })
+    vi.mocked(api.startPhoneAuth).mockRejectedValue(new Error('PHONE_NUMBER_INVALID'))
+    const controller = new TelegramAppController(api, fakeBridge(), 0)
+    await controller.init()
+
+    await expect(controller.startPhoneLogin('+1')).rejects.toThrow('PHONE_NUMBER_INVALID')
+    expect(controller.snapshot).toMatchObject({ screen: 'auth', mode: 'signedOut', message: 'PHONE_NUMBER_INVALID' })
+  })
+
+  it('signs out on a 401 for an expired session: sign-in screen, stored session and cache forgotten', async () => {
+    const { cache, storage } = await storedChatsCache([{ id: '1', title: 'Stored', kind: 'user' }])
+    const api = fakeApi({ authorized: true })
+    vi.mocked(api.authStatus).mockRejectedValue(sessionExpired())
+    const onSession = vi.fn()
+    const controller = new TelegramAppController(api, fakeBridge(), 0, onSession, () => true, cache)
+
+    await controller.init()
+    await flushAsync()
+    expect(controller.snapshot).toMatchObject({ screen: 'auth', mode: 'signedOut', message: expect.stringContaining('session ended') })
+    expect(onSession).toHaveBeenCalledWith('')
+    expect([...storage.data.keys()].filter((key) => key.includes('cache'))).toEqual([])
+  })
+
+  it('keeps the Telegram session on a 401 for a rejected shared secret and says so', async () => {
+    const api = fakeApi({ authorized: true })
+    vi.mocked(api.authStatus).mockRejectedValue(authRejected())
+    const onSession = vi.fn()
+    const controller = new TelegramAppController(api, fakeBridge(), 0, onSession)
+
+    await controller.init()
+    expect(controller.snapshot).toMatchObject({ screen: 'error', message: BACKEND_AUTH_REJECTED_MESSAGE })
+    expect(onSession).not.toHaveBeenCalled()
+  })
+
+  it('signs out when a background poll hits an expired session, and flags a rejected secret instead', async () => {
+    const api = fakeApi({ authorized: true })
+    const controller = new TelegramAppController(api, fakeBridge(), 0)
+    await controller.init()
+    clearInputQuiet(controller)
+
+    vi.mocked(api.listChats).mockRejectedValueOnce(authRejected())
+    await refreshRootChats(controller)
+    await flushAsync()
+    expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'chats', status: BACKEND_AUTH_REJECTED_MESSAGE })
+
+    await refreshRootChats(controller) // works again: the mark goes away
+    expect((controller.snapshot as { status?: string }).status).toBeUndefined()
+
+    vi.mocked(api.listChats).mockRejectedValueOnce(sessionExpired())
+    await refreshRootChats(controller)
+    await flushAsync()
+    expect(controller.snapshot).toMatchObject({ screen: 'auth', mode: 'signedOut' })
+  })
+
+  it('keeps the stored chat list (offline) when the backend is unreachable at startup, then retries', async () => {
+    vi.useFakeTimers()
+    const { cache } = await storedChatsCache([{ id: '1', title: 'Stored Alice', kind: 'user' }])
+    const api = fakeApi({ authorized: true })
+    vi.mocked(api.authStatus).mockRejectedValueOnce(unreachable())
+    const controller = new TelegramAppController(api, fakeBridge(), 0, undefined, () => true, cache)
+
+    await controller.init()
+    await vi.advanceTimersByTimeAsync(10)
+    expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'chats', status: OFFLINE_STATUS })
+    expect((controller.snapshot as Extract<AppState, { focus: 'chats' }>).chats[0].title).toBe('Stored Alice')
+
+    await vi.advanceTimersByTimeAsync(5_100)
+    expect(api.authStatus).toHaveBeenCalledTimes(2)
+    expect((controller.snapshot as Extract<AppState, { focus: 'chats' }>).chats.map((chat) => chat.title)).toEqual(['Alice', 'Project'])
+    expect((controller.snapshot as { status?: string }).status).toBeUndefined()
+    controller.dispose()
+  })
+
+  it('offers to leave the app on double-press from an error screen with nothing to go back to', async () => {
+    const api = fakeApi({ authorized: true })
+    vi.mocked(api.authStatus).mockRejectedValue(unreachable())
+    const bridge = fakeBridge()
+    const controller = new TelegramAppController(api, bridge, 0)
+    await controller.init()
+    expect(controller.snapshot).toMatchObject({ screen: 'error' })
+
+    await controller.dispatch({ type: 'doublePress' })
+    expect(bridge.showExitConfirmation).toHaveBeenCalledTimes(1)
+  })
+
+  it('a foreground event during startup joins the running startup instead of starting another', async () => {
+    const api = fakeApi({ authorized: true })
+    const gate = deferred<{ authorized: boolean }>()
+    vi.mocked(api.authStatus).mockImplementation(() => gate.promise)
+    const controller = new TelegramAppController(api, fakeBridge(), 0)
+
+    const starting = controller.init()
+    await flushAsync()
+    const foreground = controller.dispatch({ type: 'foreground' })
+    await flushAsync()
+    gate.resolve({ authorized: true })
+    await starting
+    await foreground
+    expect(api.authStatus).toHaveBeenCalledTimes(1)
+    expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'chats' })
+  })
+
+  it('does not restart over a login code being entered when the app comes to the foreground', async () => {
+    const api = fakeApi({ authorized: false })
+    const controller = new TelegramAppController(api, fakeBridge(), 0)
+    await controller.init()
+    await controller.startPhoneLogin('+1')
+    expect(controller.snapshot).toMatchObject({ screen: 'auth', mode: 'phonePending' })
+    await controller.dispatch({ type: 'foreground' })
+    expect(controller.snapshot).toMatchObject({ screen: 'auth', mode: 'phonePending' })
+    expect(api.authStatus).toHaveBeenCalledTimes(1)
+  })
+
+  it('polls fast only while the update stream is down, slowly while it is up, and not at all while asleep', async () => {
+    vi.useFakeTimers()
+    const api = fakeApi({ authorized: true })
+    const controller = new TelegramAppController(api, fakeBridge(), { chatPollMs: 5_000, messagePressDelayMs: 0 })
+    await controller.init()
+    const listChats = vi.mocked(api.listChats)
+    const polls = async (ms: number) => {
+      const before = listChats.mock.calls.length
+      await vi.advanceTimersByTimeAsync(ms)
+      return listChats.mock.calls.length - before
+    }
+
+    expect(await polls(20_000)).toBeGreaterThanOrEqual(3) // stream down: every 5 s
+    controller.setStreamHealthy(true)
+    expect(await polls(55_000)).toBe(0) // stream up: only the 60 s safety poll
+    expect(await polls(10_000)).toBe(1)
+
+    controller.setStreamHealthy(false)
+    await controller.dispatch({ type: 'doublePress' }) // to sleep
+    expect(controller.snapshot.screen).toBe('asleep')
+    expect(await polls(30_000)).toBe(0)
+    controller.dispose()
+  })
+
+  it('runs one trailing chat refresh when an update arrives while a refresh is running', async () => {
+    const api = fakeApi({ authorized: true })
+    const controller = new TelegramAppController(api, fakeBridge(), 0)
+    await controller.init()
+    clearInputQuiet(controller)
+    const gate = deferred<Chat[]>()
+    const listChats = vi.mocked(api.listChats)
+    listChats.mockImplementationOnce(() => gate.promise)
+    const before = listChats.mock.calls.length
+
+    const first = refreshRootChats(controller)
+    await refreshRootChats(controller)
+    await refreshRootChats(controller)
+    expect(listChats.mock.calls.length).toBe(before + 1)
+    gate.resolve(chats)
+    await first
+    await flushAsync()
+    expect(listChats.mock.calls.length).toBe(before + 2)
   })
 })

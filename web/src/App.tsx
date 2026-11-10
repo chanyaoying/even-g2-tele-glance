@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { BACKEND_UNREACHABLE_MESSAGE, effectiveBackendSharedSecret } from './api'
+import { BACKEND_AUTH_REJECTED_MESSAGE, BACKEND_UNREACHABLE_MESSAGE, effectiveBackendSharedSecret } from './api'
 import { APP_BUILD_VERSION } from './bridge/evenBridge'
 import { AppProvider, useApp } from './contexts/AppContext'
 import { ChatScreen } from './screens/ChatScreen'
@@ -35,8 +35,8 @@ function AppShell() {
           {route === 'settings' ? l.phoneBack : l.phoneSettingsTab}
         </button>
       </header>
-      {startupError && <div className="error-banner">{startupError}</div>}
-      {setupBanner && <div className="error-banner">{setupBanner}</div>}
+      {startupError && <div className="error-banner" role="alert">{startupError}</div>}
+      {setupBanner && <div className="error-banner" role="alert">{setupBanner}</div>}
       {route === 'settings' ? <SettingsScreen buildVersion={APP_BUILD_VERSION} /> : <ChatScreen />}
     </div>
   )
@@ -47,10 +47,13 @@ function setupBannerText(
   settings: ReturnType<typeof useApp>['settings'],
   l: ReturnType<typeof getLocale>,
 ) {
-  if (!settings.apiBaseUrl.trim()) return l.errorBackendUnreachable
+  if (!settings.apiBaseUrl.trim()) return l.setupBackendUrlMissing
   if (state.screen === 'error' && state.message === BACKEND_UNREACHABLE_MESSAGE) return l.errorBackendUnreachable
+  // Wrong shared secret or phone clock: say so plainly, the Telegram login itself is fine.
+  if (state.screen === 'error' && state.message === BACKEND_AUTH_REJECTED_MESSAGE) return l.errorBackendAuthRejected
+  if ('status' in state && state.status === BACKEND_AUTH_REJECTED_MESSAGE) return l.errorBackendAuthRejected
   if (state.screen === 'auth' && !hasRequiredSetup(settings)) {
-    return l.phoneSetupRequired
+    return l.setupRequired
   }
   return null
 }
@@ -58,7 +61,7 @@ function setupBannerText(
 function hasRequiredSetup(settings: ReturnType<typeof useApp>['settings']) {
   return Boolean(
     settings.apiBaseUrl.trim()
-    && effectiveBackendSharedSecret(settings, settings.apiBaseUrl)
+    && effectiveBackendSharedSecret(settings)
     && settings.telegramApiId.trim()
     && settings.telegramApiHash.trim(),
   )

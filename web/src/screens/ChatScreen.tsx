@@ -30,6 +30,7 @@ export function ChatScreen() {
     setIsSending(true)
     setSendError(null)
     try {
+      // Resolves only when the reply was sent; a failed or skipped send throws and the draft stays.
       await sendText(text)
       setDraft('')
     } catch (error) {
@@ -44,7 +45,7 @@ export function ChatScreen() {
       <section className="phone-panel message-panel">
         <PhoneStateView />
         {state.screen === 'sidebar' && state.focus === 'messages' && (
-          <div className="messages-list" aria-label="Messages">
+          <div className="messages-list" aria-label={l.phoneMessagesAria}>
             {state.messages.length === 0 ? (
               <p className="empty-text">{l.phoneNoMessages}</p>
             ) : state.messages.slice(-PHONE_MESSAGE_LIMIT).map((message) => <MessageBubble key={String(message.id)} message={message} />)}
@@ -60,7 +61,7 @@ export function ChatScreen() {
             void handleSend()
           }}
         >
-          {sendError && <p className="field-error">{sendError}</p>}
+          {sendError && <p className="field-error" role="alert">{sendError}</p>}
           <textarea
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
@@ -123,7 +124,7 @@ function PhoneStateView() {
       <div className="stack">
         <h2>{isPhonePending ? l.phoneTelegramLoginHeading : l.phoneTelegramSessionHeading}</h2>
         <p>{state.message}</p>
-        {phoneError && <p className="field-error">{phoneError}</p>}
+        {phoneError && <p className="field-error" role="alert">{phoneError}</p>}
         <form className="auth-form" onSubmit={isPhonePending ? submitCode : submitPhoneLogin}>
           {isPhonePending ? (
             <>
@@ -162,7 +163,7 @@ function PhoneStateView() {
         <h2>{l.phoneChatsHeading}</h2>
         <div className="select-list">
           {state.chats.map((chat, index) => (
-            <button key={String(chat.id)} type="button" className={index === state.selectedChatIndex ? 'selected' : ''} onClick={() => void dispatch({ type: 'press', index })}>
+            <button key={String(chat.id)} type="button" className={index === state.selectedChatIndex ? 'selected' : ''} aria-current={index === state.selectedChatIndex ? 'true' : undefined} onClick={() => void dispatch({ type: 'press', index })}>
               <span>{chat.title}</span>
               {chat.unreadCount ? <strong>{chat.unreadCount}</strong> : null}
             </button>
@@ -177,7 +178,7 @@ function PhoneStateView() {
         <h2>{state.chat.title}</h2>
         <div className="select-list">
           {state.topics.map((topic, index) => (
-            <button key={String(topic.id)} type="button" className={index === state.selectedTopicIndex ? 'selected' : ''} onClick={() => void dispatch({ type: 'press', index })}>
+            <button key={String(topic.id)} type="button" className={index === state.selectedTopicIndex ? 'selected' : ''} aria-current={index === state.selectedTopicIndex ? 'true' : undefined} onClick={() => void dispatch({ type: 'press', index })}>
               <span>{topic.title}</span>
               {topic.unreadCount ? <strong>{topic.unreadCount}</strong> : null}
             </button>
@@ -213,7 +214,7 @@ function PhoneStateView() {
         <h2>{l.titleFolders}</h2>
         <div className="select-list">
           {state.options.map((option, index) => (
-            <button key={`${index}-${option}`} type="button" className={index === state.selectedIndex ? 'selected' : ''} onClick={() => void dispatch({ type: 'press', index })}>
+            <button key={`${index}-${option}`} type="button" className={index === state.selectedIndex ? 'selected' : ''} aria-current={index === state.selectedIndex ? 'true' : undefined} onClick={() => void dispatch({ type: 'press', index })}>
               <span>{option}</span>
             </button>
           ))}

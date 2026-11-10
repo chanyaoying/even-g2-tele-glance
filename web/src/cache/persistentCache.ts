@@ -81,6 +81,10 @@ function threadStorageKey(threadKey: string): string {
  * Persists the chat list and the latest page of recent threads so they can be shown immediately on the
  * next launch, then refreshed from the network. Everything is best effort: a missing, failing or
  * unreliable storage only means the cache stays empty.
+ *
+ * The stored chat titles, message text and pictures are NOT encrypted: they sit in plain JSON in the Even
+ * app's local storage, readable by anyone with access to the phone's app data (accepted, like the settings;
+ * see storage.ts). Settings > Clear cache and signing out delete them.
  */
 export class PersistentCache {
   private readonly options: Required<Omit<CacheOptions, 'canWrite'>> & Pick<CacheOptions, 'canWrite'>
@@ -90,6 +94,8 @@ export class PersistentCache {
   private flushTimer: ReturnType<typeof setTimeout> | undefined
   private chain: Promise<void> = Promise.resolve()
   private indexDirty = false
+  /** Storage keys of expired threads, deleted with the next flush instead of during open(). */
+  private readonly pendingDeletes = new Set<string>()
 
   constructor(private readonly storage: CacheStorageBridge | undefined, options: CacheOptions = {}) {
     this.options = {
@@ -123,11 +129,14 @@ export class PersistentCache {
     }
     this.index = { ...stored, threads: stored.threads ?? {}, photos: stored.photos ?? {}, chatsBytes: stored.chatsBytes ?? 0 }
     const cutoff = this.options.now() - this.options.maxAgeMs
+    // Expired threads leave the index now (so they are never read), but deleting their storage keys waits for
+    // the next flush: each delete is a round trip through the host bridge, and open() runs before the first
+    // glasses page is drawn.
     for (const [id, meta] of Object.entries(this.index.threads)) {
       if (meta.usedAt < cutoff) {
         delete this.index.threads[id]
         this.indexDirty = true
-        await this.write(`${PREFIX}t.${id}`, '')
+        this.pendingDeletes.add(`${PREFIX}t.${id}`)
       }
     }
     if (this.indexDirty) this.scheduleFlush()
@@ -211,11 +220,14 @@ export class PersistentCache {
     this.flushTimer = undefined
     this.dirty.clear()
     this.pendingChats = undefined
+    const deletes = [...this.pendingDeletes]
+    this.pendingDeletes.clear()
     const index = this.index
     this.index = { version: VERSION, account: this.account, chatsBytes: 0, threads: {}, photos: {} }
     this.indexDirty = false
     if (!this.available) return
     await this.chain
+    for (const key of deletes) await this.write(key, '')
     if (index) await this.wipe(index)
     else await this.write(INDEX_KEY, '')
   }
@@ -249,6 +261,11 @@ export class PersistentCache {
     if (!index || !this.available) return
     const entries = [...this.dirty.entries()]
     this.dirty.clear()
+    for (const key of [...this.pendingDeletes]) {
+      this.pendingDeletes.delete(key)
+      // A thread written again since it expired keeps its new value.
+      if (!this.dirty.has(key) && !entries.some(([storageKey]) => storageKey === key)) await this.write(key, '')
+    }
     for (const [storageKey, item] of entries) {
       if (item.kind === 'chats') {
         const chats = this.pendingChats

@@ -12,7 +12,6 @@ describe('configure-tailscale helper', () => {
             BACKEND_URL_PLACEHOLDER,
             'https://my.telegram.org',
             'https://react.dev/errors/',
-            'https://teleglance.akira-os.net',
           ],
         },
       ],
@@ -24,7 +23,6 @@ describe('configure-tailscale helper', () => {
       'http://100.64.10.20:8787',
       'https://my.telegram.org',
       'https://react.dev/errors/',
-      'https://teleglance.akira-os.net',
     ])
 
     updateAppJsonNetworkWhitelist(appJson, 'http://100.64.10.20:8787')
@@ -33,7 +31,6 @@ describe('configure-tailscale helper', () => {
       'http://100.64.10.20:8787',
       'https://my.telegram.org',
       'https://react.dev/errors/',
-      'https://teleglance.akira-os.net',
     ])
   })
 

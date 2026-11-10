@@ -72,10 +72,10 @@ export class InstrumentedTelegramApi implements TelegramApi {
     return this.wrap('transcribe', { size: wav.size, language }, () => this.inner.transcribe(wav, language))
   }
 
-  subscribeUpdates(onUpdate: (update: TelegramUpdate | TelegramTypingUpdate) => void, onError?: (error: Event | Error) => void, onReconnect?: () => void): () => void {
+  subscribeUpdates(onUpdate: (update: TelegramUpdate | TelegramTypingUpdate) => void, onError?: (error: Event | Error) => void, onReconnect?: () => void, onOpen?: () => void): () => void {
     if (isTeleGlanceFixtureMode()) {
       const startedAt = Date.now()
-      const unsubscribe = this.inner.subscribeUpdates(onUpdate, onError)
+      const unsubscribe = this.inner.subscribeUpdates(onUpdate, onError, onReconnect, onOpen)
       logApiEvent('subscribeUpdates', undefined, startedAt, Date.now(), true)
       return () => {
         const stopAt = Date.now()
@@ -83,7 +83,7 @@ export class InstrumentedTelegramApi implements TelegramApi {
         logApiEvent('unsubscribeUpdates', undefined, stopAt, Date.now(), true)
       }
     }
-    return this.inner.subscribeUpdates(onUpdate, onError, onReconnect)
+    return this.inner.subscribeUpdates(onUpdate, onError, onReconnect, onOpen)
   }
 
   private async wrap<T>(call: string, args: unknown, fn: () => Promise<T>): Promise<T> {

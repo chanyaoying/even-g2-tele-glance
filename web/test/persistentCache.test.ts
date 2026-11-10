@@ -80,6 +80,22 @@ describe('PersistentCache', () => {
     expect(await later.getThread('1')).toBeUndefined()
   })
 
+  it('does not delete expired threads during open() (it runs before the first page), only at the next flush', async () => {
+    const { cache, storage } = await opened(undefined, { maxAgeMs: 10_000 })
+    cache.putThread('1', { messages: messages(2) })
+    await cache.flush()
+    const threadKey = [...storage.data.keys()].find((key) => key.includes('.t.'))!
+    const writes: string[] = []
+    const watched = { ...storage, setLocalStorage: async (key: string, value: string) => { writes.push(key); return storage.setLocalStorage(key, value) } }
+
+    const later = new PersistentCache(watched, { flushDelayMs: 1, maxAgeMs: 10_000, now: () => 1_000 + 20_000 })
+    await later.open('acct')
+    expect(writes).toEqual([])
+    expect(await later.getThread('1')).toBeUndefined()
+    await later.flush()
+    expect(storage.data.has(threadKey)).toBe(false)
+  })
+
   it('evicts the least recently used thread when over budget', async () => {
     const { cache, tick } = await opened(undefined, { budgetBytes: 1_800 })
     const big = (label: string) => messages(8, label.repeat(40))
