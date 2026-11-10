@@ -80,11 +80,12 @@ class FakeClient:
         self.get_dialogs_limits.append(limit)
         return self.dialogs[:limit]
 
-    async def iter_dialogs(self):
+    async def iter_dialogs(self, limit=None):
         self.iter_passes += 1
+        self.iter_limits = getattr(self, "iter_limits", []) + [limit]
         scanned = 0
         try:
-            for dialog in self.dialogs:
+            for dialog in self.dialogs[:limit]:
                 scanned += 1
                 yield dialog
         finally:

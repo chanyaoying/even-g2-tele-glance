@@ -41,8 +41,14 @@ class TelegramServiceError(RuntimeError):
 
 class TelegramSessionExpiredError(TelegramServiceError):
     pass
+
+
 class TelegramServiceTimeoutError(TelegramServiceError):
     pass
+
+
+class TelegramUnavailableError(TelegramServiceError):
+    """Telegram could not be reached (connect failed or timed out, connection dropped); worth a retry."""
 
 
 class TelegramRateLimitError(TelegramServiceError):
@@ -53,10 +59,15 @@ class TelegramRateLimitError(TelegramServiceError):
         super().__init__(f"Telegram asks you to wait {self.seconds} s before trying again.")
 
 
+SESSION_EXPIRED_MESSAGE = "Telegram session has expired. Reconnect in TeleGlance Settings."
+SESSION_INVALID_MESSAGE = "Telegram session is invalid. Reconnect in TeleGlance Settings."
+UNAVAILABLE_MESSAGE = "Could not reach Telegram. Please retry."
+GENERIC_ERROR_MESSAGE = "Telegram request failed. Please retry."
+_AUTH_KEY_ERROR_NAMES = {"AuthKeyUnregisteredError", "AuthKeyDuplicatedError", "SessionRevokedError", "SessionExpiredError"}
+
 
 def _is_auth_key_error(exc: Exception) -> bool:
-    name = exc.__class__.__name__
-    return name in ("AuthKeyUnregisteredError", "AuthKeyDuplicatedError")
+    return exc.__class__.__name__ in _AUTH_KEY_ERROR_NAMES
 
 
 _FLOOD_WAIT_NAMES = {"FloodWaitError", "SlowModeWaitError", "FloodPremiumWaitError", "FloodTestPhoneWaitError"}
@@ -70,6 +81,34 @@ def _flood_wait_seconds(exc: Exception) -> Optional[int]:
     return int(seconds) if isinstance(seconds, (int, float)) else 1
 
 
+# Telegram errors whose meaning the user can act on. Everything else gets GENERIC_ERROR_MESSAGE and the
+# real text only goes to the server log: raw RPC/exception text can carry internals (ids, request names).
+_USER_ERROR_MESSAGES = {
+    "PeerIdInvalidError": "Chat not found.",
+    "ChannelInvalidError": "Chat not found.",
+    "ChatIdInvalidError": "Chat not found.",
+    "ChannelPrivateError": "This chat is private or you were removed from it.",
+    "MessageIdInvalidError": "Message not found.",
+    "TopicDeletedError": "This topic was deleted.",
+    "ChatWriteForbiddenError": "You cannot send messages in this chat.",
+    "UserBannedInChannelError": "You cannot send messages in this chat.",
+    "ChatAdminRequiredError": "You cannot send messages in this chat.",
+    "MessageTooLongError": "Message is too long.",
+    "MessageEmptyError": "Message is empty.",
+    "PhoneNumberInvalidError": "Phone number is invalid.",
+    "PhoneNumberBannedError": "This phone number is banned by Telegram.",
+    "PhoneNumberUnoccupiedError": "This phone number is not registered with Telegram.",
+    "PhoneNumberFloodError": "Too many login attempts. Try again later.",
+    "PhoneCodeInvalidError": "Verification code is incorrect.",
+    "PhoneCodeExpiredError": "Verification code has expired. Request a new one.",
+    "PhoneCodeEmptyError": "Verification code is required",
+    "ApiIdInvalidError": "Telegram API ID or API hash is invalid.",
+}
+# Telethon raises a plain ValueError for an id it cannot resolve (not in the session's entity cache).
+_ENTITY_NOT_FOUND_HINTS = ("Could not find the input entity", "Cannot find any entity", "No user has", "Cannot get entity")
+_logger = logging.getLogger(__name__)
+
+
 def wrap_telegram_error(exc: Exception) -> TelegramServiceError:
     if isinstance(exc, TelegramServiceError):
         return exc
@@ -79,8 +118,17 @@ def wrap_telegram_error(exc: Exception) -> TelegramServiceError:
     if isinstance(exc, TimeoutError):
         return TelegramServiceTimeoutError("Telegram request timed out. Please retry.")
     if _is_auth_key_error(exc):
-        return TelegramSessionExpiredError("Telegram session has expired. Reconnect in TeleGlance Settings.")
-    return TelegramServiceError(str(exc) or exc.__class__.__name__)
+        return TelegramSessionExpiredError(SESSION_EXPIRED_MESSAGE)
+    if isinstance(exc, (ConnectionError, OSError)):
+        _logger.warning("Telegram unreachable: %s: %s", exc.__class__.__name__, exc)
+        return TelegramUnavailableError(UNAVAILABLE_MESSAGE)
+    known = next((_USER_ERROR_MESSAGES[cls.__name__] for cls in type(exc).__mro__ if cls.__name__ in _USER_ERROR_MESSAGES), None)
+    if known is not None:
+        return TelegramServiceError(known)
+    if isinstance(exc, ValueError) and any(hint in str(exc) for hint in _ENTITY_NOT_FOUND_HINTS):
+        return TelegramServiceError("Chat not found.")
+    _logger.warning("Telegram request failed: %s: %s", exc.__class__.__name__, exc)
+    return TelegramServiceError(GENERIC_ERROR_MESSAGE)
 
 
 class TelegramService(Protocol):
@@ -100,8 +148,8 @@ class TelegramService(Protocol):
         ...
 
     async def close(self) -> None:
-        """Disconnect without logging out (the session string was handed to the owner)."""
-        await self._discard_client()
+        """Disconnect without logging out and stop serving requests."""
+        ...
 
     async def logout(self) -> None:
         ...
@@ -112,7 +160,7 @@ class TelegramService(Protocol):
     async def list_folders(self) -> list[FolderSummary]:
         ...
 
-    async def list_topics(self, chat_id: int) -> list[TopicSummary]:
+    async def list_topics(self, chat_id: int, *, limit: int = 20, offset: int = 0) -> list[TopicSummary]:
         ...
 
     async def list_messages(
@@ -239,6 +287,39 @@ PHOTO_CACHE_SIZE = 128
 UPDATE_QUEUE_SIZE = 50
 REPLY_CACHE_CHATS = 16
 REPLY_CACHE_PER_CHAT = 200
+ENTITY_CACHE_SIZE = 1000
+USER_NAME_CACHE_SIZE = 2000
+# A folder page scans the account's chat list from the top; never walk further than this.
+FOLDER_SCAN_LIMIT = 1000
+FOLDER_CACHE_TTL_SECONDS = 60.0
+# Telethon sleeps through FloodWaits up to this many seconds itself. Longer waits must reach the phone as
+# 429 + Retry-After: an internal sleep would outlast our request timeouts and turn into a 504.
+FLOOD_SLEEP_THRESHOLD_SECONDS = 2
+CONNECT_TIMEOUT_SECONDS = 15.0
+CONNECTION_RETRIES = 2
+# A live update waits at most this long for its reply quote before it is published without one.
+LIVE_REPLY_TIMEOUT_SECONDS = 3.0
+TOPIC_PAGE_MAX = 100
+
+
+class _LruDict(OrderedDict):
+    """An OrderedDict that keeps at most `max_size` entries, dropping the least recently used."""
+
+    def __init__(self, max_size: int) -> None:
+        super().__init__()
+        self.max_size = max_size
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        if key not in self:
+            return default
+        self.move_to_end(key)
+        return self[key]
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        super().__setitem__(key, value)
+        self.move_to_end(key)
+        while len(self) > self.max_size:
+            self.popitem(last=False)
 
 
 @dataclass
@@ -281,6 +362,17 @@ def normalize_topic(topic: Any, last_message: Optional[str] = None) -> TopicSumm
         unread_count=int(getattr(topic, "unread_count", 0) or 0),
         last_message=last_message,
     )
+
+
+def _topic_preview(message: Any) -> Optional[str]:
+    """The newest message of a forum topic as one line of text (the topic list's preview)."""
+    if message is None:
+        return None
+    try:
+        text = normalize_message(message).text
+    except Exception:  # an odd message type must not break the topic list
+        return None
+    return text or None
 
 
 def normalize_message(message: Any, entities_by_peer: Optional[dict[int, Any]] = None) -> MessageSummary:
@@ -583,16 +675,30 @@ class TelethonTelegramService:
     def __post_init__(self) -> None:
         self._client = None
         self._expired = False
+        self._closed = False
+        self._has_connected = False
         self._update_queues: set[asyncio.Queue[Union[TelegramUpdate, TypingUpdate]]] = set()
         self._updates_registered = False
-        self._entity_cache: dict[int, Any] = {}
+        self._entity_cache: _LruDict = _LruDict(ENTITY_CACHE_SIZE)
         self._photo_cache: OrderedDict = OrderedDict()
         self._reply_cache = ReplyPreviewCache()
         self._chat_requests: dict = {}
         self._dialog_lock = asyncio.Lock()
-        self._user_name_cache: dict[int, str] = {}
+        # Only one request creates/connects the client; the others wait for it instead of racing connect().
+        self._connect_lock = asyncio.Lock()
+        self._user_name_cache: _LruDict = _LruDict(USER_NAME_CACHE_SIZE)
         self._phone_code_hashes: dict[str, str] = {}
         self._dialog_snapshot: Optional[_DialogSnapshot] = None
+        self._folder_cache: Optional[tuple[float, list[Any]]] = None
+
+    @property
+    def expired(self) -> bool:
+        return self._expired
+
+    @property
+    def subscriber_count(self) -> int:
+        """How many update streams are attached; a service with streams is never evicted for being idle."""
+        return len(self._update_queues)
 
     @property
     def configured(self) -> bool:
@@ -610,31 +716,39 @@ class TelethonTelegramService:
         if not self.configured:
             raise TelegramServiceError("Telegram API credentials are not configured")
         if self._expired:
-            raise TelegramSessionExpiredError("Telegram session has expired. Reconnect in TeleGlance Settings.")
-        if self._client is None:
-            try:
-                from telethon import TelegramClient
-            except ImportError as exc:
-                raise TelegramServiceError("Telethon is not installed. Install server requirements.") from exc
+            raise TelegramSessionExpiredError(SESSION_EXPIRED_MESSAGE)
+        if self._closed:
+            raise TelegramUnavailableError(UNAVAILABLE_MESSAGE)
+        client = self._client
+        if client is not None and self._updates_registered and client.is_connected():
+            return client
+        async with self._connect_lock:
+            return await self._connect_locked()
 
+    async def _connect_locked(self):
+        reconnected = False
+        for _attempt in range(2):
+            if self._expired:
+                raise TelegramSessionExpiredError(SESSION_EXPIRED_MESSAGE)
+            if self._closed:
+                raise TelegramUnavailableError(UNAVAILABLE_MESSAGE)
+            if self._client is None:
+                self._client = self._new_client()
+            if self._client.is_connected():
+                break
+            reconnected = self._has_connected
             try:
-                from telethon.sessions import StringSession
-            except ImportError as exc:
-                raise TelegramServiceError("Telethon StringSession support is unavailable") from exc
-
-            self._client = TelegramClient(
-                StringSession((self.credentials.session_string if self.credentials else None) or ""),
-                int(self.api_id or 0),
-                self.api_hash or "",
-            )
-        if not self._client.is_connected():
-            try:
-                await self._client.connect()
+                await asyncio.wait_for(self._client.connect(), timeout=CONNECT_TIMEOUT_SECONDS)
             except ValueError as exc:
                 if "cannot be reused after logging out" not in str(exc):
-                    raise
+                    raise wrap_telegram_error(exc) from exc
                 await self._discard_client()
-                return await self._get_client()
+                continue
+            except (TimeoutError, ConnectionError, OSError) as exc:
+                # A half-made connection is not worth keeping; the next request starts clean.
+                await self._discard_client()
+                _logger.warning("Telegram connect failed: %s", exc.__class__.__name__)
+                raise TelegramUnavailableError(UNAVAILABLE_MESSAGE) from exc
             if self.credentials and self.credentials.session_string:
                 try:
                     await asyncio.wait_for(self._client.get_me(), timeout=10)
@@ -642,9 +756,56 @@ class TelethonTelegramService:
                     if _is_auth_key_error(exc):
                         self._expired = True
                         await self._discard_client()
-                        raise TelegramSessionExpiredError("Telegram session has expired. Reconnect in TeleGlance Settings.") from exc
+                        raise TelegramSessionExpiredError(SESSION_EXPIRED_MESSAGE) from exc
+            break
+        else:
+            raise TelegramUnavailableError(UNAVAILABLE_MESSAGE)
+        self._has_connected = True
         await self._ensure_update_handler()
+        if reconnected:
+            # Updates sent while the connection was down are lost; tell open streams to refetch.
+            self._publish(ResyncUpdate())
         return self._client
+
+    def _new_client(self) -> Any:
+        try:
+            from telethon import TelegramClient
+        except ImportError as exc:
+            raise TelegramServiceError("Telethon is not installed. Install server requirements.") from exc
+
+        try:
+            from telethon.sessions import StringSession
+        except ImportError as exc:
+            raise TelegramServiceError("Telethon StringSession support is unavailable") from exc
+
+        try:
+            session = StringSession((self.credentials.session_string if self.credentials else None) or "")
+        except ValueError as exc:
+            # A malformed session string will never work: treat it like an expired session (401).
+            self._expired = True
+            raise TelegramSessionExpiredError(SESSION_INVALID_MESSAGE) from exc
+        return TelegramClient(
+            session,
+            int(self.api_id or 0),
+            self.api_hash or "",
+            flood_sleep_threshold=FLOOD_SLEEP_THRESHOLD_SECONDS,
+            connection_retries=CONNECTION_RETRIES,
+        )
+
+    async def ensure_stream_connection(self) -> None:
+        """Called by an idle update stream: reconnect a dropped client so updates flow again.
+
+        Raises a TelegramServiceError when Telegram cannot be reached, so the stream can report it.
+        """
+        client = self._client
+        if client is not None and client.is_connected():
+            return
+        await self._get_client()
+
+    async def close(self) -> None:
+        """Disconnect without logging out (the session string belongs to its owner) and refuse further use."""
+        self._closed = True
+        await self._discard_client()
 
     async def _get_entity(self, chat_id: int) -> Any:
         cached = self._entity_cache.get(int(chat_id))
@@ -679,7 +840,10 @@ class TelethonTelegramService:
         update = normalize_update_message(message, getattr(event, "chat_id", None))
         # An edit changes what a reply to this message should quote; drop the stale copy.
         self._reply_cache.invalidate(update.chat_id, update.message.id)
-        await self._resolve_live_reply(update, message)
+        try:
+            await asyncio.wait_for(self._resolve_live_reply(update, message), timeout=LIVE_REPLY_TIMEOUT_SECONDS)
+        except TimeoutError:
+            pass  # publish without the quote rather than hold the message back
         self._publish(update)
 
     def _publish(self, update: Any) -> None:
@@ -750,8 +914,12 @@ class TelethonTelegramService:
         self._cache_user_name(sender)
 
     async def update_events(self) -> AsyncIterator[Union[TelegramUpdate, TypingUpdate, ResyncUpdate]]:
-        client = await self._get_client()
-        if not await client.is_user_authorized():
+        try:
+            client = await self._get_client()
+            authorized = await client.is_user_authorized()
+        except Exception as exc:
+            raise wrap_telegram_error(exc) from exc
+        if not authorized:
             raise TelegramServiceError("Telegram session is not authorized")
         queue: asyncio.Queue = asyncio.Queue(maxsize=UPDATE_QUEUE_SIZE)
         self._update_queues.add(queue)
@@ -764,20 +932,21 @@ class TelethonTelegramService:
     async def auth_status(self) -> dict[str, bool]:
         if not self.configured:
             return {"configured": False, "authorized": False}
-        client = await self._get_client()
-        return {
-            "configured": True,
-            "authorized": bool(await client.is_user_authorized()),
-        }
+        try:
+            client = await self._get_client()
+            authorized = bool(await client.is_user_authorized())
+        except Exception as exc:
+            raise wrap_telegram_error(exc) from exc
+        return {"configured": True, "authorized": authorized}
 
     async def start_phone_login(self, phone: str) -> PhoneLoginStart:
         if not self.configured:
             raise TelegramServiceError("Telegram API credentials are not configured")
         normalized_phone = phone.strip()
-        client = await self._get_client()
-        if await client.is_user_authorized():
-            return PhoneLoginStart(phone=normalized_phone, sent=True, message="Telegram is already connected.")
         try:
+            client = await self._get_client()
+            if await client.is_user_authorized():
+                return PhoneLoginStart(phone=normalized_phone, sent=True, message="Telegram is already connected.")
             sent = await client.send_code_request(normalized_phone)
         except Exception as exc:
             raise wrap_telegram_error(exc) from exc
@@ -801,9 +970,12 @@ class TelethonTelegramService:
         if not self.configured:
             raise TelegramServiceError("Telegram API credentials are not configured")
         normalized_phone = phone.strip()
-        client = await self._get_client()
-        if await client.is_user_authorized():
-            return PhoneLoginStatus(authorized=True, session_string=self.current_session_string())
+        try:
+            client = await self._get_client()
+            if await client.is_user_authorized():
+                return PhoneLoginStatus(authorized=True, session_string=self.current_session_string())
+        except Exception as exc:
+            raise wrap_telegram_error(exc) from exc
         try:
             if password:
                 # The pending client already accepted the code; Telegram now wants the 2FA password.
@@ -837,10 +1009,11 @@ class TelethonTelegramService:
                 )
             raise wrap_telegram_error(exc) from exc
         self._phone_code_hashes.pop(normalized_phone, None)
-        return PhoneLoginStatus(
-            authorized=bool(await client.is_user_authorized()),
-            session_string=self.current_session_string(),
-        )
+        try:
+            authorized = bool(await client.is_user_authorized())
+        except Exception as exc:
+            raise wrap_telegram_error(exc) from exc
+        return PhoneLoginStatus(authorized=authorized, session_string=self.current_session_string())
 
     def current_session_string(self) -> Optional[str]:
         if self._client is None:
@@ -860,6 +1033,8 @@ class TelethonTelegramService:
         self._reply_cache.clear()
         self._phone_code_hashes.clear()
         self._dialog_snapshot = None
+        self._folder_cache = None
+        self._chat_requests.clear()
         if client is None:
             return
         try:
@@ -869,11 +1044,14 @@ class TelethonTelegramService:
             pass
 
     async def logout(self) -> None:
-        client = await self._get_client()
         try:
+            client = await self._get_client()
             if await client.is_user_authorized():
                 await client.log_out()
+        except Exception as exc:
+            raise wrap_telegram_error(exc) from exc
         finally:
+            self._closed = True
             await self._discard_client()
 
     async def list_chats(self, limit: int, offset: int = 0, folder_id: Optional[int] = None) -> list[ChatSummary]:
@@ -895,8 +1073,8 @@ class TelethonTelegramService:
         return await asyncio.shield(task)
 
     async def _list_chats_uncoalesced(self, limit: int, offset: int, folder_id: Optional[int]) -> list[ChatSummary]:
-        client = await self._get_client()
         try:
+            client = await self._get_client()
             dialog_filter = await self._get_folder_filter(client, folder_id) if folder_id else None
             # One dialog fetch at a time: a second, different request then finds the cache the first one filled.
             async with self._dialog_lock:
@@ -985,21 +1163,23 @@ class TelethonTelegramService:
         scanned: list[Any] = []
         found = 0
         exhausted = True
-        async for dialog in client.iter_dialogs():
+        async for dialog in client.iter_dialogs(limit=FOLDER_SCAN_LIMIT):
             scanned.append(dialog)
             if dialog_matches_filter(dialog_filter, dialog):
                 found += 1
                 if found >= target:
                     exhausted = False
                     break
+        if len(scanned) >= FOLDER_SCAN_LIMIT:
+            exhausted = False  # stopped at the scan cap, not at the end of the account's chats
         self._store_head(scanned, exhausted)
         snapshot = self._dialog_snapshot
         matches = [dialog for dialog in snapshot.dialogs if dialog_matches_filter(dialog_filter, dialog)]
         return matches[offset:need]
 
     async def list_folders(self) -> list[FolderSummary]:
-        client = await self._get_client()
         try:
+            client = await self._get_client()
             filters = await self._fetch_dialog_filters(client)
             return [
                 FolderSummary(id=int(f.id), title=_folder_title(f))
@@ -1012,9 +1192,9 @@ class TelethonTelegramService:
             raise wrap_telegram_error(exc) from exc
 
     async def _fetch_dialog_filters(self, client: Any) -> list[Any]:
-        cached = getattr(self, "_folder_cache", None)
+        cached = self._folder_cache
         now = asyncio.get_running_loop().time()
-        if cached and now - cached[0] < 60:
+        if cached and now - cached[0] < FOLDER_CACHE_TTL_SECONDS:
             return cached[1]
         from telethon.tl.functions.messages import GetDialogFiltersRequest
 
@@ -1029,30 +1209,46 @@ class TelethonTelegramService:
                 return dialog_filter
         raise TelegramServiceError("Telegram folder not found")
 
-    async def list_topics(self, chat_id: int) -> list[TopicSummary]:
-        client = await self._get_client()
+    async def list_topics(self, chat_id: int, *, limit: int = 20, offset: int = 0) -> list[TopicSummary]:
         try:
             from telethon.tl.functions.messages import GetForumTopicsRequest
         except ImportError as exc:
             raise TelegramServiceError("Telethon forum topic API is unavailable") from exc
 
         try:
+            client = await self._get_client()
             entity = await self._get_entity(chat_id)
-            result = await asyncio.wait_for(
-                client(
-                    GetForumTopicsRequest(
-                        peer=entity,
-                        offset_date=None,
-                        offset_id=0,
-                        offset_topic=0,
-                        limit=20,
-                        q="",
-                    )
-                ),
-                timeout=20,
-            )
-            topics = getattr(result, "topics", [])
-            return [normalize_topic(topic) for topic in topics]
+            need = int(offset) + int(limit)
+            collected: list[tuple[Any, Optional[str]]] = []
+            offset_date, offset_id, offset_topic = None, 0, 0
+            # Telegram pages topics by cursor (the last topic's newest message), at most 100 per request.
+            while len(collected) < need:
+                batch = min(TOPIC_PAGE_MAX, need - len(collected))
+                result = await asyncio.wait_for(
+                    client(
+                        GetForumTopicsRequest(
+                            peer=entity,
+                            offset_date=offset_date,
+                            offset_id=offset_id,
+                            offset_topic=offset_topic,
+                            limit=batch,
+                            q="",
+                        )
+                    ),
+                    timeout=20,
+                )
+                topics = list(getattr(result, "topics", None) or [])
+                latest = {int(m.id): m for m in getattr(result, "messages", None) or [] if getattr(m, "id", None) is not None}
+                for topic in topics:
+                    top = latest.get(int(getattr(topic, "top_message", 0) or 0))
+                    collected.append((topic, _topic_preview(top)))
+                if len(topics) < batch:
+                    break
+                last = topics[-1]
+                offset_id = int(getattr(last, "top_message", 0) or 0)
+                offset_topic = int(getattr(last, "id", 0) or 0)
+                offset_date = getattr(latest.get(offset_id), "date", None)
+            return [normalize_topic(topic, preview) for topic, preview in collected[offset:need]]
         except Exception as exc:
             raise wrap_telegram_error(exc) from exc
 
@@ -1065,8 +1261,8 @@ class TelethonTelegramService:
         after_id: Optional[int] = None,
         limit: int = 8,
     ) -> list[MessageSummary]:
-        client = await self._get_client()
         try:
+            client = await self._get_client()
             entity = await self._get_entity(chat_id)
             kwargs: dict[str, Any] = {"limit": limit}
             if before_id is not None:
@@ -1142,8 +1338,8 @@ class TelethonTelegramService:
         if cached is not None:
             self._photo_cache.move_to_end(key)
             return cached
-        client = await self._get_client()
         try:
+            client = await self._get_client()
             entity = await self._get_entity(chat_id)
             message = await asyncio.wait_for(client.get_messages(entity, ids=int(message_id)), timeout=20)
             if message is None or not (_is_photo_message(message) or _is_sticker_message(message)):
@@ -1174,8 +1370,8 @@ class TelethonTelegramService:
         text: str,
         topic_id: Optional[int] = None,
     ) -> SendMessageResponse:
-        client = await self._get_client()
         try:
+            client = await self._get_client()
             entity = await self._get_entity(chat_id)
             kwargs: dict[str, Any] = {}
             if topic_id is not None:
@@ -1192,8 +1388,8 @@ class TelethonTelegramService:
         topic_id: Optional[int] = None,
         max_id: Optional[int] = None,
     ) -> None:
-        client = await self._get_client()
         try:
+            client = await self._get_client()
             entity = await self._get_entity(chat_id)
             read_max_id = int(max_id or 0)
             if topic_id is not None:

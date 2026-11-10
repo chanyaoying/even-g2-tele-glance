@@ -38,7 +38,14 @@ from app.models import (
 )
 from app.services.audio import pcm16le_to_wav
 from app.services.secure_auth import SecureAuthError, decrypt_payload, encrypt_payload
-from app.services.telegram import TelegramService, TelegramServiceError, TelegramRateLimitError, TelegramServiceTimeoutError, TelegramSessionExpiredError
+from app.services.telegram import (
+    TelegramRateLimitError,
+    TelegramService,
+    TelegramServiceError,
+    TelegramServiceTimeoutError,
+    TelegramSessionExpiredError,
+    TelegramUnavailableError,
+)
 from app.services.transcription import TranscriptionServiceError, WhisperTranscriptionService
 
 # Seconds of silence before the update stream sends a keepalive comment; the phone treats ~3x this as dead.
@@ -69,6 +76,8 @@ def raise_telegram_http_error(exc: Exception) -> None:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     if isinstance(exc, TelegramRateLimitError):
         raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": str(exc.seconds)}) from exc
+    if isinstance(exc, TelegramUnavailableError):
+        raise HTTPException(status_code=503, detail=str(exc), headers={"Retry-After": "5"}) from exc
     if isinstance(exc, (TelegramServiceTimeoutError, TimeoutError)):
         raise HTTPException(status_code=504, detail=str(exc) or "Telegram request timed out. Please retry.") from exc
     raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -200,9 +209,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 # The session now belongs to this caller; do not leave the signed-in client in the
                 # pending cache where another caller with the same api_id/api_hash could reuse it.
                 discarded = discard_pending_telegram_service(telegram)
-                close = getattr(discarded, "close", None)
-                if close is not None:
-                    await close()
+                if discarded is not None:
+                    await discarded.close()
             return status
         except (TelegramServiceError, TimeoutError) as exc:
             raise_telegram_http_error(exc)
@@ -241,10 +249,14 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     @api.get("/api/chats/{chat_id}/topics", response_model=list[TopicSummary])
     async def list_topics(
         chat_id: int,
+        limit: int = Query(default=20, ge=1, le=100),
+        offset: int = Query(default=0, ge=0, le=400),
         telegram: TelegramService = Depends(get_telegram_service),
     ) -> list[TopicSummary]:
+        # Only pass paging when asked for, so the default request stays the original single fetch of 20.
+        paging = {"limit": limit, "offset": offset} if (limit, offset) != (20, 0) else {}
         try:
-            return await telegram.list_topics(chat_id)
+            return await telegram.list_topics(chat_id, **paging)
         except (TelegramServiceError, TimeoutError) as exc:
             raise_telegram_http_error(exc)
 
@@ -291,6 +303,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                         pending = asyncio.ensure_future(updates.__anext__())
                     done, _ = await asyncio.wait({pending}, timeout=STREAM_KEEPALIVE_SECONDS)
                     if not done:
+                        # A quiet stream is only healthy while Telegram is connected: reconnect a dropped
+                        # client (the service then queues a resync) or end with an error event.
+                        ensure_connected = getattr(telegram, "ensure_stream_connection", None)
+                        if ensure_connected is not None:
+                            await ensure_connected()
                         # A comment line: ignored by the phone's parser, but it proves the connection is alive
                         # and stops proxies and phones from silently dropping an idle stream.
                         yield ": keepalive\n\n"
@@ -309,6 +326,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                         yield f"event: message\ndata: {event_data(payload)}\n\n"
             except TelegramServiceError as exc:
                 payload = json.dumps({"detail": str(exc)})
+                yield f"event: error\ndata: {event_data(payload)}\n\n"
+            except Exception:
+                timing_logger.exception("update stream failed")
+                payload = json.dumps({"detail": "Update stream failed. Please retry."})
                 yield f"event: error\ndata: {event_data(payload)}\n\n"
             finally:
                 if pending is not None:
