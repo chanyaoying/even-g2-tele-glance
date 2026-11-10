@@ -75,7 +75,7 @@ Telegram network calls are wrapped with bounded timeouts. Transient Telethon tim
 Status codes the phone should expect from `/api/...`:
 
 - `400` a Telegram or validation error with a fixed, user-readable `detail` (unknown Telegram errors: `Telegram request failed. Please retry.`; raw exception text is only logged).
-- `401` the encrypted auth header is invalid, or the Telegram session expired/was revoked/is malformed (reconnect in Settings).
+- `401` with header `X-TeleGlance-Error: backend_auth` when the encrypted auth header is rejected (detail mentions encrypted auth, nonce or timestamp), or `X-TeleGlance-Error: session_expired` when the Telegram session expired/was revoked/is malformed (detail contains "session has expired"; reconnect in Settings). An update stream ending this way sends `event: error` with `{"detail": ..., "code": "session_expired"}`.
 - `413` request body over the limit (`Request body is too large`), checked before the body is read.
 - `429` Telegram asked to wait (FloodWait/slow mode); `Retry-After` gives the seconds.
 - `503` Telegram could not be reached (`Could not reach Telegram. Please retry.`) or transcription is busy (`transcription is busy, please retry`); both send `Retry-After: 5`.

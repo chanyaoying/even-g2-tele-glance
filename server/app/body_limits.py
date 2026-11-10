@@ -56,7 +56,7 @@ class RequestBodyLimitMiddleware:
             try:
                 self.validate_auth(auth.decode("latin-1") if auth is not None else None)
             except HTTPException as exc:
-                await _send_json(send, exc.status_code, str(exc.detail))
+                await _send_json(send, exc.status_code, str(exc.detail), getattr(exc, "headers", None))
                 return
             scope.setdefault("state", {})[AUTH_VALIDATED_STATE_KEY] = True
 
@@ -88,13 +88,11 @@ class RequestBodyLimitMiddleware:
         await self.app(scope, replay_receive, send)
 
 
-async def _send_json(send: Callable[[dict], Awaitable[None]], status: int, detail: str) -> None:
+async def _send_json(
+    send: Callable[[dict], Awaitable[None]], status: int, detail: str, extra_headers: Optional[dict[str, str]] = None
+) -> None:
     payload = json.dumps({"detail": detail}).encode("utf-8")
-    await send(
-        {
-            "type": "http.response.start",
-            "status": status,
-            "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(payload)).encode("ascii"))],
-        }
-    )
+    headers = [(b"content-type", b"application/json"), (b"content-length", str(len(payload)).encode("ascii"))]
+    headers += [(name.lower().encode("latin-1"), value.encode("latin-1")) for name, value in (extra_headers or {}).items()]
+    await send({"type": "http.response.start", "status": status, "headers": headers})
     await send({"type": "http.response.body", "body": payload})

@@ -14,6 +14,11 @@ from app.services.telegram import TelegramClientCredentials, TelethonTelegramSer
 from app.services.transcription import WhisperTranscriptionService
 
 logger = logging.getLogger(__name__)
+# Machine-readable reason on 401s, so the phone need not match detail text: "backend_auth" (shared secret /
+# encrypted auth header rejected) or "session_expired" (the Telegram session is gone; sign in again).
+ERROR_CODE_HEADER = "X-TeleGlance-Error"
+BACKEND_AUTH_ERROR_HEADERS = {ERROR_CODE_HEADER: "backend_auth"}
+SESSION_EXPIRED_ERROR_HEADERS = {ERROR_CODE_HEADER: "session_expired"}
 
 # Each cached service owns a connected Telethon client, an update loop and per-account caches, so the caches
 # are bounded and idle entries are closed (not just forgotten). FastAPI runs these sync dependencies in a
@@ -169,7 +174,7 @@ def telegram_credentials_from_encrypted_header(
     try:
         payload = decrypt_auth_header(encrypted_auth.strip(), shared_secret)
     except SecureAuthError as exc:
-        raise HTTPException(status_code=401, detail=str(exc)) from exc
+        raise HTTPException(status_code=401, detail=str(exc), headers=BACKEND_AUTH_ERROR_HEADERS) from exc
     api_id = str(payload.get("apiId") or "")
     api_hash = str(payload.get("apiHash") or "")
     session = str(payload.get("session") or "")
@@ -205,7 +210,7 @@ def validate_backend_auth(encrypted_auth: Optional[str], shared_secret: Optional
     try:
         decrypt_auth_header(encrypted_auth.strip(), shared_secret)
     except SecureAuthError as exc:
-        raise HTTPException(status_code=401, detail=str(exc)) from exc
+        raise HTTPException(status_code=401, detail=str(exc), headers=BACKEND_AUTH_ERROR_HEADERS) from exc
 
 
 def telegram_service_cache_key(credentials: Optional[TelegramClientCredentials]) -> str:

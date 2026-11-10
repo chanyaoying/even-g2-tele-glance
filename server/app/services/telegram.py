@@ -60,7 +60,8 @@ class TelegramRateLimitError(TelegramServiceError):
 
 
 SESSION_EXPIRED_MESSAGE = "Telegram session has expired. Reconnect in TeleGlance Settings."
-SESSION_INVALID_MESSAGE = "Telegram session is invalid. Reconnect in TeleGlance Settings."
+# The phone recognises expiry by the phrase "session has expired" (and by X-TeleGlance-Error / "code").
+SESSION_INVALID_MESSAGE = "Telegram session has expired or is invalid. Reconnect in TeleGlance Settings."
 UNAVAILABLE_MESSAGE = "Could not reach Telegram. Please retry."
 GENERIC_ERROR_MESSAGE = "Telegram request failed. Please retry."
 _AUTH_KEY_ERROR_NAMES = {"AuthKeyUnregisteredError", "AuthKeyDuplicatedError", "SessionRevokedError", "SessionExpiredError"}

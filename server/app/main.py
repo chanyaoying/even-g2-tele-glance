@@ -17,6 +17,8 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from app.body_limits import AUTH_VALIDATED_STATE_KEY, RequestBodyLimitMiddleware
 from app.config import Settings, get_settings
 from app.dependencies import (
+    ERROR_CODE_HEADER,
+    SESSION_EXPIRED_ERROR_HEADERS,
     SWEEP_INTERVAL_SECONDS,
     close_all_telegram_services,
     discard_pending_telegram_service,
@@ -135,7 +137,7 @@ def _bounded_debug_value(value: object) -> object:
 
 def raise_telegram_http_error(exc: Exception) -> None:
     if isinstance(exc, TelegramSessionExpiredError):
-        raise HTTPException(status_code=401, detail=str(exc)) from exc
+        raise HTTPException(status_code=401, detail=str(exc), headers=SESSION_EXPIRED_ERROR_HEADERS) from exc
     if isinstance(exc, TelegramRateLimitError):
         raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": str(exc.seconds)}) from exc
     if isinstance(exc, TelegramUnavailableError):
@@ -233,7 +235,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
-        expose_headers=["X-TeleGlance-Encrypted", "Server-Timing", "Retry-After"],
+        expose_headers=["X-TeleGlance-Encrypted", "Server-Timing", "Retry-After", ERROR_CODE_HEADER],
     )
 
     async def require_transcribe_auth(request: Request) -> None:
@@ -426,7 +428,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     else:
                         yield f"event: message\ndata: {event_data(payload)}\n\n"
             except TelegramServiceError as exc:
-                payload = json.dumps({"detail": str(exc)})
+                error = {"detail": str(exc)}
+                if isinstance(exc, TelegramSessionExpiredError):
+                    error["code"] = "session_expired"
+                payload = json.dumps(error)
                 yield f"event: error\ndata: {event_data(payload)}\n\n"
             except Exception:
                 timing_logger.exception("update stream failed")
