@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     groq_stt_model: str = Field(default="whisper-large-v3-turbo", validation_alias="GROQ_STT_MODEL")
     groq_stt_timeout_seconds: float = Field(default=20.0, validation_alias="GROQ_STT_TIMEOUT_SECONDS")
     transcribe_max_upload_bytes: int = Field(default=2_000_000, validation_alias="TRANSCRIBE_MAX_UPLOAD_BYTES")
+    # Every other request body is a small encrypted JSON envelope (a 4096-character message is ~25 KB).
+    request_max_json_bytes: int = Field(default=64 * 1024, validation_alias="REQUEST_MAX_JSON_BYTES")
     teleglance_shared_secret: Optional[str] = Field(default=None, validation_alias="TELEGLANCE_SHARED_SECRET")
 
     model_config = SettingsConfigDict(env_file=REPO_ROOT / ".env", extra="ignore")

@@ -13,6 +13,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from app.body_limits import AUTH_VALIDATED_STATE_KEY, RequestBodyLimitMiddleware
 from app.config import Settings, get_settings
 from app.dependencies import (
     SWEEP_INTERVAL_SECONDS,
@@ -59,6 +60,8 @@ from app.services.transcription import TranscriptionServiceError, WhisperTranscr
 
 # Seconds of silence before the update stream sends a keepalive comment; the phone treats ~3x this as dead.
 STREAM_KEEPALIVE_SECONDS = 15.0
+# Room for the multipart boundary, part headers and the language field around the audio upload itself.
+MULTIPART_OVERHEAD_BYTES = 512 * 1024
 timing_logger = logging.getLogger("uvicorn.error")
 
 
@@ -113,15 +116,6 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     api = FastAPI(title="TeleGlance Backend", lifespan=lifespan)
     debug_events: deque[dict] = deque(maxlen=100)
     debug_file_logger = _debug_file_logger()
-    api.add_middleware(
-        CORSMiddleware,
-        allow_origins=app_settings.backend_cors_origins,
-        allow_origin_regex=app_settings.backend_cors_origin_regex,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-        expose_headers=["X-TeleGlance-Encrypted", "Server-Timing", "Retry-After"],
-    )
 
     async def require_app_backend_auth(request: Request) -> None:
         validate_backend_auth(request.headers.get("X-TeleGlance-Auth"), app_settings.teleglance_shared_secret)
@@ -168,6 +162,30 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             status_code=response.status_code,
             headers=headers,
         )
+
+    # Added after (so outside) the encryption middleware: bodies are size-checked before anything reads them.
+    api.add_middleware(
+        RequestBodyLimitMiddleware,
+        default_limit=app_settings.request_max_json_bytes,
+        path_limits={"/api/transcribe": app_settings.transcribe_max_upload_bytes + MULTIPART_OVERHEAD_BYTES},
+        auth_first_paths={"/api/transcribe"},
+        validate_auth=lambda header: validate_backend_auth(header, app_settings.teleglance_shared_secret),
+    )
+    # Outermost, so every response (including the early 4xx answers above) carries CORS headers.
+    api.add_middleware(
+        CORSMiddleware,
+        allow_origins=app_settings.backend_cors_origins,
+        allow_origin_regex=app_settings.backend_cors_origin_regex,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["X-TeleGlance-Encrypted", "Server-Timing", "Retry-After"],
+    )
+
+    async def require_transcribe_auth(request: Request) -> None:
+        if request.scope.get("state", {}).get(AUTH_VALIDATED_STATE_KEY):
+            return  # the body-limit middleware checked the header before the upload was read
+        await require_app_backend_auth(request)
 
     @api.get("/health")
     async def health() -> dict[str, str]:
@@ -412,7 +430,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         except (TelegramServiceError, TimeoutError) as exc:
             raise_telegram_http_error(exc)
 
-    @api.post("/api/transcribe", response_model=TranscriptionResponse, dependencies=[Depends(require_app_backend_auth)])
+    @api.post("/api/transcribe", response_model=TranscriptionResponse, dependencies=[Depends(require_transcribe_auth)])
     async def transcribe(
         audio: UploadFile = File(...),
         language: str = Form(""),
