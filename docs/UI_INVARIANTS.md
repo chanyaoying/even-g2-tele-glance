@@ -95,7 +95,7 @@ Per-step latencies are split into `stateMs` (input -> matching state event), `ap
 - Chat/topic list swipes MUST update `selectedIndex` within `maxSwipeSelectionMs` without triggering a render event
 - Topic preview fetching MUST NOT block sidebar scroll input; controller selection moves before preview loading completes
 - Startup prefetching MUST NOT delay the first visible chat list render past `maxInitialRenderMs`; speculative warming begins after 1.2 seconds and is bounded to chats 2-3 plus at most one forum topic
-- A burst of SDK-delivered gestures inside 20 ms MUST dispatch only the latest gesture so stale input cannot replay on a later screen
+- SDK-delivered gestures are dispatched at most one per 20 ms window. Movement (swipes, list selection, foreground) MUST be latest-wins so a stale swipe burst cannot replay on a later screen, but presses (press, double press, long press/release) MUST never be coalesced or dropped, and a swipe still pending when a press arrives MUST be dispatched before the press (so "swipe then press" opens the row swiped to). The backlog is capped at 4 entries
 - Background refreshes MUST NOT overwrite the controller-owned sidebar marker
 - Async results from stale requests (previous chat open that was abandoned by backing out) MUST be discarded silently
 - Chat/topic scroll MUST dispatch a partial render through `bridge.enqueueSidebarPanel` rather than a full rebuild. The partial update includes the text sidebar marker and right panel. Rapid swipes MUST coalesce so only the latest model reaches the glasses

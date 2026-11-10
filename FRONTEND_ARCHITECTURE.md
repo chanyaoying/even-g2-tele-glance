@@ -17,8 +17,14 @@ Both targets share the same Telegram controller so the phone and glasses stay sy
 - `web/src/screens/ChatScreen.tsx`: phone message view plus typed composer.
 - `web/src/screens/SettingsScreen.tsx`: frontend-only configuration.
 - `web/src/storage.ts`: typed localStorage config defaults.
-- `web/src/controller/*`: shared app state machine and glasses screen model.
+- `web/src/api.ts`: `HttpTelegramApi` (encrypted transport, error classification, update stream); `web/src/secureAuth.ts`: AES-GCM helpers and per-purpose AADs.
+- `web/src/cache/persistentCache.ts`: `PersistentCache`, the on-phone cache of the chat list, recent thread pages and photos.
+- `web/src/controller/appController.ts`: `TelegramAppController`, the shared app state machine (input handling, loading, polling, rendering).
+- `web/src/controller/threadStore.ts`: `ThreadStore`, the per-thread caches (latest page, topic list, "last read" point, last read mark sent), LRU-capped at 50 threads, plus message-page helpers; `lruMap.ts` is the LRU map it and the photo/folder caches use.
+- `web/src/controller/unreadState.ts`: pure helpers that read and clear a thread's unread count across every copy inside an `AppState`.
+- `web/src/controller/model.ts`: `AppState` and the glasses `screenModel` projection (also `localizeStatus`).
 - `web/src/bridge/*`: Even Hub bridge and event mapping.
+- `web/src/locales/*`: UI strings; `en.ts` is the source of truth and every other locale must translate every key (enforced by `test/locales.test.ts`).
 
 The glasses bridge is created once and is not recreated while switching between phone screens.
 
@@ -45,11 +51,11 @@ Practical V1 settings:
 - Frontend-local Telegram StringSession status and clear-session action. The UI describes this as stored on the phone only.
 - Login action after credentials are configured: phone-code login with an international-format mobile number. QR login has been removed from the app and backend API surface.
 - Backend setup instructions with `https://github.com/jalatif/even-g2-tele-glance.git`.
-- Backend URL save/reset.
+- Backend URL save/reset. There is no default backend: with an empty Backend URL the app shows the setup flow and sends nothing.
 - Optional STT Server Url override; blank uses the backend URL and backend-local `faster-whisper`.
 - Debug event logging toggle.
 - Recording minimum duration in milliseconds.
-- Advanced fallback refresh intervals for chat/message polling, hidden behind details because SSE is the primary update path.
+- Advanced fallback refresh intervals for chat/message polling, hidden behind details because SSE is the primary update path. They apply only while the live stream is down.
 - Read-only current API URL and session status.
 - Read-only app/build version.
 
@@ -84,11 +90,30 @@ Phone-code login returns `sessionString`; the React context persists it to local
 
 Avoid parsing ASCII/debug text to infer native glasses layout. That caused duplicated text-box content because the native container and the old marker format could both render.
 
+## Encrypted Transport
+
+Every backend request carries `X-TeleGlance-Proto: 2`. Telegram credentials and the session string travel in the encrypted `X-TeleGlance-Auth` header; JSON request bodies are encrypted too, and the backend encrypts its responses (`X-TeleGlance-Encrypted: 1`). All use AES-GCM with a key derived from the shared secret, and each purpose has its own AAD (`teleglance-auth-v1`, `teleglance-req-v1`, `teleglance-resp-v1`), so a ciphertext made for one purpose never decrypts as another.
+
+Errors are `ApiError`s with a short glasses `message` and a longer phone `detail`. A 401 is classified by the `X-TeleGlance-Error` header (`session_expired`: sign in again; `backend_auth`: wrong shared secret or phone clock, the login is kept), falling back to the detail text. With a wrong secret the encrypted error body cannot be decrypted; that counts as rejected auth, not a crypto error. Early rejections (413, pre-auth 401) are plain JSON. 429/503 honour `Retry-After`. Missing settings are `kind: 'notConfigured'`.
+
+Short status texts (`Offline`, `Backend rejected auth`, `No connection`, `Server busy`, ...) are English sentinels the code compares; `localizeStatus` translates them when the glasses or phone draw them. Longer texts are localised when created.
+
 ## Realtime Updates
 
-The backend exposes `/api/updates` as an SSE stream for Telegram message updates. The React context subscribes once, forwards matching updates to the shared controller, and the controller refreshes the active thread or root chats as needed.
+The backend exposes `/api/updates` as an SSE stream for Telegram message updates. The React context subscribes once (in parallel with startup), forwards updates to the shared controller, and the controller merges a streamed message into the open thread or refreshes the root chats. `event: resync` (the backend reconnected to Telegram or dropped queued updates) triggers the same catch-up as a stream reconnect; `event: error` with `code: session_expired` signs out.
+
+Polling is only a fallback: the configured fast intervals run while the stream is down (from an error until the next open), a 60 s safety poll runs while it is up, and nothing polls while asleep. While the user is swiping, the controller (and only the controller) defers refreshes and stream-driven work until input is quiet.
 
 The frontend intentionally uses `fetch` streaming instead of browser `EventSource` because `EventSource` cannot attach encrypted app auth headers. Credentials/session must not be put in query parameters.
+
+## Caches
+
+- `PersistentCache` keeps the chat list, the newest 24 messages of recently opened threads and recent photos in Even App SDK storage (browser storage in the simulator), within a byte budget and a 7-day age limit, written in batches while input is quiet. At startup the stored chat list is shown at once (footer `Updating...`, or `Offline` with background retries if the backend cannot be reached). It is not encrypted; signing out or Reset clears it.
+- In memory, `ThreadStore` keeps per-thread pages, topic lists, unread points and read marks for the 50 most recently used threads; photos and folder chat lists use the same LRU map. An open thread grows while the user pages back through history and is cut back to the newest 240 messages once the view returns to the newest message.
+
+## Folders
+
+Telegram chat folders load after the chat list and never block it. With folders, double press on the chat list opens a folder picker (All chats, each folder, Sleep); the chat-list title shows the folder and its position. Each folder's first page is warmed in the background while input is quiet, and loaded folder pages are kept so switching back is instant.
 
 ## Hardware Notes
 
@@ -98,7 +123,7 @@ Hardware input can emit duplicate same-direction swipes. Event mapping uses a na
 
 Chat/topic navigation uses a text-rendered sidebar and one full-screen event overlay. The controller owns the selected index and updates the visible marker and right-side preview together. Native item-name/index payloads remain compatibility inputs rather than the primary selection mechanism.
 
-The initial chat list renders before speculative work. A delayed idle prefetch warms only the next two chats, and forum warming is limited to one topic. Hardware input is collapsed to the latest gesture in a 20 ms delivery burst so SDK/native stalls cannot release a long sequence onto later screens.
+The initial chat list renders before speculative work; the chat list itself has no preview, so nothing is fetched until a chat is opened. Hardware input is dispatched at most one gesture per 20 ms window: swipes and selection are latest-wins so SDK/native stalls cannot release a long sequence onto later screens, while presses are never coalesced and a pending swipe is dispatched before a following press.
 
 Chat and topic selection retain the split sidebar/preview layout. Opening the selected thread expands messages across the full glasses width; double click restores the saved split-view back target. Voice transcription confirmation is a standalone text page containing the transcript and `Send`/`Cancel` choices.
 
