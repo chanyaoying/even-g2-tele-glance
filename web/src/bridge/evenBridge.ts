@@ -14,7 +14,7 @@ import { getLocale } from '../locales'
 import type { GlassesBridge } from '../controller/appController'
 import { INLINE_IMAGE_HEIGHT, INLINE_IMAGE_WIDTH, MESSAGE_ROW_HEIGHT_PX, type AppInput, type ScreenModel } from '../controller/model'
 import { defaultApiBaseUrl, effectiveBackendSharedSecret, type TelegramAuthConfig } from '../api'
-import { encryptedTelegramAuthHeader, encryptJsonPayload } from '../secureAuth'
+import { encryptedTelegramAuthHeader, encryptJsonPayload, PROTOCOL_HEADER, PROTOCOL_VERSION } from '../secureAuth'
 import {
   isTeleGlanceFixtureMode,
   logBridgeQueueDepth,
@@ -122,8 +122,12 @@ export class EvenHubGlassesBridge implements GlassesBridge {
   private pendingImage: Uint8Array | undefined
   private imageSending: Promise<boolean> | undefined
   private audioOn = false
-  /** 0 = full sidebar layout; raised when the host rejects a page, until pages are accepted again. */
-  private layoutTier: LayoutTier = 0
+  /**
+   * Which sidebar layout to send; raised when the host rejects a page. Starts at 2 (eight text containers): the G2
+   * host allows at most eight, and on real glasses tiers 0 and 1 (nine, for the popup container) were refused every
+   * time, ~2.1 s each with retries, which left the glasses on the unscrollable startup text page for 15-20 s.
+   */
+  private layoutTier: LayoutTier = 2
   /**
    * Full rebuilds go to the glasses one at a time. The host needs hundreds of milliseconds to seconds per page, and a
    * rebuild sent while another is still being drawn is slow or refused; the newest screen waits and replaces the rest.
@@ -1337,7 +1341,7 @@ async function postDebugNote(note: string, data: Record<string, unknown>, authCo
     const encryptedPayload = await encryptJsonPayload(body, sharedSecret)
     await fetch(`${defaultApiBaseUrl()}/api/debug/events`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-TeleGlance-Auth': encryptedAuth },
+      headers: { 'Content-Type': 'application/json', 'X-TeleGlance-Auth': encryptedAuth, [PROTOCOL_HEADER]: PROTOCOL_VERSION },
       body: JSON.stringify({ encryptedPayload }),
     })
   } catch {
@@ -1361,7 +1365,7 @@ async function logHardwareEvent(raw: unknown, mapped: AppInput | undefined, auth
     const encryptedPayload = await encryptJsonPayload(body, sharedSecret)
     await fetch(`${defaultApiBaseUrl()}/api/debug/events`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-TeleGlance-Auth': encryptedAuth },
+      headers: { 'Content-Type': 'application/json', 'X-TeleGlance-Auth': encryptedAuth, [PROTOCOL_HEADER]: PROTOCOL_VERSION },
       body: JSON.stringify({ encryptedPayload }),
     })
   } catch {

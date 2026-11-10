@@ -8,6 +8,11 @@ function flushAsync(ms = 0) {
 }
 
 /** The bridge sends a plain text page through the one-time startup call; these tests look at the full layout itself. */
+/** Start at the richer (popup container, stacking order) layout the host may refuse; real bridges start at tier 2. */
+function startAtRichLayout(bridge: unknown) {
+  ;(bridge as { layoutTier: number }).layoutTier = 0
+}
+
 function skipTextBootstrap(bridge: unknown) {
   ;(bridge as { startupBootstrapped: boolean }).startupBootstrapped = true
 }
@@ -693,6 +698,7 @@ describe('EvenHubGlassesBridge photos', () => {
       onEvenHubEvent() { return undefined },
     } as never)
     skipTextBootstrap(bridge)
+    startAtRichLayout(bridge)
     const model = {
       kind: 'sidebar' as const, title: 'T', focus: 'panel' as const, sidebarTitle: 'S', sidebarItems: ['a'], sidebarSelected: 0,
       panelTitle: '', panelBody: 'body', panelFooter: 'f', popup: { title: 'Confirm', body: 'Send?' },
@@ -732,7 +738,7 @@ describe('EvenHubGlassesBridge photos', () => {
       },
     })
     skipTextBootstrap(bridge)
-    skipTextBootstrap(bridge)
+    startAtRichLayout(bridge)
     const base = {
       kind: 'sidebar' as const,
       title: 'Project',
@@ -798,6 +804,7 @@ describe('EvenHubGlassesBridge photos', () => {
           return undefined
         },
       })
+      startAtRichLayout(bridge)
       return { bridge, pages }
     }
 
@@ -842,6 +849,27 @@ describe('EvenHubGlassesBridge photos', () => {
       await flushAsync(30)
       expect(pages.length).toBe(4) // startup + three sidebar attempts
     })
+  })
+})
+
+describe('EvenHubGlassesBridge layout on real glasses', () => {
+  it('sends at most eight text containers from the first sidebar page on, so the host never refuses it', async () => {
+    const pages: Array<{ textObject: unknown[] }> = []
+    const bridge = new EvenHubGlassesBridge({
+      async createStartUpPageContainer(container: unknown) { pages.push(container as never); return 0 },
+      async rebuildPageContainer(container: unknown) { pages.push(container as never); return true },
+      async audioControl() { return undefined },
+      onEvenHubEvent() { return undefined },
+    } as never)
+    const sidebar = {
+      kind: 'sidebar' as const, title: 'T', focus: 'sidebar' as const, sidebarTitle: 'Chats', sidebarItems: ['a', 'b'], sidebarSelected: 0,
+      panelTitle: '', panelBody: 'body', panelFooter: 'f', popup: { title: 'Confirm', body: 'Send?' },
+    }
+    await bridge.render(sidebar) // startup: text page first, then the sidebar as a rebuild
+    await flushAsync(20)
+    const rebuilt = pages.slice(1)
+    expect(rebuilt.length).toBe(1) // accepted first time: no stepping down through refused layouts
+    for (const page of pages) expect(page.textObject.length).toBeLessThanOrEqual(8)
   })
 })
 
