@@ -34,16 +34,16 @@ export interface GlassesBridge {
 }
 
 const MESSAGE_PAGE_LIMIT = 8
-// Older pages are fetched in bigger chunks than the first page: a history call costs about the same for 8
-// or 24 messages, and a bigger chunk means far fewer waits at the edge of loaded history while scrolling.
-/** Ignore a plain click this soon after a hold event (some firmware double-reports). */
 const SEND_FAILED_STATUS = 'Send failed'
 const STARTUP_RETRY_BASE_MS = 5_000
 const STARTUP_RETRY_MAX_MS = 60_000
 /** While the live update stream is up, polling is only a slow safety net. */
 const STREAM_HEALTHY_POLL_MS = 60_000
 const TRANSCRIBE_FAILED_STATUS = 'Transcription failed'
+/** Ignore a plain click this soon after a hold event (some firmware double-reports). */
 const HOLD_PRESS_GUARD_MS = 350
+// Older pages are fetched in bigger chunks than the first page: a history call costs about the same for 8
+// or 24 messages, and a bigger chunk means far fewer waits at the edge of loaded history while scrolling.
 const OLDER_PAGE_LIMIT = 24
 // Optimistic folder loading: once the chat list is up and the user is idle, fetch each folder's first page
 // so switching folders later is instant.
@@ -61,20 +61,18 @@ const INPUT_QUIET_MS = 900
 const IMAGE_SEND_DELAY_MS = 350
 const IMAGE_MAX_WAIT_MS = 1500
 const TOPIC_PREVIEW_IDLE_MS = 200
-// How long after a full `bridge.render()` we treat a list click as
-// post-firmware-reset. The G2 firmware (and the simulator) reset the
-// post-firmware-reset. The G2 firmware (and the simulator) reset the
-// tracked list-selection index to 0 on every full page rebuild, and the
-// next click event reports the post-reset index. Inside this window we
-// trust the controller's state instead of the firmware's payload.
 const DEFAULT_RUNTIME_CONFIG: ControllerRuntimeConfig = {
   messagePressDelayMs: 260,
   messagePollMs: 3000,
   chatPollMs: 5000,
   recordingMinDurationMs: 900,
   language: 'en',
+  /** A list-selection event this soon after a swipe is the firmware's post-scroll echo, not a press. */
   swipeToPressDebounceMs: 200,
   selectionOnlyPressDelayMs: 400,
+  // How long after a full `bridge.render()` a list click counts as post-firmware-reset: the G2 firmware (and the
+  // simulator) reset the tracked list-selection index to 0 on every full page rebuild, and the next click
+  // reports the post-reset index. Inside this window the controller's state is trusted instead of the payload.
   firmwareResetWindowMs: 250,
 }
 
@@ -100,6 +98,8 @@ export class TelegramAppController {
   private chatPoll: ReturnType<typeof setInterval> | undefined
   private pendingMessagePress: ReturnType<typeof setTimeout> | undefined
   private holdRecording = false
+  /** Bytes of audio in the current recording's `chunks` (a running total, not re-summed per chunk). */
+  private recordedBytes = 0
   /** threadKey -> id of the oldest unread message, while a thread is being read from its "last read" point. */
   private unreadBoundaries = new Map<string, string>()
   private autoStopping = false
@@ -146,16 +146,10 @@ export class TelegramAppController {
   private topicPreviewDebounce: ReturnType<typeof setTimeout> | undefined
   private deferredRootRefreshTimer: ReturnType<typeof setTimeout> | undefined
   private deferredMessageRefreshTimer: ReturnType<typeof setTimeout> | undefined
-  // `messageCache` is the single source of truth for the latest messages of a chat/topic.
-  // It is populated by `prefetchVisibleChats` on startup, by `prefetchTopics`/`prefetchMessages`
-  // on demand, and by background refreshes. The legacy `chatPreviewCache`/`topicPreviewCache`
-  // are kept for backwards compatibility (and for cache-write observability) but reads always
-  // fall through to `messageCache` so the startup prefetch is reused for previews.
+  // `messageCache` is the single source of truth for the latest messages of a chat/topic: filled by
+  // `prefetchTopics`/`prefetchMessages` on demand and by background refreshes, and read for topic previews.
   private messageCache = new Map<string, { messages: Message[]; cursor?: Id }>()
-  private topicPreviewCache = this.messageCache
   private topicPreviewInFlight = new Set<string>()
-  private chatPreviewDebounce: ReturnType<typeof setTimeout> | undefined
-  private chatPreviewInFlight = new Set<string>()
   private topicsCache = new Map<string, Topic[]>()
   private topicsPrefetchInFlight = new Map<string, Promise<Topic[]>>()
   private messagePrefetchInFlight = new Map<string, Promise<Message[]>>()
@@ -179,16 +173,12 @@ export class TelegramAppController {
   // rendering is only valid while focus stays on the same input surface because
   // TextContainerUpgrade cannot change event-capture flags.
   private lastRenderedListItems: readonly string[] | undefined
+  private renderInFlight = false
   // Timestamp of the most recent full `bridge.render()` call. The G2 firmware
   // (and the simulator) reset their tracked list-selection index to 0 on
-  // every full page rebuild. A click arriving within a few seconds of a
-  // full rebuild is therefore suspect — its `currentSelectItemIndex`
-  // payload reflects the post-reset firmware state, not the user's tap.
-  // We use this to disambiguate the firmware-reset desync from a legitimate
-  // "user tapped a different row" scenario. See
-  // `docs/SDK_BUG_NATIVE_LIST_SELECTION.md` for the SDK-level analysis.
-  private renderInFlight = false
-  // see the SDK bug note above
+  // every full page rebuild, so a click arriving within `firmwareResetWindowMs`
+  // of a full rebuild carries a post-reset `currentSelectItemIndex`, not the
+  // user's tap. See `docs/SDK_BUG_NATIVE_LIST_SELECTION.md`.
   private lastFullRenderAt = 0
   private pendingRenderState: AppState | undefined
   private renderTimer: ReturnType<typeof setTimeout> | undefined
@@ -256,7 +246,6 @@ export class TelegramAppController {
       this.topicPreviewDebounce,
       this.deferredRootRefreshTimer,
       this.deferredMessageRefreshTimer,
-      this.chatPreviewDebounce,
       this.readAckFlushTimer,
       this.startupPrefetchTimer,
       this.renderTimer,
@@ -267,12 +256,14 @@ export class TelegramAppController {
     ]) {
       if (timer) clearTimeout(timer)
     }
+    this.pendingMessagePress = undefined
+    this.topicPreviewDebounce = undefined
     this.deferredRootRefreshTimer = undefined
     this.deferredMessageRefreshTimer = undefined
-    this.chatPreviewDebounce = undefined
     this.readAckFlushTimer = undefined
     this.startupPrefetchTimer = undefined
     this.renderTimer = undefined
+    this.imageTimer = undefined
     this.startupRetryTimer = undefined
     this.notifyTimer = undefined
     this.typingTimer = undefined
@@ -562,8 +553,7 @@ export class TelegramAppController {
 
     if (input.type === 'audioChunk') {
       if (this.state.screen === 'sidebarRecording') {
-        const recordedBytes = this.state.chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0)
-        if (recordedBytes + input.pcm.byteLength > MAX_RECORDING_BYTES) {
+        if (this.recordedBytes + input.pcm.byteLength > MAX_RECORDING_BYTES) {
           // Out of room: stop and transcribe what we have instead of waiting for a release that may never come.
           if (!this.autoStopping) {
             this.autoStopping = true
@@ -571,12 +561,14 @@ export class TelegramAppController {
           }
           return // keep the upload under the server cap
         }
-        this.state = { ...this.state, chunks: [...this.state.chunks, input.pcm] }
+        // Appended in place: copying the whole chunk list for every chunk made a recording O(n²). The chunk
+        // list belongs to this recording only, and nothing is notified per chunk.
+        this.state.chunks.push(input.pcm)
+        this.recordedBytes += input.pcm.byteLength
         if (isTeleGlanceFixtureMode()) {
-          const total = this.state.chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0)
           logRecordingEvent('audioChunk', {
             size: input.pcm.byteLength,
-            totalBytes: total,
+            totalBytes: this.recordedBytes,
             chunks: this.state.chunks.length,
             ...(input.injected ? { injected: true } : {}),
           })
@@ -588,10 +580,11 @@ export class TelegramAppController {
     if (this.state.screen === 'sidebarRecording') {
       const injected = consumeInjectedAudioChunks()
       if (injected.length > 0) {
-        this.state = { ...this.state, chunks: [...this.state.chunks, ...injected] }
+        const size = injected.reduce((sum, chunk) => sum + chunk.byteLength, 0)
+        this.state.chunks.push(...injected)
+        this.recordedBytes += size
         if (isTeleGlanceFixtureMode()) {
-          const total = this.state.chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0)
-          logRecordingEvent('audioChunk', { size: injected.reduce((s, c) => s + c.byteLength, 0), totalBytes: total, chunks: this.state.chunks.length, injected: true })
+          logRecordingEvent('audioChunk', { size, totalBytes: this.recordedBytes, chunks: this.state.chunks.length, injected: true })
         }
       }
     }
@@ -607,8 +600,8 @@ export class TelegramAppController {
         // Suppress auto-press for a short window after a swipe. Native G2 firmware
         // sometimes emits a list-selection event immediately after a scroll completes
         // (with the new index), and the previous code treated that as a press. The
-        // 450ms window covers the firmware's typical post-swipe event burst without
-        // noticeably slowing intentional press-after-swipe sequences.
+        // `swipeToPressDebounceMs` window (200 ms by default) covers the firmware's typical post-swipe
+        // event burst without noticeably slowing intentional press-after-swipe sequences.
         if (now - this.lastSwipeAt < this.runtimeConfig.swipeToPressDebounceMs) return
         if (now - this.lastSelectIndexPressAt < 400) return
         this.lastSelectIndexPressAt = now
@@ -780,12 +773,6 @@ export class TelegramAppController {
     state: Extract<AppState, { screen: 'sidebar'; focus: 'chats' }>, input: AppInput
   ) {
     if (input.type === 'doublePress') {
-      // The dispatch-level filter in `dispatch` has already dropped
-      // any idle system `doublePress` (eventSource === 1 inside the
-      // cluster window). See `isIdleSystemDoublePress` and AGENTS.md
-      // "Idle doublePress events on the G2 / simulator can mimic
-      // user input."
-      this.cancelChatDebounce()
       if (this.folders.length > 0) {
         // With folders, double-tap opens the folder picker (which also offers Sleep).
         await this.openFolderPicker(state)
@@ -799,7 +786,6 @@ export class TelegramAppController {
     }
     if (input.type === 'swipeUp') {
       this.openRequestId += 1
-      this.cancelChatDebounce()
       const newIndex = moveSelection(state.selectedChatIndex, state.chats.length, -1)
       // The chat list is full width with no preview, so moving the selection never fetches messages.
       await this.setStateForListScroll({
@@ -812,7 +798,6 @@ export class TelegramAppController {
     }
     if (input.type === 'swipeDown') {
       this.openRequestId += 1
-      this.cancelChatDebounce()
       const newIndex = moveSelection(state.selectedChatIndex, state.chats.length, 1)
       // The chat list is full width with no preview, so moving the selection never fetches messages.
       await this.setStateForListScroll({
@@ -828,7 +813,6 @@ export class TelegramAppController {
       const selectedChatIndex = this.resolveSelectedChatIndex(input, state.selectedChatIndex, state.chats)
       if (selectedChatIndex !== state.selectedChatIndex) {
         this.openRequestId += 1
-        this.cancelChatDebounce()
       }
       await this.setStateForListScroll({
         ...state,
@@ -841,7 +825,6 @@ export class TelegramAppController {
     }
     if (input.type !== 'press') return
 
-    this.cancelChatDebounce()
     const selectedChatIndex = this.resolveSelectedChatIndex(input, state.selectedChatIndex, state.chats)
     const selectedState = { ...state, selectedChatIndex }
     const chat = selectedState.chats[selectedChatIndex]
@@ -855,12 +838,6 @@ export class TelegramAppController {
       if (isTeleGlanceFixtureMode()) logLifecycleEvent('asleep', { input: input.type, selectedChatIndex: state.selectedChatIndex })
       return
     }
-    // The dispatch-level filter in `dispatch` has already dropped
-    // any idle system `doublePress` (eventSource === 1 inside the
-    // cluster window), so reaching this branch means a real user
-    // is waking the device. See `isIdleSystemDoublePress` and
-    // AGENTS.md "Idle doublePress events on the G2 / simulator can
-    // mimic user input."
     if (isTeleGlanceFixtureMode()) logLifecycleEvent('wake', { selectedChatIndex: state.selectedChatIndex })
     await this.setState(this.chatsState(state.chats, state.selectedChatIndex))
     // Nothing polls while asleep; without the live stream the list may be stale, so refresh it now.
@@ -869,8 +846,6 @@ export class TelegramAppController {
 
   private async handleNewMessage(state: Extract<AppState, { screen: 'newMessage' }>, input: AppInput) {
     if (input.type === 'doublePress') {
-      // The dispatch-level filter in `dispatch` has already dropped
-      // any idle system `doublePress`. See `isIdleSystemDoublePress`.
       this.rememberChats(state.chats)
       await this.setState({ screen: 'asleep', chats: state.chats, selectedChatIndex: state.selectedChatIndex })
       await this.bridge.turnScreenOff?.()
@@ -884,8 +859,6 @@ export class TelegramAppController {
     state: Extract<AppState, { screen: 'sidebar'; focus: 'topics' }>, input: AppInput
   ) {
     if (input.type === 'doublePress') {
-      // The dispatch-level filter in `dispatch` has already dropped
-      // any idle system `doublePress`. See `isIdleSystemDoublePress`.
       this.cancelTopicDebounce()
       await this.setState(this.chatsState(state.chats, state.selectedChatIndex))
       return
@@ -970,8 +943,6 @@ export class TelegramAppController {
     state: Extract<AppState, { screen: 'sidebar'; focus: 'messages' }>, input: AppInput
   ) {
     if (input.type === 'doublePress') {
-      // The dispatch-level filter in `dispatch` has already dropped
-      // any idle system `doublePress`. See `isIdleSystemDoublePress`.
       this.openRequestId += 1
       this.cancelPendingMessagePress()
       await this.goBackFromMessages(state)
@@ -1025,7 +996,7 @@ export class TelegramAppController {
 
   private async fetchTopicPreview(chat: Chat, topic: Topic) {
     const cacheKey = messageThreadKey({ chat, topic })
-    const cached = this.topicPreviewCache.get(cacheKey)
+    const cached = this.messageCache.get(cacheKey)
     if (cached) {
       const state = this.state
       if (state.screen !== 'sidebar' || state.focus !== 'topics') return
@@ -1049,7 +1020,7 @@ export class TelegramAppController {
         limit: MESSAGE_PAGE_LIMIT,
       })
       const normalized = normalizeMessagePage(messages)
-      this.topicPreviewCache.set(cacheKey, { messages: normalized, cursor: oldestMessageId(normalized) })
+      this.messageCache.set(cacheKey, { messages: normalized, cursor: oldestMessageId(normalized) })
       const state = this.state
       if (state.screen !== 'sidebar' || state.focus !== 'topics') return
       if (!topicMatchesSelection(state, topic)) return
@@ -1066,17 +1037,11 @@ export class TelegramAppController {
     }
   }
 
-  private cancelChatDebounce() {
-    if (!this.chatPreviewDebounce) return
-    clearTimeout(this.chatPreviewDebounce)
-    this.chatPreviewDebounce = undefined
-  }
-
   /**
    * Synchronous cache lookup for the topic preview path.
    */
   private getTopicPreviewCached(chat: Chat, topic: Topic) {
-    return this.topicPreviewCache.get(messageThreadKey({ chat, topic }))
+    return this.messageCache.get(messageThreadKey({ chat, topic }))
   }
 
   private async scheduleMessagePress(
@@ -1111,6 +1076,7 @@ export class TelegramAppController {
     ctx: { chats: Chat[]; selectedChatIndex: number },
   ) {
     this.lastMessagePressAt = Date.now()
+    this.recordedBytes = 0
     await this.setState({
       screen: 'sidebarRecording', focus: 'messages',
       chats: ctx.chats, selectedChatIndex: ctx.selectedChatIndex,
@@ -1135,8 +1101,6 @@ export class TelegramAppController {
   ) {
     if (input.type === 'doublePress') {
       this.holdRecording = false
-      // The dispatch-level filter in `dispatch` has already dropped
-      // any idle system `doublePress`. See `isIdleSystemDoublePress`.
       void this.bridge.setAudioEnabled(false).catch(() => undefined)
       await this.setState(backToMessages(state))
       return
@@ -1147,14 +1111,13 @@ export class TelegramAppController {
     this.holdRecording = false
     debugLog('record.stop', {
       via: input.type,
-      bytes: state.chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0),
+      bytes: this.recordedBytes,
       chunks: state.chunks.length,
       heldMs: Date.now() - state.startedAt,
     })
     await this.setState({ ...backToMessages(state), screen: 'sidebarTranscribing' as const })
     if (isTeleGlanceFixtureMode()) {
-      const total = state.chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0)
-      logRecordingEvent('stop', { totalBytes: total, chunks: state.chunks.length })
+      logRecordingEvent('stop', { totalBytes: this.recordedBytes, chunks: state.chunks.length })
       logRecordingEvent('transcribe.start', { chunks: state.chunks.length })
     }
     void this.bridge.setAudioEnabled(false).catch(() => undefined)
@@ -1210,8 +1173,6 @@ export class TelegramAppController {
       return
     }
     if (input.type === 'doublePress') {
-      // The dispatch-level filter in `dispatch` has already dropped
-      // any idle system `doublePress`. See `isIdleSystemDoublePress`.
       await this.setState(backToMessages(state))
       return
     }
@@ -1308,8 +1269,6 @@ export class TelegramAppController {
     state: Extract<AppState, { screen: 'sidebarSent' }>, input: AppInput
   ) {
     if (input.type === 'doublePress') {
-      // The dispatch-level filter in `dispatch` has already dropped
-      // any idle system `doublePress`. See `isIdleSystemDoublePress`.
       await this.setState(this.chatsState(state.chats, state.selectedChatIndex))
       return
     }
@@ -1324,8 +1283,6 @@ export class TelegramAppController {
 
   private async handleError(state: Extract<AppState, { screen: 'error' }>, input: AppInput) {
     if (input.type === 'doublePress' && state.previous) {
-      // The dispatch-level filter in `dispatch` has already dropped
-      // any idle system `doublePress`. See `isIdleSystemDoublePress`.
       await this.setState(state.previous)
       return
     }
@@ -2690,7 +2647,6 @@ export class TelegramAppController {
     if (this.topicsPrefetchInFlight.size > 0) return true
     if (this.messagePrefetchInFlight.size > 0) return true
     if (this.topicPreviewInFlight.size > 0) return true
-    if (this.chatPreviewInFlight.size > 0) return true
     if (this.pendingReadAcks.size > 0) return true
     if (this.deferredRootRefreshTimer) return true
     if (this.deferredMessageRefreshTimer) return true
