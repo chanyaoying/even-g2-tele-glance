@@ -94,7 +94,7 @@ export function SettingsScreen({ buildVersion }: { buildVersion: string }) {
     try {
       await logoutTelegram()
     } catch (error) {
-      setLogoutError(error instanceof Error ? error.message : 'Logout failed')
+      setLogoutError(error instanceof Error ? error.message : l.settingsLogoutFailed)
       setIsLoggingOut(false)
     }
   }
@@ -178,7 +178,7 @@ scripts/start-backend.sh --reload`}</code></pre>
         <h2>{l.settingsVoiceSection}</h2>
         <label>
           <span>{l.settingsSttUrl}</span>
-          <input value={draft.sttBaseUrl} onChange={(event) => update('sttBaseUrl', event.target.value)} placeholder="Use backend URL" />
+          <input value={draft.sttBaseUrl} onChange={(event) => update('sttBaseUrl', event.target.value)} placeholder={l.settingsSttPlaceholder} />
         </label>
         <p className="hint">{l.settingsSttHint}</p>
         <label className="inline-setting">
@@ -187,10 +187,10 @@ scripts/start-backend.sh --reload`}</code></pre>
         </label>
         <p className="hint">{l.settingsDebugEventsHint}</p>
         <label>
-          <span>Glasses font width correction (%)</span>
+          <span>{l.settingsFontWidth}</span>
           <input type="number" min="70" max="150" step="1" value={draft.fontWidthPercent} onChange={(event) => update('fontWidthPercent', Number(event.target.value))} />
         </label>
-        <p className="hint">Text lines are filled to the screen edge using the glasses font measured in the simulator. If lines wrap twice on the glasses, raise this a little (e.g. 110); if they stop short of the right edge, lower it. Default 100.</p>
+        <p className="hint">{l.settingsFontWidthHint}</p>
         <label>
           <span>{l.settingsRecMinDuration}</span>
           <input type="number" min="0" max="5000" step="100" value={draft.recordingMinDurationMs} onChange={(event) => update('recordingMinDurationMs', Number(event.target.value))} />

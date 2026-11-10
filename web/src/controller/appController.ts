@@ -93,7 +93,7 @@ type StateListener = (state: AppState) => void
 
 
 export class TelegramAppController {
-  private state: AppState = { screen: 'loading', message: 'Starting...' }
+  private state: AppState = { screen: 'loading', message: getLocale().errorStarting }
   private runtimeConfig: ControllerRuntimeConfig
   private listeners = new Set<StateListener>()
   private messagePoll: ReturnType<typeof setInterval> | undefined
@@ -283,7 +283,7 @@ export class TelegramAppController {
   async sendTextFromPhone(text: string) {
     const state = this.state
     const thread = activeThreadState(state)
-    if (!thread) throw new Error('Open a chat or topic before sending.')
+    if (!thread) throw new Error(getLocale().phoneOpenChatFirst)
     const trimmed = text.trim()
     if (!trimmed) return
     const ctx = sidebarContext(state)
@@ -428,7 +428,7 @@ export class TelegramAppController {
       this.showingStoredChats = true
       await this.setState(this.chatsState(storedChats, 0, { status: UPDATING_STATUS }))
     } else {
-      await this.setState({ screen: 'loading', message: 'Checking Telegram session...' })
+      await this.setState({ screen: 'loading', message: getLocale().authChecking })
     }
     await this.connectSession(chatsRequest)
   }
@@ -490,7 +490,7 @@ export class TelegramAppController {
       await this.setState({
         screen: 'auth',
         mode: 'needsSetup',
-        message: 'Follow the instructions on the Settings page to connect Telegram and the backend server.',
+        message: getLocale().authNeedsSetup,
       })
       return
     }
@@ -500,12 +500,13 @@ export class TelegramAppController {
       this.showingStoredChats = false
       void this.cache?.clear()
       const hasFrontendCredentials = this.hasTelegramCredentials()
+      const l = getLocale()
       await this.setState({
         screen: 'auth',
         mode: hasFrontendCredentials ? 'signedOut' : 'needsSetup',
         message: !hasFrontendCredentials || status.configured === false
-          ? 'Telegram not connected. Please connect using the instructions in Settings on the phone.'
-          : 'Telegram not connected. Enter your phone number in the phone UI to receive a Telegram login code.',
+          ? `${l.authNotConnected} ${l.authConnectViaSettings}`
+          : `${l.authNotConnected} ${l.authSignedOut}`,
       })
       return
     }
@@ -670,14 +671,14 @@ export class TelegramAppController {
       if (state.mode === 'needsSetup') {
         await this.setState({
           ...state,
-          message: 'Follow the instructions on the Settings page to connect Telegram and the backend server.',
+          message: getLocale().authNeedsSetup,
         })
         return
       }
       if (state.mode === 'signedOut') {
         await this.setState({
           ...state,
-          message: 'Enter your phone number in the phone UI to receive a Telegram login code.',
+          message: getLocale().authSignedOut,
         })
         return
       }
@@ -695,7 +696,7 @@ export class TelegramAppController {
         await this.setState({
           screen: 'auth',
           mode: 'needsSetup',
-          message: 'Telegram not connected. Add Telegram API ID/hash in Settings on the phone first.',
+          message: `${getLocale().authNotConnected} ${getLocale().authAddCredentialsFirst}`,
         })
         return
       }
@@ -715,7 +716,7 @@ export class TelegramAppController {
         mode: 'phonePending',
         phone: result.phone || trimmed,
         phoneCodeHash: result.phoneCodeHash ?? null,
-        message: result.message ?? `Verification code sent to ${result.phone || trimmed}. Enter it on the phone.`,
+        message: result.message ?? getLocale().authPhonePending.replace('{phone}', result.phone || trimmed),
       })
     }, this.state.screen === 'auth' ? this.state : undefined)
     if (loginError !== undefined) throw loginError
@@ -741,10 +742,10 @@ export class TelegramAppController {
         phone: trimmedPhone,
         phoneCodeHash,
         passwordRequired: status.passwordRequired || undefined,
-        message: status.message ?? 'Code was not accepted. Check the Telegram code and try again.',
+        message: status.message ?? getLocale().authCodeRejected,
       })
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Code was not accepted. Check the Telegram code and try again.'
+      const message = error instanceof Error ? error.message : getLocale().authCodeRejected
       const expired = /expired/i.test(message)
       await this.setState({
         screen: 'auth',
@@ -752,7 +753,7 @@ export class TelegramAppController {
         phone: trimmedPhone,
         phoneCodeHash: expired ? null : phoneCodeHash,
         message: expired
-          ? `${message}. Send a new login code and use the latest code from Telegram.`
+          ? `${message}. ${getLocale().authCodeExpired}`
           : message,
       })
       throw error
@@ -2145,7 +2146,7 @@ export class TelegramAppController {
     this.errorRetry = retry
     await this.setState({
       screen: 'error',
-      message: error instanceof Error ? error.message : 'Unknown error',
+      message: error instanceof Error ? error.message : getLocale().errorUnexpected,
       previous,
     })
   }

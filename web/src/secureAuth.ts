@@ -1,4 +1,5 @@
 import type { TelegramAuthConfig } from './api'
+import { getLocale } from './locales'
 
 // Every encrypted blob uses the same AES key (derived from the shared secret), so each purpose and direction
 // gets its own AAD: a ciphertext made for one purpose (say a response) then never decrypts as another (say an
@@ -19,7 +20,7 @@ export async function encryptedTelegramAuthHeader(config: TelegramAuthConfig): P
   const apiHash = config.telegramApiHash?.trim()
   if (!sharedSecret || !apiId || !apiHash) return null
   if (!globalThis.crypto?.subtle) {
-    throw new Error('Encrypted backend auth requires WebCrypto. Use the packaged app, localhost, HTTPS, or a browser with WebCrypto support.')
+    throw new Error(getLocale().errorWebCryptoRequired)
   }
 
   const key = await deriveKey(sharedSecret)
@@ -62,7 +63,7 @@ export async function encryptWithAad(text: string, sharedSecret: string, aad: st
 export async function decryptWithAad(encryptedPayload: string, sharedSecret: string, aad: string): Promise<string> {
   const key = await deriveKeyOrThrow(sharedSecret)
   const parts = encryptedPayload.split('.')
-  if (parts.length !== 3 || parts[0] !== 'v1') throw new Error('Encrypted backend response is malformed')
+  if (parts.length !== 3 || parts[0] !== 'v1') throw new Error(getLocale().errorEncryptedMalformed)
   const nonce = base64UrlToBytes(parts[1])
   const ciphertext = base64UrlToBytes(parts[2])
   const plaintext = await crypto.subtle.decrypt(
@@ -94,7 +95,7 @@ async function deriveKey(sharedSecret: string) {
 
 async function deriveKeyOrThrow(sharedSecret: string) {
   if (!globalThis.crypto?.subtle) {
-    throw new Error('Encrypted backend auth requires WebCrypto. Use the packaged app, localhost, HTTPS, or a browser with WebCrypto support.')
+    throw new Error(getLocale().errorWebCryptoRequired)
   }
   const cached = derivedKeyCache.get(sharedSecret)
   if (cached) return cached

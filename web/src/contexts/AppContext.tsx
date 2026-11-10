@@ -6,7 +6,7 @@ import { screenModel, setGlassesFontWidthPercent } from '../controller/model'
 import type { AppInput, AppState, ScreenModel } from '../controller/model'
 import { FixtureTelegramApi, bindFixtureApi, bindFixtureCommandHandler, setFixtureLocale } from '../fixtureApi'
 import { InstrumentedTelegramApi } from '../instrumentedApi'
-import { localeFromCode, setLocale } from '../locales'
+import { getLocale, localeFromCode, setLocale } from '../locales'
 import { PersistentCache, cacheAccountStamp } from '../cache/persistentCache'
 import { warmSharedSecretKey } from '../secureAuth'
 
@@ -47,7 +47,7 @@ const fallbackBridge: GlassesBridge = {
 
 export function AppProvider({ children }: { children: ReactNode }) {
   const [settings, setSettings] = useState(loadFrontendConfig)
-  const [state, setState] = useState<AppState>({ screen: 'loading', message: 'Starting...' })
+  const [state, setState] = useState<AppState>(() => ({ screen: 'loading', message: getLocale().errorStarting }))
   const [startupError, setStartupError] = useState<string | null>(null)
   const [localeVersion, setLocaleVersion] = useState(0)
   const settingsRef = useRef(settings)
@@ -95,11 +95,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         }
         const baseApi: TelegramApi = fixtureMode
           ? new FixtureTelegramApi()
-          : new HttpTelegramApi(
-              restoredSettings.apiBaseUrl,
-              () => settingsRef.current,
-              () => controllerRef.current?.isInputQuiet() ?? false,
-            )
+          // Updates are delivered straight away; the controller is the one place that defers work during input.
+          : new HttpTelegramApi(restoredSettings.apiBaseUrl, () => settingsRef.current)
         if (fixtureMode) bindFixtureApi(baseApi as FixtureTelegramApi)
         const api = new InstrumentedTelegramApi(baseApi)
         apiRef.current = api
@@ -216,7 +213,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         await createdController.init()
         if (fixtureMode) startUpdates()
       } catch (error) {
-        if (active) setStartupError(error instanceof Error ? error.message : 'Startup failed')
+        if (active) setStartupError(error instanceof Error ? error.message : getLocale().errorStartupFailed)
       }
     }
 

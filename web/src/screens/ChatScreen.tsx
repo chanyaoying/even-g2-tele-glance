@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { useApp } from '../contexts/AppContext'
 import { getLocale } from '../locales'
+import { localizeStatus } from '../controller/model'
 import type { Message, MessagePoll } from '../types'
 
 // The phone view shows the latest messages only: a long thread loaded for glasses scrolling would otherwise
@@ -194,7 +195,7 @@ function PhoneStateView() {
           <h2>{state.topic ? state.topic.title : state.chat.title}</h2>
           <p>{state.topic ? state.chat.title : l.phoneCurrentThread}</p>
         </div>
-        {state.status && <span className="status-pill">{state.status}</span>}
+        {state.status && <span className="status-pill">{localizeStatus(state.status)}</span>}
       </div>
     )
   }
@@ -232,7 +233,7 @@ function PhoneStateView() {
   return (
     <div className="stack">
       <h2>{l.phoneErrorHeading}</h2>
-      <p>{state.message}</p>
+      <p>{localizeStatus(state.message)}</p>
       <button type="button" onClick={() => void dispatch({ type: 'press' })}>{l.phoneRetry}</button>
     </div>
   )

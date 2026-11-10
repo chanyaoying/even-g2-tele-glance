@@ -1,6 +1,10 @@
 import { isTeleGlanceFixtureMode } from '../testMode'
 import type { Chat, Id, Message, Topic } from '../types'
 import { getLocale } from '../locales'
+import {
+  BACKEND_AUTH_REJECTED_MESSAGE, BACKEND_BUSY_MESSAGE, BACKEND_TIMEOUT_MESSAGE, BACKEND_UNREACHABLE_MESSAGE, OFFLINE_STATUS,
+  SESSION_EXPIRED_MESSAGE, TELEGRAM_BUSY_MESSAGE,
+} from '../api'
 import { GLASSES_DEFAULT_GLYPH_WIDTH, GLASSES_GLYPH_WIDTHS, GLASSES_ROW_PITCH_PX } from '../glassesFont'
 
 const TEXT_CONTAINER_BYTE_LIMIT = 999
@@ -409,7 +413,7 @@ export function screenModel(state: AppState): ScreenModel {
       return {
         kind: 'text',
         title: l.titleSendingReply,
-        body: sanitizeGlassesText(`Sending...\n\n${state.transcript}`),
+        body: sanitizeGlassesText(`${l.bodySending}\n\n${state.transcript}`),
       }
     case 'sidebarSent': {
       const msg = formatMessages(state.messages, state.scrollOffset ?? 0)
@@ -433,7 +437,7 @@ export function screenModel(state: AppState): ScreenModel {
       return {
         kind: 'text',
         title: l.titleError,
-        body: `${state.message}\n\n${l.bodyPressToRetry}`,
+        body: `${localizeStatus(state.message)}\n\n${l.bodyPressToRetry}`,
       }
   }
 }
@@ -512,9 +516,16 @@ function loadingMessageBody(status: string | undefined) {
  */
 export function localizeStatus(status: string): string {
   const l = getLocale()
-  return {
+  const known = {
     [UPDATING_STATUS]: l.statusUpdating,
     [DIDNT_CATCH_STATUS]: l.statusDidntCatch,
+    [OFFLINE_STATUS]: l.statusOffline,
+    [BACKEND_AUTH_REJECTED_MESSAGE]: l.statusAuthRejected,
+    [BACKEND_UNREACHABLE_MESSAGE]: l.statusNoConnection,
+    [BACKEND_TIMEOUT_MESSAGE]: l.statusServerSlow,
+    [BACKEND_BUSY_MESSAGE]: l.statusServerBusy,
+    [TELEGRAM_BUSY_MESSAGE]: l.statusTelegramBusy,
+    [SESSION_EXPIRED_MESSAGE]: l.statusSignedOut,
     'Send failed': l.statusSendFailed,
     'Transcription failed': l.statusTranscriptionFailed,
     'Could not open folder': l.statusCouldNotOpenFolder,
@@ -525,7 +536,14 @@ export function localizeStatus(status: string): string {
     'New reply': l.statusNewReply,
     'Loading older messages...': l.statusLoadingOlderMessages,
     'Loading messages...': l.statusLoadingMessages,
-  }[status] ?? status
+  }[status]
+  if (known !== undefined) return known
+  // "Loading <chat> topics..." / "Loading <thread>..." carry a chat or topic name.
+  const topics = /^Loading (.+) topics\.\.\.$/.exec(status)
+  if (topics) return l.statusLoadingTopics.replace('{name}', topics[1])
+  const thread = /^Loading (.+)\.\.\.$/.exec(status)
+  if (thread) return l.statusLoadingThread.replace('{name}', thread[1])
+  return status
 }
 function formatMessages(messages: Message[], scrollOffset = 0) {
   const l = getLocale()
@@ -838,12 +856,10 @@ function pollRows(poll: NonNullable<Message['poll']>, room: number): string[] {
     const clipped = clipToRow(label, room, glassesTextWidthPx(`  ${mark} ${suffix}`))
     return `  ${mark} ${clipped}${suffix}`
   })
-  if (shown.length < poll.options.length) rows.push(`  +${poll.options.length - shown.length} more`)
+  if (shown.length < poll.options.length) rows.push(`  ${getLocale().pollMoreOptions.replace('{n}', String(poll.options.length - shown.length))}`)
   return [...rows, ...footer]
 }
 
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
 function parseSentAt(sentAt: string | null | undefined): Date | undefined {
   // Fixture runs (simulator goldens) must not depend on the machine's timezone or clock.
@@ -870,9 +886,13 @@ export function formatDayLabel(sentAt: string | null | undefined, now: Date = ne
   if (!date) return ''
   const startOf = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
   const days = Math.round((startOf(now) - startOf(date)) / 86_400_000)
-  if (days === 0) return 'Today'
-  if (days === 1) return 'Yesterday'
-  const label = `${WEEKDAYS[date.getDay()]} ${date.getDate()} ${MONTHS[date.getMonth()]}`
+  const l = getLocale()
+  if (days === 0) return l.dayToday
+  if (days === 1) return l.dayYesterday
+  // Locale strings, not Intl: the glasses font is Latin-only, so ja/ko/zh need romanised names.
+  const weekday = l.dateWeekdays.split(' ')[date.getDay()] ?? ''
+  const month = l.dateMonths.split(' ')[date.getMonth()] ?? ''
+  const label = l.dateDayLabel.replace('{weekday}', weekday).replace('{day}', String(date.getDate())).replace('{month}', month)
   return date.getFullYear() === now.getFullYear() ? label : `${label} ${date.getFullYear()}`
 }
 
