@@ -6,6 +6,7 @@ import json
 import logging
 import logging.handlers
 import os
+from queue import SimpleQueue
 import time
 from typing import Optional
 
@@ -66,7 +67,10 @@ timing_logger = logging.getLogger("uvicorn.error")
 
 
 def _debug_file_logger() -> Optional[logging.Logger]:
-    """Append every phone debug event to a rotating JSONL file (DEBUG_LOG_PATH; unset or unwritable = off)."""
+    """Append every phone debug event to a rotating JSONL file (DEBUG_LOG_PATH; unset or unwritable = off).
+
+    Writes happen on a background thread (QueueHandler/QueueListener) so a slow disk never blocks requests.
+    """
     path = os.environ.get("DEBUG_LOG_PATH", "").strip()
     if not path:
         return None
@@ -76,11 +80,57 @@ def _debug_file_logger() -> Optional[logging.Logger]:
     except OSError:
         return None
     handler.setFormatter(logging.Formatter("%(message)s"))
+    global _debug_listener
+    _stop_debug_listener()
+    queue: "SimpleQueue[logging.LogRecord]" = SimpleQueue()
+    _debug_listener = logging.handlers.QueueListener(queue, handler)
+    _debug_listener.start()
     logger = logging.getLogger("teleglance.debug-events")
     logger.setLevel(logging.INFO)
     logger.propagate = False
-    logger.handlers = [handler]
+    logger.handlers = [logging.handlers.QueueHandler(queue)]
     return logger
+
+
+_debug_listener: Optional[logging.handlers.QueueListener] = None
+
+
+def _stop_debug_listener() -> None:
+    """Flush queued debug lines to the file and stop the writer thread."""
+    global _debug_listener
+    listener, _debug_listener = _debug_listener, None
+    if listener is not None:
+        listener.stop()
+# A debug event's `raw` / `mapped` larger than this (serialised) is replaced by a size marker.
+DEBUG_FIELD_MAX_BYTES = 4096
+DEBUG_NOTE_MAX_CHARS = 200
+# String values under these keys can carry chat names or message text; diagnostics never need them.
+_DEBUG_REDACTED_KEYS = {"text", "caption", "title", "body", "content", "transcript", "sender", "username", "firstname", "lastname", "phone", "code", "password", "session"}
+
+
+def _redact_debug_value(value: object, depth: int = 0) -> object:
+    if depth > 8:
+        return "[nested]"
+    if isinstance(value, dict):
+        redacted = {}
+        for key, item in value.items():
+            lowered = str(key).lower()
+            if isinstance(item, str) and (lowered in _DEBUG_REDACTED_KEYS or lowered.endswith("itemname")):
+                redacted[key] = f"[redacted {len(item)} chars]"
+            else:
+                redacted[key] = _redact_debug_value(item, depth + 1)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_debug_value(item, depth + 1) for item in value]
+    return value
+
+
+def _bounded_debug_value(value: object) -> object:
+    value = _redact_debug_value(value)
+    size = len(json.dumps(value, default=str, separators=(",", ":")))
+    if size > DEBUG_FIELD_MAX_BYTES:
+        return {"truncated": True, "bytes": size}
+    return value
 
 
 def raise_telegram_http_error(exc: Exception) -> None:
@@ -112,6 +162,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             except asyncio.CancelledError:
                 pass
             await close_all_telegram_services()
+            _stop_debug_listener()
 
     api = FastAPI(title="TeleGlance Backend", lifespan=lifespan)
     debug_events: deque[dict] = deque(maxlen=100)
@@ -198,8 +249,15 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     async def append_debug_event(payload: DebugEvent) -> dict[str, int]:
         event = payload.model_dump(mode="json")
         mapped = event.get("mapped") or {}
-        if mapped.get("type") == "audioChunk":
+        if isinstance(mapped, dict) and mapped.get("type") == "audioChunk":
             return {"count": len(debug_events)}
+        event["raw"] = _bounded_debug_value(event.get("raw"))
+        event["mapped"] = _bounded_debug_value(event.get("mapped"))
+        if event.get("note"):
+            event["note"] = str(event["note"])[:DEBUG_NOTE_MAX_CHARS]
+        for key in ("source", "build_version"):
+            if isinstance(event.get(key), str):
+                event[key] = event[key][:DEBUG_NOTE_MAX_CHARS]
         event["received_at"] = datetime.now(timezone.utc).isoformat()
         if event.get("note"):
             # Timing notes from the phone (picture transfer, page rebuild) also go to the log for easy reading.

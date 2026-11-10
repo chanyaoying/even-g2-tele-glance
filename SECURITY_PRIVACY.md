@@ -202,13 +202,23 @@ frontend and stores up to 100 events in an in-memory deque.
 
 - `audioChunk` events are accepted but discarded to avoid buffering
   audio.
-- Other events are stored verbatim minus a `received_at` timestamp.
-- The frontend can include `currentSelectItemName`, message sender
-  names, and any other text it can observe from the active screen. This
-  is opt-in via the Settings "Debug event logging" checkbox and is
-  **off by default**.
-- The endpoint is in-memory only — restart of the backend erases the
-  log. There is no remote logging service.
+- Before storing, string values under text-like keys (`text`, `caption`,
+  `title`, `body`, `content`, `transcript`, `sender`, `*itemName`, ...)
+  are replaced by `[redacted N chars]`, `raw` and `mapped` larger than
+  4 KB (serialised) are replaced by `{"truncated": true, "bytes": N}`,
+  and `note` is cut to 200 characters. Request bodies are capped at 64 KB
+  anyway (section 10).
+- The phone only sends events when the Settings "Debug events" toggle is
+  on (**off by default**).
+- In memory the endpoint keeps the last 100 events; a restart erases
+  them. When `DEBUG_LOG_PATH` is set, every event is also appended (on a
+  background thread) to a rotating JSONL file (5 MB x 4). The code
+  default is off; `docker-compose.yml` sets it to
+  `/logs/debug-events.jsonl` (host `./logs`) for hardware testing. Remove
+  that line to keep no debug file at all, and keep the host `logs/`
+  directory private (`chmod 700 logs`), since the redaction is a
+  best-effort key filter, not a guarantee. There is no remote logging
+  service.
 
 The user-facing Settings hint discloses the risk: *"When enabled, raw
 glasses input events are sent to the backend debug endpoint and may
@@ -216,30 +226,48 @@ include message or gesture context."*
 
 ## 9. Backend error responses
 
-All `TelegramServiceError` instances are constructed in
-`server/app/services/telegram.py` with a fixed, user-friendly string
-(no PII). The `wrap_telegram_error` helper falls back to
-`str(exc) or exc.__class__.__name__` for unknown errors.
+Clients never see raw exception text. `wrap_telegram_error`
+(`server/app/services/telegram.py`) maps Telegram failures to fixed
+strings:
 
-For Telethon's `RPCError` subclasses, `_fmt_request` only embeds the
-**class name** of the request (e.g. `RequestSendCodeRequest`), not
-field values. So:
+- a short allowlist of errors the user can act on keeps a specific
+  message (`PeerIdInvalidError` → `Chat not found.`,
+  `PhoneCodeInvalidError` → `Verification code is incorrect.`,
+  `ChatWriteForbiddenError` → `You cannot send messages in this chat.`, ...);
+- FloodWait/SlowMode → 429 with `Retry-After`; auth-key/session-revoked
+  errors → 401; timeouts → 504; connection failures → 503 with
+  `Retry-After: 5` (`Could not reach Telegram. Please retry.`);
+- everything else → 400 `Telegram request failed. Please retry.`, with
+  the real error logged server-side only.
 
-- `PhoneNumberInvalidError` → `"The phone number is invalid (caused
-  by RequestSendCodeRequest)"` — **does not leak the phone number**.
-- `PhoneCodeInvalidError` → `"The phone code entered was invalid
-  (caused by ...)"` — **does not leak the code**.
-- `FloodWaitError` → `"A wait of N seconds is required (caused by
-  ...)"` — does not leak anything sensitive.
-- `AuthKeyDuplicatedError` → the literal string mentions "two
-  different IP addresses" but does not include the IPs.
-- `SessionRevokedError`, `SessionPasswordNeededError`, etc. — fixed
-  strings, no PII.
+`/api/transcribe` answers `transcription failed` (500) for unexpected
+errors and never embeds the exception; WAV and image decode errors do
+not carry library text either.
 
-The CORS preflight responses do not echo request headers; the
-debug event store does not include raw request headers either.
+The CORS preflight mirrors the requested headers (`allow_headers=["*"]`);
+the debug event store does not include raw request headers.
 
-## 10. Telethon logging filter
+## 10. Request limits and resource bounds
+
+- Every POST/PUT/PATCH body is size-checked by an ASGI middleware before
+  anything reads or parses it: `REQUEST_MAX_JSON_BYTES` (64 KB) for JSON
+  envelopes, `TRANSCRIBE_MAX_UPLOAD_BYTES` + 512 KB for the
+  `/api/transcribe` multipart upload. A larger declared `Content-Length`
+  or streamed body gets 413 `Request body is too large`.
+- `/api/transcribe` validates `X-TeleGlance-Auth` in that middleware,
+  before the multipart form is parsed (FastAPI parses forms before route
+  dependencies run).
+- At most `TRANSCRIBE_MAX_CONCURRENT` (2) recordings are transcribed at
+  once; a request that waits 30 s for a slot gets 503 with `Retry-After`.
+  Recordings over `TRANSCRIBE_MAX_SECONDS` (120) are refused.
+- Pictures over 16 megapixels are refused before decoding (decompression
+  bombs), and oversized static stickers are refused before download.
+- The per-session Telegram service cache holds at most 32 sessions;
+  services idle for 30 minutes without an open update stream are
+  disconnected, as are expired sessions and abandoned phone logins. Logout
+  removes the service; shutdown disconnects all of them.
+
+## 11. Telethon logging filter
 
 Telethon's `logging` module is verbose. `GetDifferenceRequest`-class
 calls fire constantly after login and log "Account is not logged in"
@@ -247,7 +275,7 @@ on dead sessions. The app's process should silence the `telethon`
 logger to `WARNING` or higher to avoid leaking session state into
 backend logs. (Already noted in `AGENTS.md` observed issues.)
 
-## 11. Pre-push checklist (use before `git push`)
+## 12. Pre-push checklist (use before `git push`)
 
 1. `git status --short --ignored` and review every line.
 2. `git diff --stat` against `main` and grep the diff for:
@@ -271,7 +299,7 @@ backend logs. (Already noted in `AGENTS.md` observed issues.)
    URLs.
 9. Delete the vestigial `server/server/` directory if it still exists.
 
-## 12. Open issues (deferred to SECURITY_PRIVACY_FUTURE.md)
+## 13. Open issues (deferred to SECURITY_PRIVACY_FUTURE.md)
 
 - Backend `.env` ships with `my-secret-token` as a placeholder; the
   user should generate a real random secret before any non-local use.
