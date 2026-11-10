@@ -64,15 +64,30 @@ describe('ThreadStore', () => {
     expect(putThread).toHaveBeenCalledTimes(1)
   })
 
-  it('opens stored pages only for threads with nothing unread, and never throws on storage trouble', async () => {
+  it('opens stored pages (an unread thread\'s only for display, never as its latest page), and never throws on storage trouble', async () => {
     const getThread = vi.fn(async () => ({ messages: [msg(4), msg(5)] }))
     const store = new ThreadStore({ putThread: () => undefined, getThread })
-    expect(await store.loadStoredPage({ chat: chat(1, 2) })).toBeUndefined()
-    expect(getThread).not.toHaveBeenCalled()
+    // A thread with unread messages: the stored page is shown while the fresh one loads, but it is stale, so it
+    // never becomes the remembered latest page (opening it again must not plan the unread divider on it).
+    expect(await store.loadStoredPage({ chat: chat(1, 2) })).toEqual({ messages: [msg(4), msg(5)], cursor: 4 })
+    expect(store.page({ chat: chat(1, 2) })).toBeUndefined()
     expect(await store.loadStoredPage({ chat: chat(1) })).toEqual({ messages: [msg(4), msg(5)], cursor: 4 })
     expect(store.page({ chat: chat(1) })?.cursor).toBe(4)
     const broken = new ThreadStore({ putThread: () => undefined, getThread: async () => { throw new Error('io') } })
     expect(await broken.loadStoredPage({ chat: chat(1) })).toBeUndefined()
+  })
+
+  it('writes topic lists through to the phone cache and reads stored ones back', async () => {
+    const topicList: Topic[] = [{ id: 7, title: 'General' }]
+    const putTopics = vi.fn()
+    const getTopics = vi.fn(async () => topicList)
+    const store = new ThreadStore({ putThread: () => undefined, getThread: async () => undefined, putTopics, getTopics })
+    store.putTopics(3, topicList)
+    expect(putTopics).toHaveBeenCalledWith('3', topicList)
+    expect(await store.loadStoredTopics(9)).toEqual(topicList)
+    expect(getTopics).toHaveBeenCalledWith('9')
+    const broken = new ThreadStore({ putThread: () => undefined, getThread: async () => undefined, getTopics: async () => { throw new Error('io') } })
+    expect(await broken.loadStoredTopics(9)).toBeUndefined()
   })
 
   it('flags the first unread message (skipping my own) and remembers it for refreshed pages', () => {

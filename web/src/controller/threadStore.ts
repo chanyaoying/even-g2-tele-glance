@@ -31,7 +31,7 @@ export class ThreadStore {
   private readonly readAckMaxIds: LruMap<string, Id>
 
   constructor(
-    private readonly persistent?: Pick<PersistentCache, 'getThread' | 'putThread'>,
+    private readonly persistent?: Pick<PersistentCache, 'getThread' | 'putThread'> & Partial<Pick<PersistentCache, 'getTopics' | 'putTopics'>>,
     limit = THREAD_CACHE_LIMIT,
   ) {
     this.pages = new LruMap(limit)
@@ -59,17 +59,18 @@ export class ThreadStore {
   }
 
   /**
-   * The last stored page of a thread, for opening it instantly while a fresh page is fetched. Only used for
-   * threads with nothing unread: the "last read" divider depends on the unread count, which a stale page
-   * cannot place correctly. Never throws; storage trouble just means a fetch.
+   * The last stored page of a thread, for opening it instantly while a fresh page is fetched. For a thread with
+   * unread messages the stored page is stale by definition (the unread ones are missing), so it is only returned
+   * for display and never becomes the remembered latest page: the "last read" divider is placed on the fresh
+   * page once it arrives. Never throws; storage trouble just means a fetch.
    */
   async loadStoredPage(ref: ThreadRef): Promise<ThreadEntry | undefined> {
-    if (!this.persistent || (ref.topic ?? ref.chat).unreadCount) return undefined
+    if (!this.persistent) return undefined
     const key = messageThreadKey(ref)
     const stored = await this.persistent.getThread(key).catch(() => undefined)
     if (!stored || stored.messages.length === 0) return undefined
     const entry = { messages: stored.messages, cursor: stored.cursor ?? oldestMessageId(stored.messages) }
-    this.pages.set(key, entry)
+    if (!(ref.topic ?? ref.chat).unreadCount) this.pages.set(key, entry)
     return entry
   }
 
@@ -77,8 +78,17 @@ export class ThreadStore {
     return this.topicLists.get(String(chatId))
   }
 
+  /** Remember a forum chat's topic list, and store it on the phone so the chat opens offline next time. */
   putTopics(chatId: Id, topics: Topic[]) {
     this.topicLists.set(String(chatId), topics)
+    this.persistent?.putTopics?.(String(chatId), topics)
+  }
+
+  /** The topic list stored by an earlier session (not remembered in memory: it may be stale). Never throws. */
+  async loadStoredTopics(chatId: Id): Promise<Topic[] | undefined> {
+    if (!this.persistent?.getTopics) return undefined
+    const stored = await this.persistent.getTopics(String(chatId)).catch(() => undefined)
+    return stored && stored.length > 0 ? stored : undefined
   }
 
   /**

@@ -73,6 +73,32 @@ describe('HttpTelegramApi resilience', () => {
     expect(fetchStub).toHaveBeenCalledTimes(4)
   })
 
+  it('does not let slow or failing picture downloads back off the chat list', async () => {
+    vi.useFakeTimers()
+    const fetchStub = vi.fn(async (url: string) => (String(url).includes('/photo')
+      ? jsonResponse({ detail: 'timed out' }, 504)
+      : jsonResponse([])))
+    vi.stubGlobal('fetch', fetchStub)
+    const api = makeApi()
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await expect(api.getPhoto('1', String(attempt))).rejects.toThrow()
+    }
+    await expect(api.listChats(20)).resolves.toEqual([])
+  })
+
+  it('does not let a picture download that answers "busy, retry later" block the chat list', async () => {
+    vi.useFakeTimers()
+    const fetchStub = vi.fn(async (url: string) => (String(url).includes('/photo')
+      ? new Response(JSON.stringify({ detail: 'busy' }), { status: 503, headers: { 'Content-Type': 'application/json', 'Retry-After': '30' } })
+      : jsonResponse([])))
+    vi.stubGlobal('fetch', fetchStub)
+    const api = makeApi()
+
+    await expect(api.getPhoto('1', '2')).rejects.toThrow()
+    await expect(api.listChats(20)).resolves.toEqual([])
+  })
+
   it('never blocks sign-in requests while backed off', async () => {
     vi.useFakeTimers()
     const fetchStub = vi.fn(async () => jsonResponse({ detail: 'timed out' }, 504))

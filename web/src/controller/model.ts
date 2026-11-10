@@ -147,7 +147,9 @@ export type AppState =
       chat: Chat; topics: Topic[]; selectedTopicIndex: number;
       previewTopic?: Topic; previewMessages?: Message[];
       previewCursor?: Id; previewScrollOffset?: number;
-      previewNewerPages?: Message[][]; previewIsNewestPage?: boolean; }
+      previewNewerPages?: Message[][]; previewIsNewestPage?: boolean;
+      /** Set while the topic list shown is a stored one that could not be refreshed (for example `Offline`). */
+      status?: string; }
   | { screen: 'sidebarRecording'; focus: 'messages';
       chats: Chat[]; selectedChatIndex: number;
       chat: Chat; topic?: Topic;
@@ -301,7 +303,9 @@ export function screenModel(state: AppState): ScreenModel {
             // The footer is the primary signal. "TAP TO OPEN" is
             // unambiguous and the previous "Swipe topics" wording
             // was being misread as "the right side scrolls".
-            panelFooter: previewLoaded ? l.footerTapToOpenTopic : l.statusLoadingMessages,
+            panelFooter: state.status
+              ? footerText(state.status, previewLoaded ? l.footerTapToOpenTopic : l.statusLoadingMessages)
+              : previewLoaded ? l.footerTapToOpenTopic : l.statusLoadingMessages,
             panelBox: msg?.box,
             focus: 'sidebar',
           }

@@ -153,6 +153,62 @@ describe('PersistentCache', () => {
     expect(await cache.getChats()).toBeUndefined()
   })
 
+  describe('forum topic lists', () => {
+    const topicList = (count: number, label = 'Topic') => Array.from({ length: count }, (_, i) => ({ id: String(i + 1), title: `${label} ${i + 1}` }))
+
+    it('stores a topic list and reads it back after reopening, counted in the budget', async () => {
+      const { cache, storage } = await opened()
+      cache.putTopics('5', topicList(3))
+      await cache.flush()
+      expect(cache.stats().bytes).toBeGreaterThan(0)
+
+      const again = new PersistentCache(storage, { flushDelayMs: 1, now: () => 1_000 })
+      await again.open('acct')
+      expect((await again.getTopics('5'))?.map((t) => t.title)).toEqual(['Topic 1', 'Topic 2', 'Topic 3'])
+      expect(await again.getTopics('6')).toBeUndefined()
+    })
+
+    it('forgets topic lists on clear(), on another account and after the maximum age', async () => {
+      const { cache, storage } = await opened(undefined, { maxAgeMs: 10_000 })
+      cache.putTopics('5', topicList(2))
+      await cache.flush()
+
+      const later = new PersistentCache(storage, { flushDelayMs: 1, maxAgeMs: 10_000, now: () => 1_000 + 20_000 })
+      await later.open('acct')
+      expect(await later.getTopics('5')).toBeUndefined()
+
+      const fresh = await opened(fakeStorage())
+      fresh.cache.putTopics('5', topicList(2))
+      await fresh.cache.flush()
+      const other = new PersistentCache(fresh.storage, { flushDelayMs: 1, now: () => 1_000 })
+      await other.open('someone-else')
+      expect(await other.getTopics('5')).toBeUndefined()
+      expect(fresh.storage.data.size).toBe(0)
+
+      const cleared = await opened(fakeStorage())
+      cleared.cache.putTopics('5', topicList(2))
+      await cleared.cache.flush()
+      await cleared.cache.clear()
+      expect(cleared.storage.data.size).toBe(0)
+    })
+
+    it('evicts the least recently used topic lists and threads together to stay in budget', async () => {
+      const { cache, tick } = await opened(undefined, { budgetBytes: 1_800 })
+      cache.putTopics('old', topicList(8, 'a'.repeat(60)))
+      await cache.flush()
+      tick(10)
+      cache.putThread('mid', { messages: messages(8, 'b'.repeat(40)) })
+      await cache.flush()
+      tick(10)
+      cache.putTopics('new', topicList(8, 'c'.repeat(60)))
+      await cache.flush()
+
+      expect(await cache.getTopics('old')).toBeUndefined()
+      expect(await cache.getTopics('new')).toBeDefined()
+      expect(cache.stats().bytes).toBeLessThanOrEqual(1_800)
+    })
+  })
+
   it('waits while the user is interacting before writing', async () => {
     let quiet = false
     const storage = fakeStorage()

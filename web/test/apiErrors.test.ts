@@ -32,6 +32,11 @@ describe('per-call request timeouts', () => {
     expect(requestTimeoutMs('/api/chats/5/messages', 'GET')).toBe(15_000)
     expect(requestTimeoutMs('/api/chats')).toBe(15_000)
   })
+
+  it('gives picture downloads their own longer budget (the backend can take over 30 s for one)', () => {
+    expect(requestTimeoutMs('/api/chats/-100123/messages/42/photo')).toBe(45_000)
+    expect(requestTimeoutMs('/api/chats/5/messages?limit=8')).toBe(15_000)
+  })
 })
 
 describe('HttpTelegramApi errors', () => {

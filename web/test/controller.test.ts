@@ -4,7 +4,7 @@ import type { TelegramApi } from '../src/api'
 import { ApiError, BACKEND_AUTH_REJECTED_MESSAGE, BACKEND_TIMEOUT_MESSAGE, BACKEND_UNREACHABLE_MESSAGE, OFFLINE_STATUS, SESSION_EXPIRED_MESSAGE } from '../src/api'
 import { MAX_RECORDING_BYTES } from '../src/audio/wav'
 import type { Chat, Folder, Message, Topic, TranscriptionResult } from '../src/types'
-import { screenModel } from '../src/controller/model'
+import { anchorMessageId, screenModel, UPDATING_STATUS } from '../src/controller/model'
 import type { AppState, ScreenModel } from '../src/controller/model'
 import { PersistentCache } from '../src/cache/persistentCache'
 
@@ -2530,7 +2530,7 @@ describe('on-phone cache and live updates', () => {
     expect((controller.snapshot as Extract<AppState, { focus: 'messages' }>).messages.map((m) => m.text)).toContain('fresh text')
   })
 
-  it('does not open an unread thread from a stale stored page', async () => {
+  it('ends up on the live page (not the stale stored one) for an unread thread', async () => {
     const unread: Chat[] = [{ id: '1', title: 'Alice', kind: 'user', unreadCount: 3 }, chats[1]]
     const { cache } = await seededCache(undefined, (c) => c.putThread('1:', { messages: [{ id: '50', sender: 'Alice', text: 'stale' }] }))
     const api = fakeApi({ authorized: true, chats: unread, latestMessages: [{ id: '60', sender: 'Alice', text: 'live' }] })
@@ -2538,6 +2538,7 @@ describe('on-phone cache and live updates', () => {
 
     await controller.init()
     await controller.dispatch({ type: 'press' })
+    await flushAsync()
     await flushAsync()
     const shown = (controller.snapshot as Extract<AppState, { focus: 'messages' }>).messages.map((m) => m.text)
     expect(shown).toContain('live')
@@ -2811,5 +2812,298 @@ describe('failures, session expiry and polling', () => {
     await first
     await flushAsync()
     expect(listChats.mock.calls.length).toBe(before + 2)
+  })
+})
+
+describe('offline-first: stored data stays usable while the network is slow', () => {
+  function memoryStorage() {
+    const data = new Map<string, string>()
+    return {
+      data,
+      getLocalStorage: async (key: string) => data.get(key) ?? '',
+      setLocalStorage: async (key: string, value: string) => {
+        if (value === '') data.delete(key)
+        else data.set(key, value)
+        return true
+      },
+    }
+  }
+
+  async function seededCache(seed: (cache: PersistentCache) => void) {
+    const storage = memoryStorage()
+    const writer = new PersistentCache(storage, { flushDelayMs: 1 })
+    await writer.open('acct')
+    seed(writer)
+    await writer.flush()
+    const cache = new PersistentCache(storage, { flushDelayMs: 1 })
+    await cache.open('acct')
+    return cache
+  }
+
+  const unreachable = () => new ApiError(BACKEND_UNREACHABLE_MESSAGE, 'Backend is not reachable.')
+  const sessionExpired = () => new ApiError(SESSION_EXPIRED_MESSAGE, 'Telegram session has expired.', 401, undefined, 'sessionExpired')
+  const messagesState = (controller: TelegramAppController) => controller.snapshot as Extract<AppState, { screen: 'sidebar'; focus: 'messages' }>
+  const longText = (n: number) => `message number ${n} ` + 'with quite a lot of words in it so that it wraps over several rows '.repeat(2)
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('keeps the user in a thread opened from the stored list when the network chat list arrives; back shows the fresh list', async () => {
+    const cache = await seededCache((c) => {
+      c.putChats([{ id: '7', title: 'Stored Zed', kind: 'user' }, { id: '1', title: 'Stored Alice', kind: 'user' }])
+      c.putThread('1:', { messages: [{ id: '50', sender: 'Alice', text: 'stored text' }] })
+    })
+    const gate = deferred<{ authorized: boolean }>()
+    const api = fakeApi({ authorized: true })
+    vi.mocked(api.authStatus).mockImplementation(() => gate.promise)
+    const controller = new TelegramAppController(api, fakeBridge(), 0, undefined, () => true, cache)
+
+    const starting = controller.init()
+    await flushAsync()
+    // Input works on the stored list while the session check is still running.
+    await controller.dispatch({ type: 'swipeDown' })
+    expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'chats', selectedChatIndex: 1 })
+    await controller.dispatch({ type: 'press' })
+    await flushAsync()
+    expect(messagesState(controller)).toMatchObject({ screen: 'sidebar', focus: 'messages', chat: { id: '1' } })
+
+    gate.resolve({ authorized: true })
+    await starting
+    await flushAsync()
+    expect(messagesState(controller)).toMatchObject({ screen: 'sidebar', focus: 'messages', chat: { id: '1' } })
+
+    await controller.dispatch({ type: 'doublePress' })
+    const back = controller.snapshot as Extract<AppState, { focus: 'chats' }>
+    expect(back).toMatchObject({ screen: 'sidebar', focus: 'chats' })
+    expect(back.chats.map((chat) => chat.title)).toEqual(['Alice', 'Project'])
+    expect(back.chats[back.selectedChatIndex].id).toBe('1') // still on the chat the user came from
+    controller.dispose()
+  })
+
+  it('going offline at startup does not move a user who is reading a stored thread; the retry applies the list silently', async () => {
+    vi.useFakeTimers()
+    const cache = await seededCache((c) => {
+      c.putChats([{ id: '1', title: 'Stored Alice', kind: 'user' }])
+      c.putThread('1:', { messages: [{ id: '50', sender: 'Alice', text: 'stored text' }] })
+    })
+    const gate = deferred<{ authorized: boolean }>()
+    const api = fakeApi({ authorized: true })
+    vi.mocked(api.authStatus).mockImplementationOnce(() => gate.promise)
+    vi.mocked(api.listMessages).mockRejectedValueOnce(unreachable())
+    const controller = new TelegramAppController(api, fakeBridge(), 0, undefined, () => true, cache)
+
+    const starting = controller.init()
+    await vi.advanceTimersByTimeAsync(5)
+    await controller.dispatch({ type: 'press' })
+    await vi.advanceTimersByTimeAsync(5)
+    gate.reject(unreachable())
+    await starting
+    await vi.advanceTimersByTimeAsync(5)
+    expect(messagesState(controller)).toMatchObject({ screen: 'sidebar', focus: 'messages', status: OFFLINE_STATUS })
+
+    await vi.advanceTimersByTimeAsync(5_100)
+    expect(api.authStatus).toHaveBeenCalledTimes(2)
+    expect(messagesState(controller)).toMatchObject({ screen: 'sidebar', focus: 'messages', chat: { id: '1' } })
+    expect(messagesState(controller).chats.map((chat) => chat.title)).toEqual(['Alice', 'Project'])
+    controller.dispose()
+  })
+
+  it('a failed startup does not replace an error screen the user reached from the stored list (it keeps its way back)', async () => {
+    vi.useFakeTimers()
+    const cache = await seededCache((c) => c.putChats([{ id: '1', title: 'Stored Alice', kind: 'user' }]))
+    const gate = deferred<{ authorized: boolean }>()
+    const api = fakeApi({ authorized: true })
+    vi.mocked(api.authStatus).mockImplementationOnce(() => gate.promise)
+    vi.mocked(api.listMessages).mockRejectedValueOnce(unreachable())
+    const controller = new TelegramAppController(api, fakeBridge(), 0, undefined, () => true, cache)
+
+    const starting = controller.init()
+    await vi.advanceTimersByTimeAsync(5)
+    await controller.dispatch({ type: 'press' }) // nothing stored for this thread: the fetch fails
+    await vi.advanceTimersByTimeAsync(5)
+    expect(controller.snapshot).toMatchObject({ screen: 'error', previous: { screen: 'sidebar', focus: 'chats' } })
+    gate.reject(unreachable())
+    await starting
+    await vi.advanceTimersByTimeAsync(5)
+    expect(controller.snapshot).toMatchObject({ screen: 'error', previous: { screen: 'sidebar', focus: 'chats' } })
+
+    await vi.advanceTimersByTimeAsync(5_100) // the retry loads the list without moving the user
+    expect(controller.snapshot).toMatchObject({ screen: 'error' })
+    await controller.dispatch({ type: 'doublePress' })
+    expect((controller.snapshot as Extract<AppState, { focus: 'chats' }>).chats.map((chat) => chat.title)).toEqual(['Alice', 'Project'])
+    controller.dispose()
+  })
+
+  it('opens an unread thread from its stored page at once, then places the unread divider on the fresh page', async () => {
+    const unreadChats: Chat[] = [{ id: '1', title: 'Alice', kind: 'user', unreadCount: 1 }]
+    const cache = await seededCache((c) => {
+      c.putChats(unreadChats)
+      c.putThread('1:', { messages: [{ id: '50', sender: 'Alice', text: 'old one' }] })
+    })
+    const fresh = deferred<Message[]>()
+    const api = fakeApi({ authorized: true, chats: unreadChats, latestMessages: () => fresh.promise })
+    const controller = new TelegramAppController(api, fakeBridge(), 0, undefined, () => true, cache)
+
+    await controller.init()
+    await controller.dispatch({ type: 'press' })
+    await flushAsync()
+    expect(messagesState(controller)).toMatchObject({ screen: 'sidebar', focus: 'messages', status: UPDATING_STATUS })
+    expect(messagesState(controller).messages.map((m) => m.text)).toEqual(['old one'])
+    flushReadAcks(controller)
+    expect(api.markRead).not.toHaveBeenCalled() // nothing is marked read from the stale page
+
+    fresh.resolve([{ id: '50', sender: 'Alice', text: 'old one' }, { id: '60', sender: 'Alice', text: 'new one' }])
+    await flushAsync()
+    await flushAsync()
+    const opened = messagesState(controller)
+    expect(opened.messages.map((m) => m.text)).toEqual(['old one', 'new one'])
+    expect(opened.messages.find((m) => m.id === '60')?.firstUnread).toBe(true)
+    expect(opened.status).toBeUndefined()
+    flushReadAcks(controller)
+    expect(api.markRead).toHaveBeenCalledWith('1', expect.objectContaining({ maxId: 60 }))
+    controller.dispose()
+  })
+
+  it('keeps the place of a user who scrolled up in the stale page when the fresh page arrives', async () => {
+    const unreadChats: Chat[] = [{ id: '1', title: 'Alice', kind: 'user', unreadCount: 1 }]
+    const stored: Message[] = Array.from({ length: 24 }, (_, i) => ({ id: String(100 + i), sender: 'Alice', text: longText(i) }))
+    const cache = await seededCache((c) => {
+      c.putChats(unreadChats)
+      c.putThread('1:', { messages: stored })
+    })
+    const fresh = deferred<Message[]>()
+    const api = fakeApi({ authorized: true, chats: unreadChats, latestMessages: () => fresh.promise })
+    const controller = new TelegramAppController(api, fakeBridge(), 0, undefined, () => true, cache)
+
+    await controller.init()
+    await controller.dispatch({ type: 'press' })
+    await flushAsync()
+    await controller.dispatch({ type: 'swipeUp' })
+    await controller.dispatch({ type: 'swipeUp' })
+    const before = messagesState(controller)
+    expect(before.scrollOffset).toBeGreaterThan(0)
+    const anchor = anchorMessageId(before.messages, before.scrollOffset ?? 0)
+
+    fresh.resolve([...stored.slice(-7), { id: '200', sender: 'Alice', text: 'brand new' }])
+    await flushAsync()
+    await flushAsync()
+    const after = messagesState(controller)
+    expect(after.messages.map((m) => m.text)).toContain('brand new')
+    expect(after.scrollOffset).toBeGreaterThan(0)
+    expect(anchorMessageId(after.messages, after.scrollOffset ?? 0)).toBe(anchor)
+    expect(after.status).not.toBe(UPDATING_STATUS)
+    flushReadAcks(controller)
+    expect(api.markRead).not.toHaveBeenCalled()
+    controller.dispose()
+  })
+
+  it('opens a forum chat from its stored topic list while offline, and refreshes the list when the network answers', async () => {
+    const forum: Chat = { id: '2', title: 'Project', kind: 'group', isForum: true }
+    const cache = await seededCache((c) => {
+      c.putChats([forum])
+      c.putTopics('2', [{ id: '10', title: 'Stored Launch' }, { id: '20', title: 'Stored Support' }])
+    })
+    const api = fakeApi({ authorized: true, chats: [forum] })
+    vi.mocked(api.listTopics).mockRejectedValueOnce(unreachable())
+    const controller = new TelegramAppController(api, fakeBridge(), 0, undefined, () => true, cache)
+
+    await controller.init()
+    await controller.dispatch({ type: 'press' })
+    await flushAsync()
+    await flushAsync()
+    const offline = controller.snapshot as Extract<AppState, { focus: 'topics' }>
+    expect(offline).toMatchObject({ screen: 'sidebar', focus: 'topics', status: OFFLINE_STATUS })
+    expect(offline.topics.map((topic) => topic.title)).toEqual(['Stored Launch', 'Stored Support'])
+    const footer = screenModel(offline)
+    expect(footer.kind === 'sidebar' ? footer.panelFooter : '').toContain('Offline')
+
+    // Back and in again: the network answers this time and the fresh list replaces the stored one.
+    await controller.dispatch({ type: 'doublePress' })
+    await controller.dispatch({ type: 'press' })
+    await flushAsync()
+    await flushAsync()
+    const online = controller.snapshot as Extract<AppState, { focus: 'topics' }>
+    expect(online.topics.map((topic) => topic.title)).toEqual(['Launch', 'Support'])
+    expect(online.status).toBeUndefined()
+    controller.dispose()
+  })
+
+  it('remembers fetched topic lists on the phone', async () => {
+    const forum: Chat = { id: '2', title: 'Project', kind: 'group', isForum: true }
+    const storage = memoryStorage()
+    const cache = new PersistentCache(storage, { flushDelayMs: 1 })
+    await cache.open('acct')
+    const controller = new TelegramAppController(fakeApi({ authorized: true, chats: [forum] }), fakeBridge(), 0, undefined, () => true, cache)
+    await controller.init()
+    await controller.dispatch({ type: 'press' })
+    await flushAsync()
+    await cache.flush()
+    expect((await cache.getTopics('2'))?.map((topic) => topic.title)).toEqual(['Launch', 'Support'])
+    controller.dispose()
+  })
+
+  it('shows Offline (not the error screen) when the background refresh of a stored thread fails, and recovers on the next poll', async () => {
+    const cache = await seededCache((c) => {
+      c.putChats([{ id: '1', title: 'Alice', kind: 'user' }])
+      c.putThread('1:', { messages: [{ id: '50', sender: 'Alice', text: 'stored text' }] })
+    })
+    const api = fakeApi({ authorized: true })
+    const controller = new TelegramAppController(api, fakeBridge(), 0, undefined, () => true, cache)
+    await controller.init()
+    vi.mocked(api.listMessages).mockRejectedValueOnce(unreachable())
+    await controller.dispatch({ type: 'press' })
+    await flushAsync()
+    await flushAsync()
+    expect(messagesState(controller)).toMatchObject({ screen: 'sidebar', focus: 'messages', status: OFFLINE_STATUS })
+    expect(messagesState(controller).messages.map((m) => m.text)).toEqual(['stored text'])
+
+    clearInputQuiet(controller)
+    await refreshVisibleMessages(controller)
+    await flushAsync()
+    expect(messagesState(controller).status).not.toBe(OFFLINE_STATUS)
+    expect(messagesState(controller).messages.map((m) => m.text)).toContain('hello')
+    controller.dispose()
+  })
+
+  it('signs out when the background refresh of a stored thread finds the session expired', async () => {
+    const cache = await seededCache((c) => {
+      c.putChats([{ id: '1', title: 'Alice', kind: 'user' }])
+      c.putThread('1:', { messages: [{ id: '50', sender: 'Alice', text: 'stored text' }] })
+    })
+    const api = fakeApi({ authorized: true })
+    const controller = new TelegramAppController(api, fakeBridge(), 0, undefined, () => true, cache)
+    await controller.init()
+    vi.mocked(api.listMessages).mockRejectedValueOnce(sessionExpired())
+    await controller.dispatch({ type: 'press' })
+    await flushAsync()
+    await flushAsync()
+    expect(controller.snapshot).toMatchObject({ screen: 'auth', mode: 'signedOut' })
+    controller.dispose()
+  })
+
+  it('a picture that fails to load never shows the error screen and is tried again while still on screen', async () => {
+    vi.useFakeTimers()
+    const photoMessages: Message[] = [
+      { id: '90', sender: 'Alice', text: 'hello' },
+      { id: '100', sender: 'Alice', text: '[photo]', media: 'photo', sentAt: '2026-05-29T10:00:00Z' },
+    ]
+    const api = fakeApi({ authorized: true, latestMessages: photoMessages })
+    vi.mocked(api.getPhoto).mockRejectedValue(new ApiError(BACKEND_TIMEOUT_MESSAGE, 'timed out'))
+    const bridge = fakeBridge()
+    const controller = new TelegramAppController(api, bridge)
+
+    await controller.init()
+    await controller.dispatch({ type: 'press' })
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(api.getPhoto).toHaveBeenCalled()
+    expect(bridge.updateImage).not.toHaveBeenCalled()
+    expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'messages' })
+
+    vi.mocked(api.getPhoto).mockResolvedValue({ width: 2, height: 1, data: 'AQID' })
+    await vi.advanceTimersByTimeAsync(6_000)
+    expect(bridge.updateImage).toHaveBeenCalledTimes(1)
+    expect(controller.snapshot).toMatchObject({ screen: 'sidebar', focus: 'messages' })
+    controller.dispose()
   })
 })
