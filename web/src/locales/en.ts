@@ -33,6 +33,16 @@ const en = {
   statusSendFailed: 'Send failed',
   statusTranscriptionFailed: 'Transcription failed',
   statusCouldNotOpenFolder: 'Could not open folder',
+  statusOffline: 'Offline',
+  statusAuthRejected: 'Backend rejected auth',
+  statusNoConnection: 'No connection',
+  statusServerSlow: 'Server slow',
+  statusServerBusy: 'Server busy',
+  statusTelegramBusy: 'Telegram busy',
+  statusSignedOut: 'Signed out',
+  statusFloodWait: 'Telegram asks you to wait {seconds} s',
+  statusLoadingTopics: 'Loading {name} topics...',
+  statusLoadingThread: 'Loading {name}...',
   footerFetchingChats: 'Fetching chats...',
   footerSwipeChats: 'Swipe chats | Press open',
   footerTapToOpenTopic: 'TAP TO OPEN TOPIC',
@@ -40,13 +50,13 @@ const en = {
   footerClickStop: 'Release to stop | Double click cancel',
   footerSwipeSelect: 'Swipe select | Press confirm',
   footerDoubleClickDismiss: 'Double click dismiss',
-  footerLoadingMessages: 'Loading messages...',
   typingSuffix: 'typing\u2026',
   // ── Glasses display: content / labels ──
   bodyNewMessage: 'New message',
   bodyClickToOpen: 'Click to open.',
   bodyPressToRetry: 'Press to retry. Double press back.',
   bodyConvertingVoice: 'Converting voice...',
+  bodySending: 'Sending...',
   confirmSend: 'Send',
   confirmCancel: 'Cancel',
   senderMe: 'Me',
@@ -55,6 +65,13 @@ const en = {
   sanitizeRed: '[red]',
   sanitizeYellow: '[yellow]',
   sanitizeGreen: '[green]',
+  pollMoreOptions: '+{n} more',
+  dayToday: 'Today',
+  dayYesterday: 'Yesterday',
+  // Space-separated short names, Sunday first / January first; dateDayLabel orders them for one day.
+  dateWeekdays: 'Sun Mon Tue Wed Thu Fri Sat',
+  dateMonths: 'Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec',
+  dateDayLabel: '{weekday} {day} {month}',
 
   // ── Phone UI: ChatScreen state descriptions ──
   phoneScreenOff: 'Glasses screen is off. Double-click glasses to wake.',
@@ -66,6 +83,8 @@ const en = {
   phoneNoMessages: 'No messages yet.',
   phoneOpenChatToSend: 'Open a chat or topic to send a reply.',
   phoneSendFailed: 'Send failed',
+  phoneSendSkipped: 'A reply is already being sent. Wait for it to finish, then try again.',
+  phoneOpenChatFirst: 'Open a chat or topic before sending.',
   phoneCodeSendFailed: 'Could not send code',
   phoneCodeVerifyFailed: 'Could not verify code',
 
@@ -92,20 +111,7 @@ const en = {
   phoneOlderUp: 'Older / Up',
   phoneNewerDown: 'Newer / Down',
   phoneBackSleep: 'Back / Sleep',
-  // ── Phone UI: SettingsScreen ──
-  phoneSettingsHeading: 'Settings',
-  phoneAlreadyConnected: 'Already connected',
-  phoneNotConnected: 'Not connected',
-  phoneConfigured: 'Configured',
-  phoneRequired: 'Required',
-  phoneStoredOnPhone: 'Stored on this phone only',
-  phoneBackendSessionActive: 'Backend session active',
-  phoneNotLoggedIn: 'Not logged in yet',
-  phoneSaveSettings: 'Save Settings',
-  phoneSaved: 'Saved',
-  phoneReset: 'Reset',
-  phoneDisconnectTelegram: 'Disconnect Telegram',
-  phoneDisconnecting: 'Disconnecting...',
+  phoneMessagesAria: 'Messages',
 
   // ── Phone UI: App shell ──
   phoneAppTitle: 'TeleGlance',
@@ -113,7 +119,8 @@ const en = {
   phoneBack: 'Back',
   phoneBackToChat: 'Back to chat',
   phoneOpenSettings: 'Open settings',
-  phoneSetupRequired: 'Backend URL, Telegram API ID, and Telegram API hash are required. Custom backends also require Backend shared secret. Fill them in Settings using the setup instructions first.',
+  setupRequired: 'Backend URL, Backend shared secret, Telegram API ID and Telegram API hash are required. Fill them in Settings using the setup instructions first.',
+  setupBackendUrlMissing: 'No backend is set. TeleGlance needs your own backend server: enter its URL and shared secret in Settings.',
   // ── Error / auth messages (phone + glasses) ──
   errorBackendUnreachable:
     'Backend is not reachable. Fill Backend URL in Settings and make sure the backend server is running.',
@@ -121,8 +128,8 @@ const en = {
     'Backend request timed out after {seconds}s. The server may be unreachable or stuck. Try again or check the backend.',
   errorEncryptedAuthMissing:
     'Encrypted auth requires Backend shared secret, Telegram API ID, and Telegram API hash in TeleGlance Settings.',
-  errorSharedSecretRequired:
-    'Backend shared secret is required to decrypt backend response.',
+  errorSharedSecretRequired: 
+    'Backend shared secret is required to decrypt backend data.',
   errorEncryptedMalformed: 'Encrypted backend response is malformed',
   errorWebCryptoRequired:
     'Encrypted backend auth requires WebCrypto. Use the packaged app, localhost, HTTPS, or a browser with WebCrypto support.',
@@ -131,12 +138,28 @@ const en = {
   errorStarting: 'Starting...',
   errorStartupFailed: 'Startup failed',
   errorUnexpected: 'An unexpected error occurred',
+  errorBackendBusy: 'Backend is busy. Retrying in a moment.',
+  errorBackendUrlRequired: 'Backend URL is required. Set it in TeleGlance Settings.',
+  errorSharedSecretMissing:
+    'Backend shared secret is required. Set it in TeleGlance Settings and in backend .env as TELEGLANCE_SHARED_SECRET.',
+  errorBackendAuthDetail:
+    'The backend could not verify this phone. Check that Backend shared secret in Settings is exactly TELEGLANCE_SHARED_SECRET on the server, and that the phone clock is set automatically.',
+  errorBackendAuthRejected: 'The backend rejected this phone\'s auth. Check that Backend shared secret is exactly TELEGLANCE_SHARED_SECRET on the server and that the phone clock is set automatically. Your Telegram login is kept.',
+  errorRequestFailed: 'Request failed with {status}',
+  errorRequestTooLarge: 'The request was too large for the backend.',
 
   // ── Auth screen messages ──
-  authNeedsSetup:
-    'Open Settings and fill Backend URL, Shared Secret, Telegram API ID, and Telegram API Hash. Then restart the app.',
-  authSignedOut: 'Tap to log in with your phone number.',
-  authPhonePending: 'Enter the verification code sent to your phone.',
+  authNeedsSetup: 
+    'Follow the instructions on the Settings page to connect Telegram and the backend server.',
+  authSignedOut: 'Enter your phone number in the phone UI to receive a Telegram login code.',
+  authPhonePending: 'Verification code sent to {phone}. Enter it on the phone.',
+  authSessionExpired: 'Your Telegram session ended (signed out elsewhere or revoked). Enter your phone number in the phone UI to sign in again.',
+  authChecking: 'Checking Telegram session...',
+  authNotConnected: 'Telegram not connected.',
+  authConnectViaSettings: 'Please connect using the instructions in Settings on the phone.',
+  authAddCredentialsFirst: 'Add Telegram API ID/hash in Settings on the phone first.',
+  authCodeRejected: 'Code was not accepted. Check the Telegram code and try again.',
+  authCodeExpired: 'Send a new login code and use the latest code from Telegram.',
 
   // ── Settings UI ──
   settingsTelegramSection: 'Telegram',
@@ -169,21 +192,24 @@ const en = {
   settingsTelegramApiHash: 'Telegram API Hash',
   settingsDisconnectTelegram: 'Disconnect Telegram',
   settingsDisconnecting: 'Disconnecting...',
+  settingsConfirmDisconnect: 'Tap again to disconnect Telegram',
+  settingsLogoutFailed: 'Logout failed',
   settingsBackendHint: 'Run your own backend from this repo, then enter its reachable URL here. Repo link: ',
   settingsBackendSetup: 'Backend setup instructions',
   settingsBackendUrl: 'Backend URL',
   settingsBackendSecret: 'Backend shared secret',
   settingsBackendSecretHint: 'Required. Set the exact same value in backend root .env as TELEGLANCE_SHARED_SECRET. The secret is stored locally and used on both sides to encrypt backend API payloads; it is not sent as plaintext.',
   settingsBackendSecretPlaceholder: 'Required',
-  settingsSharedBackendSecretPlaceholder: 'Not used for testing backend',
-  settingsSharedBackendWarning: 'Use https://teleglance.akira-os.net only for testing. No user secret is needed for this backend. The testing URL may be unstable; switch to your own backend before relying on it.',
   settingsSttUrl: 'STT Server Url (Optional)',
   settingsSttHint: 'Leave blank to use the backend URL. A custom STT server must expose the same /api/transcribe endpoint.',
+  settingsSttPlaceholder: 'Use backend URL',
   settingsDebugEvents: 'Debug event logging',
   settingsDebugEventsHint: 'Leave debug logging off for normal use. When enabled, raw glasses input events are sent to the backend debug endpoint and may include message or gesture context.',
+  settingsFontWidth: 'Glasses font width correction (%)',
+  settingsFontWidthHint: 'Text lines are filled to the screen edge using the glasses font measured in the simulator. If lines wrap twice on the glasses, raise this a little (e.g. 110); if they stop short of the right edge, lower it. Default 100.',
   settingsRecMinDuration: 'Recording minimum duration (ms)',
   settingsAdvancedPolling: 'Advanced refresh fallback',
-  settingsAdvancedPollingHint: 'Telegram updates normally arrive from the backend event stream. These fallback timers recover missed events after backgrounding, network drops, or stream reconnects.',
+  settingsAdvancedPollingHint: 'Telegram updates normally arrive from the backend event stream. These intervals only apply as a fallback while the live stream is down; while it is connected the app refreshes about once a minute as a safety net.',
   settingsChatPoll: 'Chat fallback refresh (ms)',
   settingsMessagePoll: 'Message fallback refresh (ms)',
   settingsLanguageLabel: 'Language',
@@ -192,7 +218,10 @@ const en = {
   settingsApiUrl: 'Current API URL',
   settingsSave: 'Save Settings',
   settingsSaved: 'Saved',
+  settingsSaving: 'Saving...',
+  settingsSaveFailed: 'Could not save settings',
   settingsReset: 'Reset',
+  settingsConfirmReset: 'Tap again to reset all settings',
   settingsClearCache: 'Clear cache',
   settingsCacheCleared: 'Cache cleared',
   settingsTestConnection: 'Test connection',
@@ -210,19 +239,6 @@ const en = {
   // ── Bridge ──
   bridgeEmptyList: 'Empty',
 
-  // audit-fe-a keys
-  setupRequired: 'Backend URL, Backend shared secret, Telegram API ID and Telegram API hash are required. Fill them in Settings using the setup instructions first.',
-  setupBackendUrlMissing: 'No backend is set. TeleGlance needs your own backend server: enter its URL and shared secret in Settings.',
-  errorBackendAuthRejected: 'The backend rejected this phone\'s auth. Check that Backend shared secret is exactly TELEGLANCE_SHARED_SECRET on the server and that the phone clock is set automatically. Your Telegram login is kept.',
-  authSessionExpired: 'Your Telegram session ended (signed out elsewhere or revoked). Enter your phone number in the phone UI to sign in again.',
-  phoneSendSkipped: 'A reply is already being sent. Wait for it to finish, then try again.',
-  phoneMessagesAria: 'Messages',
-  settingsSaving: 'Saving...',
-  settingsSaveFailed: 'Could not save settings',
-  settingsConfirmReset: 'Tap again to reset all settings',
-  settingsConfirmDisconnect: 'Tap again to disconnect Telegram',
-  statusOffline: 'Offline',
-  statusAuthRejected: 'Backend rejected auth',
 } as const
 
 export default en

@@ -4,12 +4,18 @@ import type { Chat, Folder, Id, Message, TelegramUpdate, TelegramTypingUpdate, T
 import { getLocale } from '../locales'
 import { backToMessages, DIDNT_CATCH_STATUS, UPDATING_STATUS } from './model'
 import type { AppInput, AppState, RecoverableState, ScreenModel } from './model'
-import { anchorMessageId, messageScrollUnitCount, nextMessageScrollOffset, offsetForAnchorMessage, screenModel, unreadScrollOffset } from './model'
+import { anchorMessageId, messageScrollUnitCount, nextMessageScrollOffset, offsetForAnchorMessage, screenModel } from './model'
 import { isTeleGlanceFixtureMode, logLifecycleEvent, logRecordingEvent, logStateWork, logTeleGlanceTest, nowMs } from '../testMode'
 import { debugLog, errorText } from '../debugLog'
 import { consumeInjectedAudioChunks } from '../fixtureApi'
 import type { Photo } from '../types'
 import type { PersistentCache } from '../cache/persistentCache'
+import { LruMap } from './lruMap'
+import {
+  hasIncomingChange, hasMessageChanges, messageThreadKey, newestMessageId, normalizeMessagePage, oldestMessageId,
+  THREAD_CACHE_LIMIT, ThreadStore, topicThreadId, windowNewestMessages,
+} from './threadStore'
+import { clearUnreadForThread, hasUnreadForThread } from './unreadState'
 
 export interface GlassesBridge {
   render(model: ScreenModel): Promise<void>
@@ -34,16 +40,16 @@ export interface GlassesBridge {
 }
 
 const MESSAGE_PAGE_LIMIT = 8
-// Older pages are fetched in bigger chunks than the first page: a history call costs about the same for 8
-// or 24 messages, and a bigger chunk means far fewer waits at the edge of loaded history while scrolling.
-/** Ignore a plain click this soon after a hold event (some firmware double-reports). */
 const SEND_FAILED_STATUS = 'Send failed'
 const STARTUP_RETRY_BASE_MS = 5_000
 const STARTUP_RETRY_MAX_MS = 60_000
 /** While the live update stream is up, polling is only a slow safety net. */
 const STREAM_HEALTHY_POLL_MS = 60_000
 const TRANSCRIBE_FAILED_STATUS = 'Transcription failed'
+/** Ignore a plain click this soon after a hold event (some firmware double-reports). */
 const HOLD_PRESS_GUARD_MS = 350
+// Older pages are fetched in bigger chunks than the first page: a history call costs about the same for 8
+// or 24 messages, and a bigger chunk means far fewer waits at the edge of loaded history while scrolling.
 const OLDER_PAGE_LIMIT = 24
 // Optimistic folder loading: once the chat list is up and the user is idle, fetch each folder's first page
 // so switching folders later is instant.
@@ -61,20 +67,18 @@ const INPUT_QUIET_MS = 900
 const IMAGE_SEND_DELAY_MS = 350
 const IMAGE_MAX_WAIT_MS = 1500
 const TOPIC_PREVIEW_IDLE_MS = 200
-// How long after a full `bridge.render()` we treat a list click as
-// post-firmware-reset. The G2 firmware (and the simulator) reset the
-// post-firmware-reset. The G2 firmware (and the simulator) reset the
-// tracked list-selection index to 0 on every full page rebuild, and the
-// next click event reports the post-reset index. Inside this window we
-// trust the controller's state instead of the firmware's payload.
 const DEFAULT_RUNTIME_CONFIG: ControllerRuntimeConfig = {
   messagePressDelayMs: 260,
   messagePollMs: 3000,
   chatPollMs: 5000,
   recordingMinDurationMs: 900,
   language: 'en',
+  /** A list-selection event this soon after a swipe is the firmware's post-scroll echo, not a press. */
   swipeToPressDebounceMs: 200,
   selectionOnlyPressDelayMs: 400,
+  // How long after a full `bridge.render()` a list click counts as post-firmware-reset: the G2 firmware (and the
+  // simulator) reset the tracked list-selection index to 0 on every full page rebuild, and the next click
+  // reports the post-reset index. Inside this window the controller's state is trusted instead of the payload.
   firmwareResetWindowMs: 250,
 }
 
@@ -93,15 +97,15 @@ type StateListener = (state: AppState) => void
 
 
 export class TelegramAppController {
-  private state: AppState = { screen: 'loading', message: 'Starting...' }
+  private state: AppState = { screen: 'loading', message: getLocale().errorStarting }
   private runtimeConfig: ControllerRuntimeConfig
   private listeners = new Set<StateListener>()
   private messagePoll: ReturnType<typeof setInterval> | undefined
   private chatPoll: ReturnType<typeof setInterval> | undefined
   private pendingMessagePress: ReturnType<typeof setTimeout> | undefined
   private holdRecording = false
-  /** threadKey -> id of the oldest unread message, while a thread is being read from its "last read" point. */
-  private unreadBoundaries = new Map<string, string>()
+  /** Bytes of audio in the current recording's `chunks` (a running total, not re-summed per chunk). */
+  private recordedBytes = 0
   private autoStopping = false
   private lastHoldEventAt = 0
   private lastMessagePressAt = 0
@@ -138,28 +142,22 @@ export class TelegramAppController {
   private chatsHasMore = false
   private loadingMoreChats = false
   private folderSwitchId = 0
-  private folderChatsCache = new Map<string, { chats: Chat[]; hasMore: boolean }>()
+  private folderChatsCache = new LruMap<string, { chats: Chat[]; hasMore: boolean }>(THREAD_CACHE_LIMIT)
   private folderWarmGeneration = 0
-  private photoCache = new Map<string, Photo>()
+  private photoCache = new LruMap<string, Photo>(PHOTO_CACHE_LIMIT)
   private photoInFlight = new Map<string, Promise<Photo>>()
   private messageRefreshInFlight = false
   private topicPreviewDebounce: ReturnType<typeof setTimeout> | undefined
   private deferredRootRefreshTimer: ReturnType<typeof setTimeout> | undefined
   private deferredMessageRefreshTimer: ReturnType<typeof setTimeout> | undefined
-  // `messageCache` is the single source of truth for the latest messages of a chat/topic.
-  // It is populated by `prefetchVisibleChats` on startup, by `prefetchTopics`/`prefetchMessages`
-  // on demand, and by background refreshes. The legacy `chatPreviewCache`/`topicPreviewCache`
-  // are kept for backwards compatibility (and for cache-write observability) but reads always
-  // fall through to `messageCache` so the startup prefetch is reused for previews.
-  private messageCache = new Map<string, { messages: Message[]; cursor?: Id }>()
-  private topicPreviewCache = this.messageCache
+  /**
+   * Latest page and topic list per thread, unread points and read marks (LRU-capped). The latest page is the
+   * single source for opening a thread instantly and for topic previews; filled on demand and by refreshes.
+   */
+  private readonly threads: ThreadStore
   private topicPreviewInFlight = new Set<string>()
-  private chatPreviewDebounce: ReturnType<typeof setTimeout> | undefined
-  private chatPreviewInFlight = new Set<string>()
-  private topicsCache = new Map<string, Topic[]>()
   private topicsPrefetchInFlight = new Map<string, Promise<Topic[]>>()
   private messagePrefetchInFlight = new Map<string, Promise<Message[]>>()
-  private readAckMaxIds = new Map<string, Id>()
   private pendingReadAcks = new Map<string, { chat: Chat; topic?: Topic; maxId: Id }>()
   private readAckFlushTimer: ReturnType<typeof setTimeout> | undefined
   private startupPrefetchTimer: ReturnType<typeof setTimeout> | undefined
@@ -179,16 +177,12 @@ export class TelegramAppController {
   // rendering is only valid while focus stays on the same input surface because
   // TextContainerUpgrade cannot change event-capture flags.
   private lastRenderedListItems: readonly string[] | undefined
+  private renderInFlight = false
   // Timestamp of the most recent full `bridge.render()` call. The G2 firmware
   // (and the simulator) reset their tracked list-selection index to 0 on
-  // every full page rebuild. A click arriving within a few seconds of a
-  // full rebuild is therefore suspect — its `currentSelectItemIndex`
-  // payload reflects the post-reset firmware state, not the user's tap.
-  // We use this to disambiguate the firmware-reset desync from a legitimate
-  // "user tapped a different row" scenario. See
-  // `docs/SDK_BUG_NATIVE_LIST_SELECTION.md` for the SDK-level analysis.
-  private renderInFlight = false
-  // see the SDK bug note above
+  // every full page rebuild, so a click arriving within `firmwareResetWindowMs`
+  // of a full rebuild carries a post-reset `currentSelectItemIndex`, not the
+  // user's tap. See `docs/SDK_BUG_NATIVE_LIST_SELECTION.md`.
   private lastFullRenderAt = 0
   private pendingRenderState: AppState | undefined
   private renderTimer: ReturnType<typeof setTimeout> | undefined
@@ -210,6 +204,7 @@ export class TelegramAppController {
     private readonly hasTelegramCredentials: () => boolean = () => true,
     private readonly cache?: PersistentCache,
   ) {
+    this.threads = new ThreadStore(cache)
     this.runtimeConfig = typeof options === 'number'
       ? { ...DEFAULT_RUNTIME_CONFIG, messagePressDelayMs: options }
       : { ...DEFAULT_RUNTIME_CONFIG, ...options }
@@ -256,7 +251,6 @@ export class TelegramAppController {
       this.topicPreviewDebounce,
       this.deferredRootRefreshTimer,
       this.deferredMessageRefreshTimer,
-      this.chatPreviewDebounce,
       this.readAckFlushTimer,
       this.startupPrefetchTimer,
       this.renderTimer,
@@ -267,12 +261,14 @@ export class TelegramAppController {
     ]) {
       if (timer) clearTimeout(timer)
     }
+    this.pendingMessagePress = undefined
+    this.topicPreviewDebounce = undefined
     this.deferredRootRefreshTimer = undefined
     this.deferredMessageRefreshTimer = undefined
-    this.chatPreviewDebounce = undefined
     this.readAckFlushTimer = undefined
     this.startupPrefetchTimer = undefined
     this.renderTimer = undefined
+    this.imageTimer = undefined
     this.startupRetryTimer = undefined
     this.notifyTimer = undefined
     this.typingTimer = undefined
@@ -283,7 +279,7 @@ export class TelegramAppController {
   async sendTextFromPhone(text: string) {
     const state = this.state
     const thread = activeThreadState(state)
-    if (!thread) throw new Error('Open a chat or topic before sending.')
+    if (!thread) throw new Error(getLocale().phoneOpenChatFirst)
     const trimmed = text.trim()
     if (!trimmed) return
     const ctx = sidebarContext(state)
@@ -428,7 +424,7 @@ export class TelegramAppController {
       this.showingStoredChats = true
       await this.setState(this.chatsState(storedChats, 0, { status: UPDATING_STATUS }))
     } else {
-      await this.setState({ screen: 'loading', message: 'Checking Telegram session...' })
+      await this.setState({ screen: 'loading', message: getLocale().authChecking })
     }
     await this.connectSession(chatsRequest)
   }
@@ -490,7 +486,7 @@ export class TelegramAppController {
       await this.setState({
         screen: 'auth',
         mode: 'needsSetup',
-        message: 'Follow the instructions on the Settings page to connect Telegram and the backend server.',
+        message: getLocale().authNeedsSetup,
       })
       return
     }
@@ -500,12 +496,13 @@ export class TelegramAppController {
       this.showingStoredChats = false
       void this.cache?.clear()
       const hasFrontendCredentials = this.hasTelegramCredentials()
+      const l = getLocale()
       await this.setState({
         screen: 'auth',
         mode: hasFrontendCredentials ? 'signedOut' : 'needsSetup',
         message: !hasFrontendCredentials || status.configured === false
-          ? 'Telegram not connected. Please connect using the instructions in Settings on the phone.'
-          : 'Telegram not connected. Enter your phone number in the phone UI to receive a Telegram login code.',
+          ? `${l.authNotConnected} ${l.authConnectViaSettings}`
+          : `${l.authNotConnected} ${l.authSignedOut}`,
       })
       return
     }
@@ -561,8 +558,7 @@ export class TelegramAppController {
 
     if (input.type === 'audioChunk') {
       if (this.state.screen === 'sidebarRecording') {
-        const recordedBytes = this.state.chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0)
-        if (recordedBytes + input.pcm.byteLength > MAX_RECORDING_BYTES) {
+        if (this.recordedBytes + input.pcm.byteLength > MAX_RECORDING_BYTES) {
           // Out of room: stop and transcribe what we have instead of waiting for a release that may never come.
           if (!this.autoStopping) {
             this.autoStopping = true
@@ -570,12 +566,14 @@ export class TelegramAppController {
           }
           return // keep the upload under the server cap
         }
-        this.state = { ...this.state, chunks: [...this.state.chunks, input.pcm] }
+        // Appended in place: copying the whole chunk list for every chunk made a recording O(n²). The chunk
+        // list belongs to this recording only, and nothing is notified per chunk.
+        this.state.chunks.push(input.pcm)
+        this.recordedBytes += input.pcm.byteLength
         if (isTeleGlanceFixtureMode()) {
-          const total = this.state.chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0)
           logRecordingEvent('audioChunk', {
             size: input.pcm.byteLength,
-            totalBytes: total,
+            totalBytes: this.recordedBytes,
             chunks: this.state.chunks.length,
             ...(input.injected ? { injected: true } : {}),
           })
@@ -587,10 +585,11 @@ export class TelegramAppController {
     if (this.state.screen === 'sidebarRecording') {
       const injected = consumeInjectedAudioChunks()
       if (injected.length > 0) {
-        this.state = { ...this.state, chunks: [...this.state.chunks, ...injected] }
+        const size = injected.reduce((sum, chunk) => sum + chunk.byteLength, 0)
+        this.state.chunks.push(...injected)
+        this.recordedBytes += size
         if (isTeleGlanceFixtureMode()) {
-          const total = this.state.chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0)
-          logRecordingEvent('audioChunk', { size: injected.reduce((s, c) => s + c.byteLength, 0), totalBytes: total, chunks: this.state.chunks.length, injected: true })
+          logRecordingEvent('audioChunk', { size, totalBytes: this.recordedBytes, chunks: this.state.chunks.length, injected: true })
         }
       }
     }
@@ -606,8 +605,8 @@ export class TelegramAppController {
         // Suppress auto-press for a short window after a swipe. Native G2 firmware
         // sometimes emits a list-selection event immediately after a scroll completes
         // (with the new index), and the previous code treated that as a press. The
-        // 450ms window covers the firmware's typical post-swipe event burst without
-        // noticeably slowing intentional press-after-swipe sequences.
+        // `swipeToPressDebounceMs` window (200 ms by default) covers the firmware's typical post-swipe
+        // event burst without noticeably slowing intentional press-after-swipe sequences.
         if (now - this.lastSwipeAt < this.runtimeConfig.swipeToPressDebounceMs) return
         if (now - this.lastSelectIndexPressAt < 400) return
         this.lastSelectIndexPressAt = now
@@ -670,14 +669,14 @@ export class TelegramAppController {
       if (state.mode === 'needsSetup') {
         await this.setState({
           ...state,
-          message: 'Follow the instructions on the Settings page to connect Telegram and the backend server.',
+          message: getLocale().authNeedsSetup,
         })
         return
       }
       if (state.mode === 'signedOut') {
         await this.setState({
           ...state,
-          message: 'Enter your phone number in the phone UI to receive a Telegram login code.',
+          message: getLocale().authSignedOut,
         })
         return
       }
@@ -695,7 +694,7 @@ export class TelegramAppController {
         await this.setState({
           screen: 'auth',
           mode: 'needsSetup',
-          message: 'Telegram not connected. Add Telegram API ID/hash in Settings on the phone first.',
+          message: `${getLocale().authNotConnected} ${getLocale().authAddCredentialsFirst}`,
         })
         return
       }
@@ -715,7 +714,7 @@ export class TelegramAppController {
         mode: 'phonePending',
         phone: result.phone || trimmed,
         phoneCodeHash: result.phoneCodeHash ?? null,
-        message: result.message ?? `Verification code sent to ${result.phone || trimmed}. Enter it on the phone.`,
+        message: result.message ?? getLocale().authPhonePending.replace('{phone}', result.phone || trimmed),
       })
     }, this.state.screen === 'auth' ? this.state : undefined)
     if (loginError !== undefined) throw loginError
@@ -741,10 +740,10 @@ export class TelegramAppController {
         phone: trimmedPhone,
         phoneCodeHash,
         passwordRequired: status.passwordRequired || undefined,
-        message: status.message ?? 'Code was not accepted. Check the Telegram code and try again.',
+        message: status.message ?? getLocale().authCodeRejected,
       })
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Code was not accepted. Check the Telegram code and try again.'
+      const message = error instanceof Error ? error.message : getLocale().authCodeRejected
       const expired = /expired/i.test(message)
       await this.setState({
         screen: 'auth',
@@ -752,7 +751,7 @@ export class TelegramAppController {
         phone: trimmedPhone,
         phoneCodeHash: expired ? null : phoneCodeHash,
         message: expired
-          ? `${message}. Send a new login code and use the latest code from Telegram.`
+          ? `${message}. ${getLocale().authCodeExpired}`
           : message,
       })
       throw error
@@ -779,12 +778,6 @@ export class TelegramAppController {
     state: Extract<AppState, { screen: 'sidebar'; focus: 'chats' }>, input: AppInput
   ) {
     if (input.type === 'doublePress') {
-      // The dispatch-level filter in `dispatch` has already dropped
-      // any idle system `doublePress` (eventSource === 1 inside the
-      // cluster window). See `isIdleSystemDoublePress` and AGENTS.md
-      // "Idle doublePress events on the G2 / simulator can mimic
-      // user input."
-      this.cancelChatDebounce()
       if (this.folders.length > 0) {
         // With folders, double-tap opens the folder picker (which also offers Sleep).
         await this.openFolderPicker(state)
@@ -798,7 +791,6 @@ export class TelegramAppController {
     }
     if (input.type === 'swipeUp') {
       this.openRequestId += 1
-      this.cancelChatDebounce()
       const newIndex = moveSelection(state.selectedChatIndex, state.chats.length, -1)
       // The chat list is full width with no preview, so moving the selection never fetches messages.
       await this.setStateForListScroll({
@@ -811,7 +803,6 @@ export class TelegramAppController {
     }
     if (input.type === 'swipeDown') {
       this.openRequestId += 1
-      this.cancelChatDebounce()
       const newIndex = moveSelection(state.selectedChatIndex, state.chats.length, 1)
       // The chat list is full width with no preview, so moving the selection never fetches messages.
       await this.setStateForListScroll({
@@ -827,7 +818,6 @@ export class TelegramAppController {
       const selectedChatIndex = this.resolveSelectedChatIndex(input, state.selectedChatIndex, state.chats)
       if (selectedChatIndex !== state.selectedChatIndex) {
         this.openRequestId += 1
-        this.cancelChatDebounce()
       }
       await this.setStateForListScroll({
         ...state,
@@ -840,7 +830,6 @@ export class TelegramAppController {
     }
     if (input.type !== 'press') return
 
-    this.cancelChatDebounce()
     const selectedChatIndex = this.resolveSelectedChatIndex(input, state.selectedChatIndex, state.chats)
     const selectedState = { ...state, selectedChatIndex }
     const chat = selectedState.chats[selectedChatIndex]
@@ -854,12 +843,6 @@ export class TelegramAppController {
       if (isTeleGlanceFixtureMode()) logLifecycleEvent('asleep', { input: input.type, selectedChatIndex: state.selectedChatIndex })
       return
     }
-    // The dispatch-level filter in `dispatch` has already dropped
-    // any idle system `doublePress` (eventSource === 1 inside the
-    // cluster window), so reaching this branch means a real user
-    // is waking the device. See `isIdleSystemDoublePress` and
-    // AGENTS.md "Idle doublePress events on the G2 / simulator can
-    // mimic user input."
     if (isTeleGlanceFixtureMode()) logLifecycleEvent('wake', { selectedChatIndex: state.selectedChatIndex })
     await this.setState(this.chatsState(state.chats, state.selectedChatIndex))
     // Nothing polls while asleep; without the live stream the list may be stale, so refresh it now.
@@ -868,8 +851,6 @@ export class TelegramAppController {
 
   private async handleNewMessage(state: Extract<AppState, { screen: 'newMessage' }>, input: AppInput) {
     if (input.type === 'doublePress') {
-      // The dispatch-level filter in `dispatch` has already dropped
-      // any idle system `doublePress`. See `isIdleSystemDoublePress`.
       this.rememberChats(state.chats)
       await this.setState({ screen: 'asleep', chats: state.chats, selectedChatIndex: state.selectedChatIndex })
       await this.bridge.turnScreenOff?.()
@@ -883,8 +864,6 @@ export class TelegramAppController {
     state: Extract<AppState, { screen: 'sidebar'; focus: 'topics' }>, input: AppInput
   ) {
     if (input.type === 'doublePress') {
-      // The dispatch-level filter in `dispatch` has already dropped
-      // any idle system `doublePress`. See `isIdleSystemDoublePress`.
       this.cancelTopicDebounce()
       await this.setState(this.chatsState(state.chats, state.selectedChatIndex))
       return
@@ -969,8 +948,6 @@ export class TelegramAppController {
     state: Extract<AppState, { screen: 'sidebar'; focus: 'messages' }>, input: AppInput
   ) {
     if (input.type === 'doublePress') {
-      // The dispatch-level filter in `dispatch` has already dropped
-      // any idle system `doublePress`. See `isIdleSystemDoublePress`.
       this.openRequestId += 1
       this.cancelPendingMessagePress()
       await this.goBackFromMessages(state)
@@ -1024,7 +1001,7 @@ export class TelegramAppController {
 
   private async fetchTopicPreview(chat: Chat, topic: Topic) {
     const cacheKey = messageThreadKey({ chat, topic })
-    const cached = this.topicPreviewCache.get(cacheKey)
+    const cached = this.threads.page({ chat, topic })
     if (cached) {
       const state = this.state
       if (state.screen !== 'sidebar' || state.focus !== 'topics') return
@@ -1048,7 +1025,7 @@ export class TelegramAppController {
         limit: MESSAGE_PAGE_LIMIT,
       })
       const normalized = normalizeMessagePage(messages)
-      this.topicPreviewCache.set(cacheKey, { messages: normalized, cursor: oldestMessageId(normalized) })
+      this.threads.putPage({ chat, topic }, normalized, { persist: false })
       const state = this.state
       if (state.screen !== 'sidebar' || state.focus !== 'topics') return
       if (!topicMatchesSelection(state, topic)) return
@@ -1065,17 +1042,11 @@ export class TelegramAppController {
     }
   }
 
-  private cancelChatDebounce() {
-    if (!this.chatPreviewDebounce) return
-    clearTimeout(this.chatPreviewDebounce)
-    this.chatPreviewDebounce = undefined
-  }
-
   /**
    * Synchronous cache lookup for the topic preview path.
    */
   private getTopicPreviewCached(chat: Chat, topic: Topic) {
-    return this.topicPreviewCache.get(messageThreadKey({ chat, topic }))
+    return this.threads.page({ chat, topic })
   }
 
   private async scheduleMessagePress(
@@ -1110,6 +1081,7 @@ export class TelegramAppController {
     ctx: { chats: Chat[]; selectedChatIndex: number },
   ) {
     this.lastMessagePressAt = Date.now()
+    this.recordedBytes = 0
     await this.setState({
       screen: 'sidebarRecording', focus: 'messages',
       chats: ctx.chats, selectedChatIndex: ctx.selectedChatIndex,
@@ -1134,8 +1106,6 @@ export class TelegramAppController {
   ) {
     if (input.type === 'doublePress') {
       this.holdRecording = false
-      // The dispatch-level filter in `dispatch` has already dropped
-      // any idle system `doublePress`. See `isIdleSystemDoublePress`.
       void this.bridge.setAudioEnabled(false).catch(() => undefined)
       await this.setState(backToMessages(state))
       return
@@ -1146,14 +1116,13 @@ export class TelegramAppController {
     this.holdRecording = false
     debugLog('record.stop', {
       via: input.type,
-      bytes: state.chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0),
+      bytes: this.recordedBytes,
       chunks: state.chunks.length,
       heldMs: Date.now() - state.startedAt,
     })
     await this.setState({ ...backToMessages(state), screen: 'sidebarTranscribing' as const })
     if (isTeleGlanceFixtureMode()) {
-      const total = state.chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0)
-      logRecordingEvent('stop', { totalBytes: total, chunks: state.chunks.length })
+      logRecordingEvent('stop', { totalBytes: this.recordedBytes, chunks: state.chunks.length })
       logRecordingEvent('transcribe.start', { chunks: state.chunks.length })
     }
     void this.bridge.setAudioEnabled(false).catch(() => undefined)
@@ -1209,8 +1178,6 @@ export class TelegramAppController {
       return
     }
     if (input.type === 'doublePress') {
-      // The dispatch-level filter in `dispatch` has already dropped
-      // any idle system `doublePress`. See `isIdleSystemDoublePress`.
       await this.setState(backToMessages(state))
       return
     }
@@ -1307,8 +1274,6 @@ export class TelegramAppController {
     state: Extract<AppState, { screen: 'sidebarSent' }>, input: AppInput
   ) {
     if (input.type === 'doublePress') {
-      // The dispatch-level filter in `dispatch` has already dropped
-      // any idle system `doublePress`. See `isIdleSystemDoublePress`.
       await this.setState(this.chatsState(state.chats, state.selectedChatIndex))
       return
     }
@@ -1323,8 +1288,6 @@ export class TelegramAppController {
 
   private async handleError(state: Extract<AppState, { screen: 'error' }>, input: AppInput) {
     if (input.type === 'doublePress' && state.previous) {
-      // The dispatch-level filter in `dispatch` has already dropped
-      // any idle system `doublePress`. See `isIdleSystemDoublePress`.
       await this.setState(state.previous)
       return
     }
@@ -1421,11 +1384,6 @@ export class TelegramAppController {
       }))
       .then((photo) => {
         this.photoCache.set(key, photo)
-        while (this.photoCache.size > PHOTO_CACHE_LIMIT) {
-          const oldest = this.photoCache.keys().next().value
-          if (oldest === undefined) break
-          this.photoCache.delete(oldest)
-        }
         return photo
       })
       .finally(() => {
@@ -1690,7 +1648,7 @@ export class TelegramAppController {
         await this.openMessages(chat, undefined, previous, requestId)
         return
       }
-      const cachedTopics = this.topicsCache.get(String(chat.id))
+      const cachedTopics = this.threads.topics(chat.id)
       if (!cachedTopics) {
         await this.setState({
           screen: 'sidebar', focus: 'messages',
@@ -1719,43 +1677,9 @@ export class TelegramAppController {
     }, previous)
   }
 
-  /**
-   * Work out where this thread's unread messages start, flag that message (it gets the "last read" divider) and
-   * return where the view should open. Unread messages are the newest incoming ones, so the Nth incoming message
-   * from the newest is the first unread. If more are unread than are loaded the start cannot be found and the
-   * thread opens at the newest message as before.
-   */
-  private planUnreadOpen(chat: Chat, topic: Topic | undefined, messages: Message[]): { messages: Message[]; scrollOffset: number } {
-    const key = messageThreadKey({ chat, topic })
-    const unread = Number((topic ? topic.unreadCount : chat.unreadCount) ?? 0) || 0
-    this.unreadBoundaries.delete(key)
-    if (unread <= 0) return { messages, scrollOffset: 0 }
-    let seen = 0
-    let firstUnread: Message | undefined
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      if (messages[index].outgoing) continue
-      seen += 1
-      if (seen === unread) {
-        firstUnread = messages[index]
-        break
-      }
-    }
-    if (!firstUnread) return { messages, scrollOffset: 0 }
-    this.unreadBoundaries.set(key, String(firstUnread.id))
-    const flagged = this.flagUnread(chat, topic, messages)
-    return { messages: flagged, scrollOffset: unreadScrollOffset(flagged) }
-  }
-
-  /** Re-apply the "last read" flag to a freshly fetched message list. */
-  private flagUnread(chat: Chat, topic: Topic | undefined, messages: Message[]): Message[] {
-    const id = this.unreadBoundaries.get(messageThreadKey({ chat, topic }))
-    if (!id) return messages
-    return messages.map((message) => (String(message.id) === id ? { ...message, firstUnread: true } : message))
-  }
-
   /** True while the user is reading up from the newest message in a thread that had unread messages. */
   private isReadingFromUnread(state: Extract<AppState, { screen: 'sidebar'; focus: 'messages' }>) {
-    return (state.scrollOffset ?? 0) > 0 && this.unreadBoundaries.has(messageThreadKey(state))
+    return (state.scrollOffset ?? 0) > 0 && this.threads.hasUnreadBoundary(state)
   }
 
   /** New messages arrived while reading above the bottom: keep the same message in view instead of jumping. */
@@ -1771,10 +1695,9 @@ export class TelegramAppController {
     const topics = topic && previous.screen === 'sidebar' && previous.focus === 'topics' ? previous.topics : undefined
     const selectedTopicIndex = topic && previous.screen === 'sidebar' && previous.focus === 'topics' ? previous.selectedTopicIndex : undefined
     await this.run(async () => {
-      const threadKey = messageThreadKey({ chat, topic })
-      const cached = this.messageCache.get(threadKey) ?? (await this.loadStoredThread(chat, topic))
+      const cached = this.threads.page({ chat, topic }) ?? (await this.threads.loadStoredPage({ chat, topic }))
       if (cached) {
-        const plan = this.planUnreadOpen(chat, topic, cached.messages)
+        const plan = this.threads.planUnreadOpen({ chat, topic }, cached.messages)
         const openState: AppState = {
           screen: 'sidebar', focus: 'messages',
           chats, selectedChatIndex,
@@ -1811,7 +1734,7 @@ export class TelegramAppController {
       const messages = await this.prefetchMessages(chat, topic)
       if (requestId !== this.openRequestId || !this.isStillOpeningMessages(chat, topic, requestId)) return
       const normalized = normalizeMessagePage(messages)
-      const plan = this.planUnreadOpen(chat, topic, normalized)
+      const plan = this.threads.planUnreadOpen({ chat, topic }, normalized)
       const openState: AppState = {
         screen: 'sidebar', focus: 'messages',
         chats, selectedChatIndex,
@@ -1839,7 +1762,7 @@ export class TelegramAppController {
     if (state.screen !== 'sidebar' || state.focus !== 'messages') return
     if (!hasMessageChanges(state.messages, messages)) return
     if (this.isReadingFromUnread(state)) {
-      const flagged = this.flagUnread(chat, topic, messages)
+      const flagged = this.threads.flagUnread({ chat, topic }, messages)
       const scrollOffset = this.keepPlace(state, flagged)
       await this.setState({ ...state, messages: flagged, cursor: oldestMessageId(flagged), newerPages: [], isNewestPage: scrollOffset === 0, scrollOffset })
       this.maybePrefetchOlder()
@@ -1893,14 +1816,19 @@ export class TelegramAppController {
   private async loadNewerMessages(state: Extract<AppState, { screen: 'sidebar'; focus: 'messages' }>) {
     const nextOffset = nextMessageScrollOffset(state.messages, state.scrollOffset ?? 0, 'down')
     if (nextOffset === (state.scrollOffset ?? 0)) return
+    // Back at the newest message: drop history beyond the window (scroll offsets count from the newest
+    // message, so the view does not move). Scrolling up again pages the dropped messages back in.
+    const messages = nextOffset === 0 ? windowNewestMessages(state.messages) : state.messages
     const next = {
       ...state,
+      messages,
+      cursor: messages === state.messages ? state.cursor : oldestMessageId(messages),
       scrollOffset: nextOffset,
       isNewestPage: nextOffset === 0,
       status: nextOffset === 0 ? undefined : 'Newer messages',
     }
     // Reaching the newest message is what marks the thread read.
-    if (nextOffset === 0) await this.setStateWithVisibleRead(next, state.chat, state.topic, state.messages)
+    if (nextOffset === 0) await this.setStateWithVisibleRead(next, state.chat, state.topic, messages)
     else await this.setState(next)
     this.maybePrefetchOlder()
   }
@@ -1986,13 +1914,13 @@ export class TelegramAppController {
 
   private async prefetchTopics(chat: Chat): Promise<Topic[]> {
     const key = String(chat.id)
-    const cached = this.topicsCache.get(key)
+    const cached = this.threads.topics(key)
     if (cached) return cached
     const inFlight = this.topicsPrefetchInFlight.get(key)
     if (inFlight) return inFlight
     const promise = this.api.listTopics(chat.id)
       .then((topics) => {
-        this.topicsCache.set(key, topics)
+        this.threads.putTopics(key, topics)
         return topics
       })
       .finally(() => {
@@ -2004,7 +1932,7 @@ export class TelegramAppController {
 
   private async prefetchMessages(chat: Chat, topic: Topic | undefined): Promise<Message[]> {
     const key = messageThreadKey({ chat, topic })
-    const cached = this.messageCache.get(key)
+    const cached = this.threads.page({ chat, topic })
     if (cached) return cached.messages
     const inFlight = this.messagePrefetchInFlight.get(key)
     if (inFlight) return inFlight
@@ -2023,31 +1951,12 @@ export class TelegramAppController {
 
   private cacheMessages(chat: Chat, topic: Topic | undefined, messages: Message[]) {
     this.prefetchPhotos(chat, messages)
-    const key = messageThreadKey({ chat, topic })
-    const entry = { messages, cursor: oldestMessageId(messages) }
-    this.messageCache.set(key, entry)
-    this.cache?.putThread(key, entry)
-  }
-
-  /**
-   * The last stored page of a thread, for opening it instantly while a fresh page is fetched. Only used for
-   * threads with nothing unread: the "last read" divider depends on the unread count, which a stale page
-   * cannot place correctly.
-   */
-  private async loadStoredThread(chat: Chat, topic: Topic | undefined): Promise<{ messages: Message[]; cursor?: Id } | undefined> {
-    if (!this.cache || (topic ?? chat).unreadCount) return undefined
-    const key = messageThreadKey({ chat, topic })
-    const stored = await this.cache.getThread(key).catch(() => undefined)
-    if (!stored || stored.messages.length === 0) return undefined
-    const entry = { messages: stored.messages, cursor: stored.cursor ?? oldestMessageId(stored.messages) }
-    this.messageCache.set(key, entry)
-    return entry
+    this.threads.putPage({ chat, topic }, messages)
   }
 
   /** Forget everything stored on the phone for fast startup (credentials and session are untouched). */
   async clearCache() {
-    this.messageCache.clear()
-    this.topicsCache.clear()
+    this.threads.clearCaches()
     this.photoCache.clear()
     await this.cache?.clear()
   }
@@ -2145,7 +2054,7 @@ export class TelegramAppController {
     this.errorRetry = retry
     await this.setState({
       screen: 'error',
-      message: error instanceof Error ? error.message : 'Unknown error',
+      message: error instanceof Error ? error.message : getLocale().errorUnexpected,
       previous,
     })
   }
@@ -2510,13 +2419,15 @@ export class TelegramAppController {
     const hasIncoming = hasIncomingChange(current.messages, merged)
     this.cacheMessages(current.chat, current.topic, merged)
     if (current.screen === 'sidebar' && current.focus === 'messages' && this.isReadingFromUnread(current)) {
-      const flagged = this.flagUnread(current.chat, current.topic, merged)
+      const flagged = this.threads.flagUnread(current, merged)
       const scrollOffset = this.keepPlace(current, flagged)
       await this.setState({ ...current, messages: flagged, cursor: oldestMessageId(flagged), newerPages: [], isNewestPage: scrollOffset === 0, scrollOffset })
       return
     }
     if (current.screen === 'sidebar' && current.focus === 'messages') {
-      await this.setStateWithVisibleRead({ ...current, messages: this.flagUnread(current.chat, current.topic, merged), cursor: oldestMessageId(merged), status: hasIncoming ? 'New reply' : undefined, newerPages: [], isNewestPage: true, scrollOffset: 0 }, current.chat, current.topic, merged, { forceAck: hasIncoming })
+      // The view jumps to the newest message, so loaded history beyond the window can go (see loadNewerMessages).
+      const kept = windowNewestMessages(merged)
+      await this.setStateWithVisibleRead({ ...current, messages: this.threads.flagUnread(current, kept), cursor: oldestMessageId(kept), status: hasIncoming ? 'New reply' : undefined, newerPages: [], isNewestPage: true, scrollOffset: 0 }, current.chat, current.topic, merged, { forceAck: hasIncoming })
       this.maybePrefetchOlder()
       return
     }
@@ -2645,14 +2556,12 @@ export class TelegramAppController {
   }
 
   private shouldSendReadAck(chat: Chat, topic: Topic | undefined, maxId: Id) {
-    const key = messageThreadKey({ chat, topic })
-    const previous = this.readAckMaxIds.get(key)
-    return previous === undefined || !idAtOrAfter(previous, maxId)
+    return this.threads.needsReadAck({ chat, topic }, maxId)
   }
 
   private sendReadAck(chat: Chat, topic: Topic | undefined, maxId: Id) {
     const key = messageThreadKey({ chat, topic })
-    this.readAckMaxIds.set(key, maxId)
+    this.threads.noteReadAck({ chat, topic }, maxId)
     this.pendingReadAcks.set(key, { chat, topic, maxId })
     this.scheduleReadAckFlush()
   }
@@ -2689,7 +2598,6 @@ export class TelegramAppController {
     if (this.topicsPrefetchInFlight.size > 0) return true
     if (this.messagePrefetchInFlight.size > 0) return true
     if (this.topicPreviewInFlight.size > 0) return true
-    if (this.chatPreviewInFlight.size > 0) return true
     if (this.pendingReadAcks.size > 0) return true
     if (this.deferredRootRefreshTimer) return true
     if (this.deferredMessageRefreshTimer) return true
@@ -2841,25 +2749,8 @@ function normalizeSelectionLabel(value: string) {
   return value.replace(/\s+\(\d+\)$/, '').trim().toLowerCase()
 }
 
-function hasMessageChanges(current: Message[], next: Message[]) {
-  if (current.length !== next.length) return true
-  return current.some((message, index) => {
-    const nextMessage = next[index]
-    return !nextMessage || String(message.id) !== String(nextMessage.id) || message.text !== nextMessage.text
-  })
-}
-
-function hasIncomingChange(current: Message[], next: Message[]) {
-  const currentIds = new Set(current.map((message) => String(message.id)))
-  return next.some((message) => !message.outgoing && !currentIds.has(String(message.id)))
-}
-
 function maxScrollOffset(messages: Message[]) {
   return Math.max(0, messageScrollUnitCount(messages) - 1)
-}
-
-function messageThreadKey(state: { chat: Chat; topic?: Topic }) {
-  return `${String(state.chat.id)}:${String(topicThreadId(state.topic) ?? '')}`
 }
 
 function updateMatchesThread(update: { chatId: Id; topicId?: Id | null }, state: { chat: Chat; topic?: Topic }) {
@@ -2872,43 +2763,8 @@ function updateMatchesThread(update: { chatId: Id; topicId?: Id | null }, state:
   return true
 }
 
-function idAtOrAfter(previous: Id, next: Id) {
-  const previousNumber = Number(previous)
-  const nextNumber = Number(next)
-  if (Number.isFinite(previousNumber) && Number.isFinite(nextNumber)) return previousNumber >= nextNumber
-  return String(previous) === String(next)
-}
-
 function chatFingerprint(chat: Chat) {
   return `${chat.unreadCount ?? 0}:${chat.lastMessage ?? ''}`
-}
-
-function normalizeMessagePage(messages: Message[]) {
-  return [...dedupeMessages(messages)].sort(compareMessages)
-}
-
-function dedupeMessages(messages: Message[]) {
-  const byId = new Map<string, Message>()
-  for (const message of messages) {
-    byId.set(String(message.id), message)
-  }
-  return byId.values()
-}
-
-function compareMessages(left: Message, right: Message) {
-  const leftId = Number(left.id)
-  const rightId = Number(right.id)
-  if (Number.isFinite(leftId) && Number.isFinite(rightId) && leftId !== rightId) {
-    return leftId - rightId
-  }
-
-  const leftTime = left.sentAt ? Date.parse(left.sentAt) : Number.NaN
-  const rightTime = right.sentAt ? Date.parse(right.sentAt) : Number.NaN
-  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
-    return leftTime - rightTime
-  }
-
-  return String(left.id).localeCompare(String(right.id))
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -2921,10 +2777,6 @@ function sleep(ms: number) {
     const maybeNodeTimeout = timeout as unknown as { unref?: () => void }
     maybeNodeTimeout.unref?.()
   })
-}
-
-function topicThreadId(topic: Topic | undefined) {
-  return topic?.id
 }
 
 function activeThreadState(state: AppState):
@@ -2947,20 +2799,6 @@ function activeThreadState(state: AppState):
     default:
       return undefined
   }
-}
-
-function oldestMessageId(messages: { id: string | number }[]) {
-  if (messages.length === 0) return undefined
-  const numericIds = messages.map((message) => Number(message.id)).filter(Number.isFinite)
-  if (numericIds.length === messages.length) return Math.min(...numericIds)
-  return messages[messages.length - 1]?.id
-}
-
-function newestMessageId(messages: { id: string | number }[]) {
-  if (messages.length === 0) return undefined
-  const numericIds = messages.map((message) => Number(message.id)).filter(Number.isFinite)
-  if (numericIds.length === messages.length) return Math.max(...numericIds)
-  return messages[messages.length - 1]?.id
 }
 
 function messageBackTarget(previous: RecoverableState): RecoverableState | undefined {
@@ -3002,161 +2840,6 @@ function emptyChatPreview() {
     previewNewerPages: undefined,
     previewIsNewestPage: undefined,
   }
-}
-
-function clearUnreadForThread(state: AppState, chat: Chat, topic: Topic | undefined): AppState {
-  const remainingTopicUnread = topic ? remainingUnreadForOtherTopics(state, topic) : undefined
-  let changed = false
-  const updateBack = (back: RecoverableState | undefined) => {
-    if (!back) return back
-    const nextBack = clearUnreadForThread(back, chat, topic) as RecoverableState
-    if (nextBack !== back) changed = true
-    return nextBack
-  }
-  const updateChat = (item: Chat) => {
-    if (String(item.id) !== String(chat.id)) return item
-    if (!item.unreadCount) return item
-    if (!topic) {
-      changed = true
-      return { ...item, unreadCount: 0 }
-    }
-    const nextUnread = remainingTopicUnread ?? 0
-    if (item.unreadCount === nextUnread) return item
-    changed = true
-    return { ...item, unreadCount: nextUnread }
-  }
-  const updateTopic = (item: Topic) => {
-    if (String(item.id) !== String(topic?.id) || !item.unreadCount) return item
-    changed = true
-    return { ...item, unreadCount: 0 }
-  }
-  const maybePreviewTopic = (item: Topic | undefined) => {
-    if (!item || String(item.id) !== String(topic?.id) || !item.unreadCount) return item
-    changed = true
-    return { ...item, unreadCount: 0 }
-  }
-
-  let next: AppState
-  switch (state.screen) {
-    case 'sidebar':
-      if (state.focus === 'topics') {
-        next = {
-          ...state,
-          chats: state.chats.map(updateChat),
-          chat: updateChat(state.chat),
-          topics: state.topics.map(updateTopic),
-          previewTopic: maybePreviewTopic(state.previewTopic),
-        }
-        break
-      }
-      if (state.focus === 'messages') {
-        next = {
-          ...state,
-          chats: state.chats.map(updateChat),
-          chat: updateChat(state.chat),
-          topic: maybePreviewTopic(state.topic),
-          topics: state.topics?.map(updateTopic),
-          back: updateBack(state.back),
-        }
-        break
-      }
-      next = { ...state, chats: state.chats.map(updateChat) }
-      break
-    case 'asleep':
-      next = { ...state, chats: state.chats.map(updateChat) }
-      break
-    case 'newMessage':
-      next = { ...state, chats: state.chats.map(updateChat), chat: updateChat(state.chat), topic: maybePreviewTopic(state.topic) }
-      break
-    case 'sidebarRecording':
-    case 'sidebarTranscribing':
-    case 'sidebarConfirm':
-    case 'sidebarSending':
-    case 'sidebarSent':
-      next = {
-        ...state,
-        chats: state.chats.map(updateChat),
-        chat: updateChat(state.chat),
-        topic: maybePreviewTopic(state.topic),
-        back: updateBack(state.back),
-      }
-      break
-    default:
-      return state
-  }
-  return changed ? next : state
-}
-
-function hasUnreadForThread(state: AppState, chat: Chat, topic: Topic | undefined) {
-  if (topic) return unreadForTopic(state, topic) > 0
-  return unreadForChat(state, chat) > 0
-}
-
-function unreadForChat(state: AppState, chat: Chat) {
-  const values: number[] = []
-  const collect = (item: Chat | undefined) => {
-    if (item && String(item.id) === String(chat.id)) values.push(Number(item.unreadCount ?? 0) || 0)
-  }
-  switch (state.screen) {
-    case 'sidebar':
-      state.chats.forEach(collect)
-      if (state.focus === 'topics' || state.focus === 'messages') collect(state.chat)
-      break
-    case 'asleep':
-      state.chats.forEach(collect)
-      break
-    case 'newMessage':
-      state.chats.forEach(collect)
-      collect(state.chat)
-      break
-    case 'sidebarRecording':
-    case 'sidebarTranscribing':
-    case 'sidebarConfirm':
-    case 'sidebarSending':
-    case 'sidebarSent':
-      state.chats.forEach(collect)
-      collect(state.chat)
-      break
-    default:
-      break
-  }
-  return Math.max(0, ...values)
-}
-
-function unreadForTopic(state: AppState, topic: Topic) {
-  const values: number[] = []
-  const collect = (item: Topic | undefined) => {
-    if (item && String(item.id) === String(topic.id)) values.push(Number(item.unreadCount ?? 0) || 0)
-  }
-  if (state.screen === 'sidebar' && state.focus === 'topics') {
-    state.topics.forEach(collect)
-    collect(state.previewTopic)
-  }
-  if (state.screen === 'sidebar' && state.focus === 'messages') {
-    state.topics?.forEach(collect)
-    collect(state.topic)
-  }
-  if (
-    state.screen === 'newMessage' ||
-    state.screen === 'sidebarRecording' ||
-    state.screen === 'sidebarTranscribing' ||
-    state.screen === 'sidebarConfirm' ||
-    state.screen === 'sidebarSending' ||
-    state.screen === 'sidebarSent'
-  ) {
-    collect(state.topic)
-  }
-  return Math.max(0, ...values)
-}
-
-function remainingUnreadForOtherTopics(state: AppState, topic: Topic) {
-  const topics = state.screen === 'sidebar' && (state.focus === 'topics' || state.focus === 'messages')
-    ? state.topics
-    : undefined
-  if (!topics) return undefined
-  return topics
-    .filter((item) => String(item.id) !== String(topic.id))
-    .reduce((total, item) => total + Math.max(0, Number(item.unreadCount ?? 0) || 0), 0)
 }
 
 function hasRecordableAudio(chunks: Uint8Array[]) {

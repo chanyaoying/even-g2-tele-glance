@@ -36,7 +36,6 @@ describe('locale modules', () => {
     const required = [
       'footerSwipeChats', 'footerTapToOpenTopic', 'footerSwipeScroll',
       'footerClickStop', 'footerSwipeSelect', 'footerDoubleClickDismiss',
-      'footerLoadingMessages',
     ]
     for (const key of required) {
       expect($[key]).toBeDefined()
@@ -60,7 +59,7 @@ describe('locale modules', () => {
       'phoneAppTitle', 'phoneScreenOff', 'phoneRecording', 'phoneTranscribing',
       'phoneConfirmOnGlasses', 'phoneSendingReply', 'phoneReplySent',
       'phoneNoMessages', 'phoneOpenChatToSend', 'phoneSendFailed',
-      'phoneChatsHeading', 'phoneSettingsHeading',
+      'phoneChatsHeading',
     ]
     for (const key of required) {
       expect($[key]).toBeDefined()
@@ -99,17 +98,15 @@ describe('locale modules', () => {
  */
 const SAME_AS_EN_EVERYWHERE = new Set([
   'titleTelegram', 'settingsTelegramSection', 'phoneAppTitle', 'settingsTelegramApiId', 'settingsTelegramApiHash',
-  // Shared testing backend wording: due to be rewritten or removed with the default-backend change, translate then.
-  'settingsSharedBackendSecretPlaceholder', 'settingsSharedBackendWarning',
 ])
 const SAME_AS_EN_BY_LOCALE: Record<string, string[]> = {
   es: ['titleChats', 'phoneChatsHeading', 'settingsBackendSection', 'titleError', 'phoneErrorHeading', 'phoneSticker'],
-  fr: ['titleChats', 'phoneChatsHeading', 'settingsBackendSection', 'settingsSessionLabel', 'phoneSticker', 'phonePhoto'],
-  de: ['titleChats', 'phoneChatsHeading', 'settingsBackendSection', 'settingsStatusLabel'],
-  it: ['settingsBackendSection', 'settingsBuildSection', 'phoneSticker'],
+  fr: ['titleChats', 'phoneChatsHeading', 'settingsBackendSection', 'settingsSessionLabel', 'phoneSticker', 'phonePhoto', 'dateDayLabel'],
+  de: ['titleChats', 'phoneChatsHeading', 'settingsBackendSection', 'settingsStatusLabel', 'statusOffline'],
+  it: ['settingsBackendSection', 'settingsBuildSection', 'phoneSticker', 'dateDayLabel'],
   pt: ['titleChats', 'phoneChatsHeading', 'settingsBackendSection', 'settingsStatusLabel'],
-  nl: ['titleChats', 'phoneChatsHeading', 'settingsBackendSection', 'settingsStatusLabel', 'settingsBuildSection', 'phoneSticker', 'settingsReset'],
-  sv: ['settingsBackendSection', 'settingsStatusLabel', 'settingsSessionLabel'],
+  nl: ['titleChats', 'phoneChatsHeading', 'settingsBackendSection', 'settingsStatusLabel', 'settingsBuildSection', 'phoneSticker', 'settingsReset', 'statusOffline', 'dateDayLabel'],
+  sv: ['settingsBackendSection', 'settingsStatusLabel', 'settingsSessionLabel', 'dateDayLabel'],
   pl: ['settingsBackendSection', 'settingsStatusLabel'],
   cs: ['settingsBackendSection', 'settingsStatusLabel'],
   ro: ['settingsBackendSection', 'settingsStatusLabel', 'settingsBuildSection'],

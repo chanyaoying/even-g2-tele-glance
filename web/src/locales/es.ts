@@ -33,7 +33,6 @@ const es: LocaleStrings = {
   footerClickStop: 'Soltar parar | Doble toque cancelar',
   footerSwipeSelect: 'Deslizar seleccionar | Tocar confirmar',
   footerDoubleClickDismiss: 'Doble toque para cerrar',
-  footerLoadingMessages: 'Cargando mensajes...',
   typingSuffix: 'escribiendo\u2026',
 
   // ── Glasses display: content / labels ──
@@ -87,19 +86,6 @@ const es: LocaleStrings = {
   phoneBackSleep: 'Atrás / Dormir',
 
   // ── Phone UI: SettingsScreen ──
-  phoneSettingsHeading: 'Ajustes',
-  phoneAlreadyConnected: 'Ya conectado',
-  phoneNotConnected: 'No conectado',
-  phoneConfigured: 'Configurado',
-  phoneRequired: 'Requerido',
-  phoneStoredOnPhone: 'Almacenado solo en este teléfono',
-  phoneBackendSessionActive: 'Sesión del backend activa',
-  phoneNotLoggedIn: 'No has iniciado sesión',
-  phoneSaveSettings: 'Guardar Ajustes',
-  phoneSaved: 'Guardado',
-  phoneReset: 'Restablecer',
-  phoneDisconnectTelegram: 'Desconectar Telegram',
-  phoneDisconnecting: 'Desconectando...',
 
   // ── Phone UI: App shell ──
   phoneAppTitle: 'TeleGlance',
@@ -107,8 +93,6 @@ const es: LocaleStrings = {
   phoneBack: 'Atrás',
   phoneBackToChat: 'Volver al chat',
   phoneOpenSettings: 'Abrir ajustes',
-  phoneSetupRequired:
-    'Se requiere el secreto compartido del backend, el ID de API de Telegram y el hash de API de Telegram. Complétalos en Ajustes.',
 
   // ── Error / auth messages ──
   errorBackendUnreachable:
@@ -116,8 +100,7 @@ const es: LocaleStrings = {
   errorBackendTimeout: 'La solicitud al backend expiró tras {seconds} s. El servidor podría estar inaccesible o bloqueado. Inténtalo de nuevo o revisa el backend.',
   errorEncryptedAuthMissing:
     'Faltan credenciales de autenticación. Complétalas en Ajustes.',
-  errorSharedSecretRequired:
-    'Se requiere el secreto compartido del backend.',
+  errorSharedSecretRequired: 'Se requiere el secreto compartido del backend para descifrar los datos del backend.',
   errorEncryptedMalformed: 'La respuesta cifrada del backend está mal formada.',
   errorWebCryptoRequired:
     'La autenticación cifrada requiere WebCrypto.',
@@ -128,10 +111,9 @@ const es: LocaleStrings = {
   errorUnexpected: 'Ocurrió un error inesperado.',
 
   // ── Auth screen messages ──
-  authNeedsSetup:
-    'Abre Ajustes y completa la URL del backend, el Secreto Compartido, el ID de API de Telegram y el Hash de API de Telegram.',
-  authSignedOut: 'Toca para iniciar sesión con tu número de teléfono.',
-  authPhonePending: 'Introduce el código de verificación enviado a tu teléfono.',
+  authNeedsSetup: 'Sigue las instrucciones de la página de Ajustes para conectar Telegram y el servidor backend.',
+  authSignedOut: 'Introduce tu número de teléfono en la interfaz del teléfono para recibir un código de inicio de sesión de Telegram.',
+  authPhonePending: 'Código de verificación enviado a {phone}. Introdúcelo en el teléfono.',
 
   // ── Settings UI ──
   settingsTelegramSection: 'Telegram',
@@ -177,8 +159,6 @@ const es: LocaleStrings = {
   settingsBackendSecretHint:
     'Requerido. El mismo valor que TELEGLANCE_SHARED_SECRET en el .env del backend.',
   settingsBackendSecretPlaceholder: 'Requerido',
-  settingsSharedBackendSecretPlaceholder: 'Not used for testing backend',
-  settingsSharedBackendWarning: 'Use https://teleglance.akira-os.net only for testing. No user secret is needed for this backend. The testing URL may be unstable; switch to your own backend before relying on it.',
   settingsSttUrl: 'URL del Servidor STT (Opcional)',
   settingsSttHint:
     'Déjalo en blanco para usar la URL del backend.',
@@ -187,8 +167,7 @@ const es: LocaleStrings = {
     'Desactivado para uso normal.',
   settingsRecMinDuration: 'Duración mínima de grabación (ms)',
   settingsAdvancedPolling: 'Actualización avanzada',
-  settingsAdvancedPollingHint:
-    'Temporizadores de respaldo para eventos perdidos.',
+  settingsAdvancedPollingHint: 'Las actualizaciones de Telegram suelen llegar por el flujo de eventos del backend. Estos intervalos solo se aplican como respaldo mientras el flujo en directo está caído; mientras está conectado, la app se actualiza aproximadamente una vez por minuto como red de seguridad.',
   settingsChatPoll: 'Actualización de chat (ms)',
   settingsMessagePoll: 'Actualización de mensajes (ms)',
   settingsLanguageLabel: 'Idioma',
@@ -226,5 +205,50 @@ const es: LocaleStrings = {
   statusTranscriptionFailed: 'Transcripción fallida',
   statusCouldNotOpenFolder: 'No se pudo abrir la carpeta',
   footerFetchingChats: 'Obteniendo chats...',
+  // ── New strings ──
+  statusOffline: 'Desconectado',
+  statusAuthRejected: 'El backend rechazó la autenticación',
+  statusNoConnection: 'Sin conexión',
+  statusServerSlow: 'Servidor lento',
+  statusServerBusy: 'Servidor ocupado',
+  statusTelegramBusy: 'Telegram ocupado',
+  statusSignedOut: 'Sesión cerrada',
+  statusFloodWait: 'Telegram pide esperar {seconds} s',
+  statusLoadingTopics: 'Cargando temas de {name}...',
+  statusLoadingThread: 'Cargando {name}...',
+  bodySending: 'Enviando...',
+  pollMoreOptions: '+{n} más',
+  dayToday: 'Hoy',
+  dayYesterday: 'Ayer',
+  dateWeekdays: 'dom lun mar mié jue vie sáb',
+  dateMonths: 'ene feb mar abr may jun jul ago sep oct nov dic',
+  dateDayLabel: '{weekday} {day} de {month}',
+  phoneSendSkipped: 'Ya se está enviando una respuesta. Espera a que termine e inténtalo de nuevo.',
+  phoneOpenChatFirst: 'Abre un chat o tema antes de enviar.',
+  phoneMessagesAria: 'Mensajes',
+  setupRequired: 'Se requieren la URL del backend, el secreto compartido del backend, el API ID de Telegram y el API hash de Telegram. Complétalos primero en Ajustes siguiendo las instrucciones de configuración.',
+  setupBackendUrlMissing: 'No hay ningún backend configurado. TeleGlance necesita tu propio servidor backend: introduce su URL y su secreto compartido en Ajustes.',
+  errorBackendBusy: 'El backend está ocupado. Reintentando en un momento.',
+  errorBackendUrlRequired: 'Se requiere la URL del backend. Configúrala en los Ajustes de TeleGlance.',
+  errorSharedSecretMissing: 'Se requiere el secreto compartido del backend. Configúralo en los Ajustes de TeleGlance y en el .env del backend como TELEGLANCE_SHARED_SECRET.',
+  errorBackendAuthDetail: 'El backend no pudo verificar este teléfono. Comprueba que el secreto compartido del backend en Ajustes sea exactamente el TELEGLANCE_SHARED_SECRET del servidor y que la hora del teléfono se ajuste automáticamente.',
+  errorBackendAuthRejected: 'El backend rechazó la autenticación de este teléfono. Comprueba que el secreto compartido del backend sea exactamente el TELEGLANCE_SHARED_SECRET del servidor y que la hora del teléfono se ajuste automáticamente. Tu sesión de Telegram se conserva.',
+  errorRequestFailed: 'La solicitud falló con {status}',
+  errorRequestTooLarge: 'La solicitud era demasiado grande para el backend.',
+  authSessionExpired: 'Tu sesión de Telegram terminó (se cerró en otro lugar o fue revocada). Introduce tu número de teléfono en la interfaz del teléfono para volver a iniciar sesión.',
+  authChecking: 'Comprobando la sesión de Telegram...',
+  authNotConnected: 'Telegram no está conectado.',
+  authConnectViaSettings: 'Conéctate siguiendo las instrucciones de Ajustes en el teléfono.',
+  authAddCredentialsFirst: 'Primero añade el API ID/hash de Telegram en Ajustes en el teléfono.',
+  authCodeRejected: 'El código no fue aceptado. Revisa el código de Telegram e inténtalo de nuevo.',
+  authCodeExpired: 'Envía un nuevo código de inicio de sesión y usa el código más reciente de Telegram.',
+  settingsConfirmDisconnect: 'Toca de nuevo para desconectar Telegram',
+  settingsLogoutFailed: 'Error al cerrar sesión',
+  settingsSttPlaceholder: 'Usar la URL del backend',
+  settingsFontWidth: 'Corrección del ancho de fuente de las gafas (%)',
+  settingsFontWidthHint: 'Las líneas de texto se rellenan hasta el borde de la pantalla con la fuente de las gafas medida en el simulador. Si las líneas se parten dos veces en las gafas, súbelo un poco (p. ej. 110); si no llegan al borde derecho, bájalo. Predeterminado: 100.',
+  settingsSaving: 'Guardando...',
+  settingsSaveFailed: 'No se pudieron guardar los ajustes',
+  settingsConfirmReset: 'Toca de nuevo para restablecer todos los ajustes',
 }
 export default es

@@ -30,7 +30,7 @@ The script performs up to 3 steps:
 
 Runs `npm run build --prefix web` followed by `npx @evenrealities/evenhub-cli@0.2.0 pack .app-build/app.json web/dist -o tele-glance-<version>.ehpk`, where `.app-build/app.json` is generated from `app.json` plus the optional gitignored `app.local.json` by `scripts/effective-manifest.mjs`.
 
-The default upload package keeps the shared testing backend (`https://teleglance.akira-os.net`) and the unreplaced placeholder from `app.json`. Run `npm run configure:tailscale --prefix web` only for deliberate local device-test packages that should bake in a custom reachable backend origin; it writes `app.local.json` (gitignored) and leaves `app.json` untouched. Delete `app.local.json` to package without it.
+The default upload package keeps only the unreplaced `http://<BACKEND_URL>:8787` placeholder from `app.json`: there is no shared or default backend, so users must enter their own Backend URL (and shared secret) in Settings. Run `npm run configure:tailscale --prefix web` only for deliberate local device-test packages that should bake in a custom reachable backend origin; it writes `app.local.json` (gitignored) and leaves `app.json` untouched. Delete `app.local.json` to package without it.
 
 The `.ehpk` filename always matches `app.json`'s `version`. Bump `app.json` version before building.
 

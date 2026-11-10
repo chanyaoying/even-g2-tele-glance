@@ -178,7 +178,7 @@ Requirements:
 - Even Hub bridge listeners are guarded by an active-listener token and disposed from `AppProvider` cleanup. This prevents React dev StrictMode or simulator SDK unsubscribe gaps from leaving stale listeners that consume the first input or duplicate subsequent inputs.
 - Glasses input now opens a short interaction quiet window. During that window, polling refreshes, update-stream processing, topic preview fetches, older-history prefetch, and read acknowledgements are deferred; audio start/stop and visible UI state changes do not await native bridge calls.
 - Startup renders the chat list before speculative work. After a 1.2 second idle delay it warms only chats 2-3, and forum prefetch is limited to the first topic, reducing startup network/decryption contention.
-- Hardware gesture delivery is bounded to one latest gesture per 20 ms SDK burst. Inputs released together after native bridge stalls no longer replay across several later screens.
+- Hardware gesture delivery is bounded to one gesture per 20 ms window. Swipes and selection are latest-wins, so inputs released together after native bridge stalls no longer replay across several later screens; presses are never coalesced or dropped, and a pending swipe is dispatched before a press that follows it.
 - Open chat/topic threads use the full glasses width; double click rebuilds the prior chat/topic split view.
 - Transcribing, confirmation, and sending use standalone full-window screens. Confirmation shows the transcript with selectable `Send` and `Cancel` actions instead of overlaying controls on message content.
 - Partial sidebar rendering skips unchanged containers, reducing ordinary selection updates from five native upgrades to the sidebar marker and changed preview content only.
@@ -194,17 +194,15 @@ Requirements:
 - Glasses text sanitization now strips unsupported emoji ranges after replacing known status-circle emoji, avoiding LVGL unsupported-glyph warnings observed in simulator runs.
 - Automated simulator fixture validation is implemented with `npm run test:simulator --prefix web`. It launches fixture-mode Vite plus `@evenrealities/evenhub-simulator@0.9.5`, drives chat indexes 1-3 and forum topics 1-3, validates deterministic message content, compares `web/test/simulator-goldens`, and writes report/video artifacts under `artifacts/simulator-flow/<timestamp>/`.
 
-- Settings UI now shows a prominent red-bordered box with red asterisk when the
-  `https://teleglance.akira-os.net` shared testing backend is active, warning that
-  no user secret is needed and the testing URL may be unstable. The banner sits
-  below the shared-secret input and is hidden for custom backends.
+- There is no default or shared backend: the former testing backend
+  (`teleglance.akira-os.net`) and its built-in secret were removed in the 2026-11-10
+  audit. An empty Backend URL leads to the setup flow; every user configures their
+  own backend URL and `TELEGLANCE_SHARED_SECRET`.
 - `scripts/start-backend.sh` accepts `--local` to bind to `127.0.0.1` instead of
   `0.0.0.0`.
 
-- The shared testing backend at `https://teleglance.akira-os.net` uses an
-  internal `test-secret-token` for wire encryption. The user's
-  `backendSharedSecret` is ignored while that URL is set; the deployed
-  backend is configured with `TELEGLANCE_SHARED_SECRET=test-secret-token`.
+- The backend shared secret from Settings is always the one used for wire
+  encryption (there is no per-host substitute secret any more).
 
 - Popups: the sidebar page always carries a `popup` text container (id 10, stacked above everything via `zOrderIndex`, a 1x1 blank when unused). Z-order is all-or-nothing and unique per page, so every sidebar container has an index; text/list pages have none. The reply confirmation (transcript + Send/Cancel) is the first popup, drawn over the thread. Whether the container is opaque on real glasses is unverified.
 - Recording auto-stops and transcribes when the byte cap is reached; the recording screen title carries `REC`. Chat/topic labels lead with the unread count (`(3) Title`). The message footer leads with `N newer` while scrolled back.
